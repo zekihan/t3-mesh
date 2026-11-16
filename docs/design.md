@@ -132,8 +132,11 @@ listed and not disabled, and the CSR key must differ from the current one.
 ### Enrollment
 
 1. The operator runs `kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub
-   enroll-token agent-z-mac`. The hub prints a single-use token bound to that
-   identity, valid for 15 minutes, held hashed in memory.
+   enroll-token agent-z-mac`. This CLI mode does not hold tokens itself: it asks the
+   running hub over an admin unix socket inside the pod (`/run/t3-mesh/admin.sock`,
+   mode `0600`, not exposed on any port). The hub prints a single-use token bound to
+   that identity, valid for 15 minutes, held hashed in the server's memory. A hub
+   restart invalidates outstanding tokens.
 2. On the machine: `t3-mesh-agent enroll --token <token>`. The agent generates an
    ECDSA P-256 key locally in a `0600` file, connects to
    `mesh.noqer.com` without a client certificate and sends the CSR with the token.
@@ -141,15 +144,22 @@ listed and not disabled, and the CSR key must differ from the current one.
    the certificate and the CA chain. The agent stores them and reconnects with the
    new identity.
 
-Only the `Enroll` call is accepted on a connection without a client certificate.
-Enrollment is rate-limited per source address, and every attempt is logged.
+Only the `Enroll` call is accepted on a connection without a client certificate;
+any other message or data stream on such a connection closes it. Enrollment is
+rate-limited per source address, and every attempt is logged.
+
+Enrollment is also the recovery path for an agent whose certificate expired, for
+example after more than 30 days offline: the hub refuses the expired certificate, so
+the operator issues a new token.
 
 ### Renewal
 
 When less than 30 days remain (matching `renewBefore: 720h`), the agent generates a
-new key and sends a CSR over its tunnel. It switches to the new certificate after
-the hub returns it and the next tunnel or direct handshake succeeds. It then deletes
-the old key. A renewal that fails is retried hourly. Gatus alerts at 14 days left.
+new key and sends a CSR over its tunnel. Before returning `Renewed`, the hub pushes
+an `Update` to every connected peer that lists the new fingerprint as current and the
+old one as previous. The agent then switches to the new certificate once the next
+tunnel handshake succeeds, and deletes the old key. A renewal that fails is retried
+hourly. An alert fires at 14 days left.
 
 ### Revocation
 
@@ -171,11 +181,17 @@ One Deployment in namespace `t3-mesh`, owned image pinned as `edge@sha256:`.
 | Port | Reached through | Purpose |
 |---|---|---|
 | 8443 | Traefik `IngressRouteTCP`, `HostSNI(mesh.noqer.com)`, TLS passthrough, PROXY v2 | Agent tunnels and enrollment. The hub terminates TLS with its Let's Encrypt certificate and verifies agent certificates against the clients CA. |
-| 8080 | Traefik `IngressRoute` per viewer host, with the `mesh-<svc>-<machine>` policy middleware | Viewer HTTP and WebSocket traffic. NetworkPolicy admits only Traefik. |
+| 8080 | Traefik `IngressRoute` per viewer host, with the `mesh-<svc>-<machine>` policy middleware | Viewer HTTP and WebSocket traffic. |
 | 9090 | in-cluster scrape | `/metrics`, `/healthz`, `/readyz` |
+
+NetworkPolicy admits only Traefik on 8443 and 8080: the hub trusts the PROXY v2
+source on 8443 (home detection, rate limits) and the viewer header on 8080, so
+nothing else may reach them.
 
 The hub's `mesh.noqer.com` certificate is a cert-manager Let's Encrypt certificate
 like every other host. Agents verify it with system roots and the exact hostname.
+The hub reloads the mounted certificate and clients CA bundle when the files change,
+so renewals need no restart.
 
 ### Configuration
 
@@ -208,12 +224,23 @@ The list of machines and services is fixed. An agent announces what it serves; t
 hub accepts only listed services and reports any difference as a metric and a log
 event. The same list generates DNS records, certificates and Traefik routes.
 
+The hub watches its mounted ConfigMap and applies changes live (rules, revocations,
+desired version). The pod template carries no ConfigMap checksum, so a release bump
+does not restart the hub or drop tunnels.
+
+Traefik middlewares are rendered from the same policy entries with kind `agent`
+filtered out, so an agent certificate is never accepted on a viewer host. Agent
+identities in an entry only grant machine-to-machine access.
+
 ### Routing
 
-- **Viewer request:** the hub maps `Host` to `(machine, svc)`, opens a stream on
-  that machine's newest tunnel session, and reverse-proxies the request over it,
+- **Viewer request:** Traefik's middleware chain sets `X-T3-Mesh-Viewer` to the
+  verified client identity, overwriting any value the client sent; the hub reads it
+  and removes it before forwarding. The hub maps `Host` to `(machine, svc)`, opens a
+  stream on that machine's newest tunnel session, and reverse-proxies the request over it,
   preserving `Host`, `Origin`, headers, paths, methods and WebSocket upgrades. No
-  tunnel means `502` with a short page that names the machine and its last-seen time.
+  tunnel means `502` with a short page that names the machine and its last-seen time
+  (since the last hub restart; the hub keeps no persistent state).
 - **Agent-to-agent stream:** the hub checks the rule for the source agent, opens a
   stream on the target's tunnel and splices bytes. The hub does not parse the
   contents.
@@ -273,32 +300,47 @@ direct:
 Link ports are explicit because T3 stores the URL; a port must never move. On each
 machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`.
 
+Link ports are unauthenticated loopback listeners, so any local process on the
+machine can use them; that is accepted on single-user machines. To block DNS
+rebinding from browsers, a link port rejects HTTP requests whose `Host` is not
+`127.0.0.1:<port>` or `localhost:<port>`, and WebSocket upgrades whose `Origin` is
+not empty or one of those.
+
 ### Tunnel management
 
 - One TLS 1.3 connection to `mesh.noqer.com:443`, ALPN `t3-mesh/1`, client
   certificate = agent identity, multiplexed with yamux.
+- **Session order:** the hub orders an agent's sessions by its own accept time and
+  routes new streams to the newest live one. Agents do not supply a generation, so
+  an agent restart cannot confuse the order.
 - **Network changes:** netlink route/address events on Linux, the system's
   network-change notification on macOS, and a 30 s DNS re-resolve as backup.
-  On a change, or when `mesh.noqer.com` resolves to a different address than the
-  current tunnel's peer, the agent opens a new session first. The hub routes new
-  streams to the newest session (`generation` in `Hello`). The old session drains
-  its open streams for up to 10 minutes, then closes.
-- **Liveness:** ping every 10 s on the control stream. Three missed replies mean
-  the agent reconnects with exponential backoff and random jitter, capped at 30 s.
+  On a change, or when the current tunnel's peer address is no longer in the set
+  `mesh.noqer.com` resolves to (order and rotation are ignored), the agent opens a
+  new session first. The old session drains its open streams for up to 10 minutes,
+  then closes.
+- **Liveness:** both sides ping every 10 s on the control stream. Three missed
+  replies close the session on that side: the agent reconnects with exponential
+  backoff and random jitter, capped at 30 s; the hub stops routing to it.
 - **Sleep:** on wake, the network-change path runs immediately.
 
 ### Direct bypass
 
 - The hub pushes a table of the machines this agent may reach: machine, services,
-  LAN addresses, direct port, certificate fingerprint, home status. It also pushes
+  LAN addresses, direct port, current and previous certificate fingerprints, home
+  status. It also pushes
   the rules and the revocation list. The agent caches all of it on disk.
 - A connection on a link port goes direct when direct is enabled on both sides and
   the hub reports both machines home. The agent dials the peer's direct listener
-  with mTLS (ALPN `t3-mesh-direct/1`), checks the peer's URI SAN and fingerprint
-  against the table, and sends a header naming the service. The receiving agent
-  checks the caller against its cached rules and revocation list.
-- A direct dial that fails within 1 s falls back to the tunnel. The failure is
-  remembered for 60 s for that peer.
+  with mTLS (ALPN `t3-mesh-direct/1`), checks the peer's URI SAN and that its
+  fingerprint is the current or previous one in the table, and sends a header naming
+  the service. The receiving agent checks the caller the same way, plus its cached
+  rules and revocation list.
+- **Residual case:** a peer that missed a renewal `Update` (asleep) and then loses
+  the hub knows neither fingerprint, so direct connections to the renewed machine
+  fail until the hub is back. Accepted: renewal happens once a year.
+- Direct dials use a 1 s connect timeout; a dial that fails or times out falls back
+  to the tunnel. The failure is remembered for 60 s for that peer.
 - **Hub unreachable:** the agent cannot confirm home, so it tries the cached LAN
   addresses anyway. Identity checks make that safe on any network, and the dial
   fails fast when away. Cached rules allow direct traffic for at most 1 week after
@@ -325,14 +367,21 @@ machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`.
   verifies a minisign signature over a manifest of version, platform and SHA-256.
   The agent embeds two trusted public keys (current and next). It refuses a version
   lower than the one it runs unless the hub explicitly marks a rollback.
+- **Downloads:** `zekihan/t3-mesh` is a public repository, so agents fetch release
+  assets anonymously; the signature, not the source, provides integrity.
 - **Install layout:** `versions/<version>/t3-mesh-agent`, `current` and
   `known-good` symlinks. The service always starts a small launcher mode of the
   `known-good` binary, which runs `current`.
 - **Rollback:** after switching `current`, the new binary must complete `HelloAck`
-  within 2 minutes. If it does not, or it crashes, the launcher points `current`
-  back at `known-good`, restarts it, and reports the failed version. The hub stops
-  advertising that version to that agent. A version becomes `known-good` only after
-  it has been healthy.
+  within 2 minutes of awake time during which the network is up and
+  `mesh.noqer.com` answers TCP. Sleep and offline time do not count, so closing
+  z-mac's lid mid-update is not a failure. If the binary crashes, or the hub is
+  reachable but no `HelloAck` arrives in time, the launcher points `current` back at
+  `known-good`, restarts it, and reports the failed version. A version becomes
+  `known-good` only after it has been healthy.
+- **Failed versions:** the agent records failed versions on disk and never installs
+  them again, whatever the hub advertises. The hub keeps no record of its own (it
+  has no persistent state), so a hub restart cannot cause a retry loop.
 - **Signing key:** minisign secret key in Doppler, synced to the `t3-mesh` repo's
   Actions secret by `terraform/doppler`. Rotation: ship the next public key as the
   second trusted key, then sign with it.
@@ -344,13 +393,13 @@ length-prefixed JSON with a `type` field. The protocol version is in the ALPN.
 
 | Message | Direction | Content |
 |---|---|---|
-| `Hello` | agent → hub | agent version, generation, announced services, LAN addresses, direct port, cert fingerprint |
+| `Hello` | agent → hub | agent version, announced services, LAN addresses, direct port, cert fingerprint |
 | `HelloAck` | hub → agent | home status, desired version and manifest URL, rules, peer table, revocation list |
 | `Update` | hub → agent | new rules, peer table or revocation list after a change |
 | `Ping` / `Pong` | both | liveness, round-trip time |
 | `Renew` / `Renewed` | agent → hub / hub → agent | CSR / certificate and chain |
 | `Status` | agent → hub | recent warnings, direct-session counts, failed update versions |
-| `Enroll` / `Enrolled` | agent → hub | token + CSR / certificate and chain (unauthenticated connection only) |
+| `Enroll` / `Enrolled` | agent → hub / hub → agent | token + CSR / certificate and chain (unauthenticated connection only) |
 
 Data streams start with one header line of JSON, then raw bytes:
 
@@ -364,7 +413,7 @@ Data streams start with one header line of JSON, then raw bytes:
 |---|---|
 | `platform/cert-manager` | approver-policy, built-in approver disabled, one policy per issuer, hub policy, test that every issuer has a policy |
 | `libs/mtls-policy` | kind `agent` with three identities; `mesh-t3-<machine>` entries listing viewers and permitted agents |
-| `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the policy middleware, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy, ConfigMap, Gatus endpoints |
+| `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the policy middleware (agents excluded) and viewer header, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy for 8443 and 8080, ConfigMap, vmalert rules, Gatus canaries |
 | `apps/devbox` | removed at the M2 cutover |
 | `terraform/doppler` | minisign key synced to the `t3-mesh` repo |
 | `terraform/technitium` | LAN records for `mesh.noqer.com` and each viewer host, pointing at the Traefik VIP |
@@ -373,14 +422,17 @@ Data streams start with one header line of JSON, then raw bytes:
 ## Observability
 
 - Agents send status and warnings over the tunnel. The hub exports per-agent
-  metrics: connected, path (LAN or OCI), session generation, direct sessions,
+  metrics: connected, path (LAN or OCI), open sessions, direct sessions,
   stream counts, version, certificate expiry, last seen.
 - The hub logs agent events (connect, disconnect, path change, renewal, update,
   rollback, rejected peer) to stdout, so they reach VictoriaLogs.
-- Gatus alerts on: an agent disconnected for more than 10 minutes (24 hours for
-  z-mac, which is often asleep), certificate expiry under
-  14 days, a failed self-update, and `canary-unauthorized` being accepted on
-  `mesh.noqer.com` or a viewer host.
+- vmalert rules on the hub metrics alert on: an agent disconnected for more than
+  10 minutes (24 hours for z-mac, which is often asleep), certificate expiry under
+  14 days, and a failed self-update.
+- Gatus probes alert when `canary-unauthorized` is accepted on a viewer host, or
+  when a connection to `mesh.noqer.com` without a certificate, or with
+  `canary-unauthorized`, gets anything other than a closed connection for a
+  non-`Enroll` message.
 
 ## Security
 
@@ -388,10 +440,13 @@ Data streams start with one header line of JSON, then raw bytes:
 |---|---|
 | Unauthenticated access to a machine | T3 binds to loopback. The only routes in are the tunnel (hub-authenticated agent, Traefik-authorized viewer) and the direct listener (mTLS + cached rules). T3 pairing remains. |
 | Stolen phone or browser certificate | Reaches T3 login only; still needs T3 pairing. Cannot register as an agent. Revoke in `libs/mtls-policy`. |
+| Agent certificate used as a viewer | Traefik middlewares exclude kind `agent`. |
+| Local process or web page using a link port | Loopback only, `Host`/`Origin` checks against DNS rebinding, T3 pairing. Other local users are trusted (single-user machines). |
+| In-cluster spoofing of PROXY v2 or viewer header | NetworkPolicy admits only Traefik on 8443 and 8080. |
 | Stolen agent key | Revoke in `libs/mtls-policy`; the hub cuts the tunnel at once, peers refuse direct connections within the cache window. The key file is readable only by the service user. |
 | Compromised hub | Can mint only `agent-*` certificates (approver-policy). Can reach every agent's services, as any relay could. T3 pairing still applies. |
 | Spoofed home status | Decided by the hub from the tunnel's source address, not by the agent. A wrong guess during an outage only causes a failed, identity-checked dial. |
-| Malicious update | minisign signature with embedded keys, no downgrade, automatic rollback. |
+| Malicious update | minisign signature with embedded keys, no downgrade except a hub-marked rollback to a signed release, automatic rollback. |
 | Enrollment abuse | 15-minute single-use token bound to one identity, operator access via `kubectl exec`, rate limit, logging. |
 
 ## Rollout
@@ -402,7 +457,7 @@ Data streams start with one header line of JSON, then raw bytes:
 | M1 | hub, agent, tunnel, token enrollment; z-mac only | the phone opens `t3.z-mac.mesh.noqer.com` from mobile data, home and away |
 | M2 | devbox and z-arch on the mesh, link ports | every machine links to every other through loopback ports; then the hard switch below |
 | M3 | direct bypass and outage mode | home links stay up with the hub scaled to zero |
-| M4 | CSR renewal, self-update with rollback, metrics and Gatus | a forced renewal and a deliberately broken release both recover on z-mac |
+| M4 | CSR renewal, self-update with rollback, integration test, metrics, vmalert rules and Gatus canaries | a forced renewal and a deliberately broken release both recover on z-mac |
 
 **devbox cutover (end of M2), one change:** remove `apps/devbox` and the
 `devbox.noqer.com` record, add `t3.devbox.mesh.noqer.com`, bind devbox's T3 to
@@ -414,14 +469,18 @@ After each machine moves, turn T3 Connect off on it (`t3 up`) and bind T3 to
 
 ## Testing
 
-Unit tests only, in the `t3-mesh` repo: configuration parsing, rule evaluation,
-revocation, path selection, session generations, manifest verification and the
-launcher's rollback decision. The homelab side keeps its usual chart tests.
+Unit tests in the `t3-mesh` repo: configuration parsing, rule evaluation,
+revocation, path selection, session ordering, manifest verification, the link
+port's `Host`/`Origin` checks and the launcher's rollback decision.
 
-Accepted risk: tunnel switching, direct fallback and update rollback are first
-exercised on real machines. A broken release can strand z-mac while it is away;
-automatic rollback is the only safety net. Adding one in-process test of a hub with
-two agents and a failed update would cover that case.
+One in-process integration test runs a hub and two agents over loopback with a test
+CA. It covers tunnel switching to a new session, direct connection and fallback to
+the tunnel, fingerprint acceptance across a renewal, and a deliberately broken
+update that the launcher rolls back. A broken release can strand z-mac while it is
+away, so this test runs in CI before every release.
+
+The homelab side keeps its usual chart tests, plus one asserting that no rendered
+Traefik middleware lists a kind `agent` identity.
 
 ## Open items
 
@@ -431,7 +490,8 @@ two agents and a failed update would cover that case.
 - **Raw TCP services for viewers** (e.g. SSH). Traefik's HTTP policy middleware
   does not apply to TCP routes, so authorization for these would move into the hub.
   Out of scope for v1.
-- **Repository creation.** `zekihan/t3-mesh` does not exist on GitHub yet.
+- **Repository creation.** `zekihan/t3-mesh` does not exist on GitHub yet; it will
+  be public.
 
 ## Decision log
 
@@ -443,10 +503,12 @@ two agents and a failed update would cover that case.
 | Availability | one replica, ready for two plus Redis |
 | Hostnames | `<svc>.<machine>.mesh.noqer.com`, agents dial `mesh.noqer.com` |
 | Transport | TLS + yamux, ALPN `t3-mesh/1` |
-| Viewer authorization | Traefik policy per host |
+| Viewer authorization | Traefik policy per host, agent identities excluded |
 | T3 pairing | kept |
 | Agent certificates | new `agent-*` identities with client and server usage |
 | Machine-to-machine rules | `libs/mtls-policy` |
+| Direct peer verification | clients CA, URI SAN, current or previous fingerprint |
+| Link port protection | loopback, `Host`/`Origin` checks |
 | Machine registration | fixed list in the hub chart |
 | Language | Go |
 | Renewal | CSR through the hub |
@@ -457,10 +519,11 @@ two agents and a failed update would cover that case.
 | Hub outage | direct to cached LAN addresses for up to 1 week |
 | Revocation | enforced by hub and agents |
 | Link ports | explicit in agent config |
-| Updates | hub-pinned self-update, minisign signature, auto-rollback after 2 minutes |
+| Updates | hub-pinned self-update from public GitHub releases, minisign signature, auto-rollback after 2 minutes of connected awake time, failed versions recorded by the agent |
 | Signing key | Doppler, two trusted keys for rotation |
 | Hub certificate | Let's Encrypt |
-| Observability | through the hub to VictoriaMetrics, VictoriaLogs and Gatus |
+| Observability | through the hub to VictoriaMetrics and VictoriaLogs; vmalert for metric alerts, Gatus for canaries |
+| Hub state | none persistent; tokens and last-seen lost on restart |
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
-| Testing | unit tests only |
+| Testing | unit tests plus one in-process hub + two agents test |
