@@ -113,17 +113,30 @@ cert-manager currently auto-approves every CertificateRequest. A hub allowed to
 create requests on the clients Issuer could otherwise mint any identity, including
 phone certificates. Therefore:
 
-1. Install cert-manager approver-policy and disable the built-in approver
-   (`--controllers=*,-certificaterequests-approver`).
+approver-policy approves a request when any one policy that selects it, and that the
+requester may `use`, allows it. A narrower policy never vetoes a broader one, so
+which account may `use` which policy is the whole control:
+
+1. Install cert-manager approver-policy. Disable the built-in approver by appending
+   `--controllers=*,-certificaterequests-approver` to the controller's existing
+   `extraArgs` (which already carry the DNS-01 resolver flags), and only after the
+   policies below are bound.
 2. One `CertificateRequestPolicy` per existing issuer that allows the cert-manager
-   controller exactly what it does today. A homelab chart test fails when an issuer
-   has no policy.
-3. One policy for the hub's ServiceAccount, on the clients Issuer only:
-   - URI SAN exactly matching `urn:noqer:mtls:clients:agent-*`, no other SANs,
-     no common name;
+   controller exactly what it does today. For the clients Issuer that includes the
+   common name `<profile>-<hostname>`, usages `digital signature` and `client auth`,
+   and the existing identity URIs; omitted fields deny, so nothing may be left out.
+   Only cert-manager's ServiceAccount may `use` these. A homelab chart test fails
+   when an issuer has no policy.
+3. One policy for the hub's ServiceAccount, selecting the clients Issuer by name,
+   kind and group:
+   - exactly one URI SAN, one of the configured agent URIs
+     (`urn:noqer:mtls:clients:agent-devbox`, `-z-arch`, `-z-mac`, rendered from the
+     machine list, no wildcard), enforced with a CEL size check;
+   - common name, DNS, IP and email fields omitted, so they are denied;
    - usages `client auth`, `server auth`, `digital signature`;
    - duration 8760h; ECDSA P-256 keys;
-   - bound to the requester with RBAC `use`, so no other account can use it.
+   - only the hub's ServiceAccount may `use` it, and the hub may `use` nothing else.
+     Neither binding goes to a group such as `system:authenticated`.
 
 The hub adds its own checks on top: the requested name must equal the requesting
 agent's own identity (or the enrollment token's identity), the identity must be
@@ -157,7 +170,10 @@ the operator issues a new token.
 
 The hub sends agents a versioned trust bundle (the clients CA certificates it
 accepts) in `HelloAck` and `Update`; agents cache it on disk and verify direct peers
-against every CA in it. Rolling the clients CA:
+against every CA in it. The bundle is its own ConfigMap in `platform/t3-mesh`
+(`clients-ca-bundle`, with a revision), separate from the single issuing generation
+`platform/mtls-pki` mounts, so it can hold two CAs at once; the hub verifies agent
+tunnels against the same bundle. Rolling the clients CA:
 
 1. Add the new CA to the bundle while the old one keeps issuing.
 2. Wait until hub metrics show every agent has acknowledged that bundle revision.
@@ -167,7 +183,7 @@ against every CA in it. Rolling the clients CA:
 
 An agent that misses step 2 (offline throughout) still reaches the hub, which trusts
 both CAs, and receives the new bundle on connect. One that misses everything until
-the old CA is gone re-enrolls.
+the old CA is gone must be re-enrolled by the operator with a new token.
 
 ### Renewal
 
@@ -184,7 +200,9 @@ version that did not survive.
 ### Revocation
 
 Disabled identities and blocked leaf fingerprints from `libs/mtls-policy` apply
-everywhere:
+everywhere. A fingerprint is lowercase hex SHA-256 of the leaf DER, as in
+`traefik-mtls-authz`. A block lasts until the entry is removed: like the plugin, the
+hub and agents ignore an entry's `expires` date, which is only a cleanup reminder.
 
 - The hub refuses a revoked agent on connect and closes its existing tunnel when
   the policy changes.
@@ -206,18 +224,23 @@ One Deployment in namespace `t3-mesh`, owned image pinned as `edge@sha256:`.
 
 | Port | Reached through | Purpose |
 |---|---|---|
-| 8443 | Traefik `IngressRouteTCP`, `HostSNI(mesh.noqer.com)`, TLS passthrough, PROXY v2 | Agent tunnels and enrollment. The hub terminates TLS with its Let's Encrypt certificate and verifies agent certificates against the clients CA. |
-| 8080 | Traefik `IngressRoute` per viewer host, with the `mesh-<svc>-<machine>` policy middleware | Viewer HTTP and WebSocket traffic. |
+| 8443 | Traefik `IngressRouteTCP`, `HostSNI(mesh.noqer.com)`, TLS passthrough, PROXY v2 | Agent tunnels and enrollment. The hub terminates TLS with its Let's Encrypt certificate and verifies agent certificates against the clients CA bundle. |
+| 8080 | Traefik `IngressRoute` per viewer host, with the `mtls-clients` TLS option (as `apps/devbox` uses: require and verify a client certificate against the clients CA, strict SNI) and the `mesh-<svc>-<machine>` policy middleware | Viewer HTTP and WebSocket traffic. |
 | 9090 | in-cluster scrape | `/metrics`, `/healthz`, `/readyz` |
 
-NetworkPolicy admits only Traefik on 8443 and 8080: the hub trusts the PROXY v2
-source on 8443 (home detection, rate limits) and the viewer header on 8080, so
-nothing else may reach them.
+`t3-mesh` is added to `platform/network-baseline`, so it starts default-deny for
+ingress and egress. The chart's NetworkPolicy then allows:
+
+- ingress from Traefik only, on 8443 and 8080: the hub trusts the PROXY v2 source on
+  8443 (home detection, rate limits) and the viewer headers on 8080;
+- ingress from the metrics scraper on 9090;
+- egress to the Kubernetes API (the same API service and control-plane addresses
+  Traefik's policy uses) and to kube-dns on TCP and UDP 53.
 
 The hub's `mesh.noqer.com` certificate is a cert-manager Let's Encrypt certificate
 like every other host. Agents verify it with system roots and the exact hostname.
-The hub reloads the mounted certificate and clients CA bundle when the files change,
-so renewals need no restart.
+The hub reloads the mounted certificate and clients CA bundle when they change, so
+renewals need no restart.
 
 ### Configuration
 
@@ -254,17 +277,35 @@ The hub watches its mounted ConfigMap and applies changes live (rules, revocatio
 desired version). The pod template carries no ConfigMap checksum, so a release bump
 does not restart the hub or drop tunnels.
 
+Kubernetes updates mounted ConfigMaps and Secrets by swapping a `..data` symlink, so
+the hub watches each mount directory, not the files, and re-reads everything on any
+event, plus every 60 s as a backstop. `/readyz` fails when the loaded policy
+revision differs from the mounted one or the loaded serving certificate is within
+its renewal window, so a missed reload shows up as an alert instead of lasting until
+expiry.
+
 Traefik middlewares are rendered from the same policy entries with kind `agent`
 filtered out, so an agent certificate is never accepted on a viewer host. Agent
 identities in an entry only grant machine-to-machine access.
+
+### Tunnel admission
+
+The hub takes an agent's identity only from its certificate's URI SAN; `Hello` names
+none. A tunnel is accepted only when that URI is exactly one configured
+`agent-<machine>` identity, the identity is not disabled and the leaf is not
+blocked. Any other certificate from the clients CA (a phone, a browser) gets the
+connection closed before any stream is accepted, so it can never reach the relay
+path, which bypasses the viewer controls.
 
 ### Routing
 
 - **Viewer request:** the `traefik-mtls-authz` middleware sets three headers from
   the verified client certificate, after stripping any client-sent `X-Mtls-*`
   headers: `X-Mtls-Mesh-Viewer` (identity, via the existing `forwardIdentityHeader`),
-  `X-Mtls-Mesh-Fingerprint` (leaf SHA-256) and `X-Mtls-Mesh-Not-After` (leaf
-  expiry, RFC 3339). The last two need a plugin extension (see
+  `X-Mtls-Mesh-Fingerprint` (lowercase hex SHA-256 of the leaf DER, the same value
+  the plugin matches against `blockedFingerprints`) and `X-Mtls-Mesh-Not-After`
+  (leaf expiry, RFC 3339). The hub rejects a viewer request that lacks any of the
+  three. The last two need a plugin extension (see
   [Homelab changes](#homelab-changes)). The hub records all three on every viewer
   stream, so it can close a stream when that identity is disabled, that leaf is
   blocked, a rule removes the viewer, or the leaf expires. It removes the headers
@@ -289,11 +330,13 @@ both LAN prefixes. The hub marks an agent home when its tunnel source is inside
 the agent in `HelloAck`. A café network that also uses `192.168.x` cannot fake
 this, because its traffic arrives through frpc with a public source.
 
-This holds only if the client cannot forge the PROXY header Traefik receives. The
-`websecure-frp` entrypoint accepts PROXY headers only from frpc's source addresses
-(`proxyProtocol.trustedIPs`, never `insecure`), and the LAN entrypoint accepts none.
-M1 is not done until a forged PROXY header sent through the public path is
-rejected or ignored.
+This holds only if the client cannot forge the PROXY header Traefik receives. On
+`websecure-frp`, `proxyProtocol.trustedIPs` is the whole pod CIDR (never
+`insecure`); what limits PROXY senders to frpc is Traefik's NetworkPolicy, which
+admits only frpc to that port. Pinning frpc pod IPs instead would break on
+rescheduling. The LAN entrypoint accepts no PROXY headers. M1 is not done until a
+forged PROXY header sent through the public path, and a connection from a non-frpc
+pod to `websecure-frp`, both fail to change the source the hub sees.
 
 ### Availability
 
@@ -307,7 +350,7 @@ with its own design.
 
 - `create`, `get`, `watch` CertificateRequests in `mtls-pki`, bound to the approver
   policy above.
-- Read its own ConfigMap. Nothing else.
+- Read its own ConfigMaps (configuration and `clients-ca-bundle`). Nothing else.
 
 ## Agent
 
@@ -329,23 +372,26 @@ serve:
   t3: 127.0.0.1:3773
 
 links:                           # loopback ports for `t3 environment link`
-  t3.devbox: 127.0.0.1:47301
-  t3.z-mac:  127.0.0.1:47302
+  t3.devbox: 127.0.0.1:27301
+  t3.z-mac:  127.0.0.1:27302
 
 direct:
   enabled: true                  # hub bypass while home
-  listen: :47400                 # served only while the hub says home
+  port: 27400                    # bound only on addresses inside homeCIDRs
   cacheTTL: 168h                 # how long cached rules allow direct traffic
 ```
 
 Link ports are explicit because T3 stores the URL; a port must never move. On each
-machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`.
+machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`. Link
+and direct ports sit below both the Linux (32768–60999) and macOS (49152–65535)
+ephemeral ranges, so an outgoing connection can never hold one.
 
 Link ports are unauthenticated loopback listeners, so any local process on the
 machine can use them; that is accepted on single-user machines. To block DNS
-rebinding from browsers, a link port rejects HTTP requests whose `Host` is not
-`127.0.0.1:<port>` or `localhost:<port>`, and WebSocket upgrades whose `Origin` is
-not empty or one of those.
+rebinding and cross-site requests from browsers, a link port rejects any request,
+plain HTTP or WebSocket upgrade, whose `Host` is not `127.0.0.1:<port>` or
+`localhost:<port>`, or whose `Origin` is present and not one of those. Native T3
+clients send no `Origin` and pass.
 
 ### Tunnel management
 
@@ -356,9 +402,10 @@ not empty or one of those.
   an agent restart cannot confuse the order.
 - **Network changes:** netlink route/address events on Linux, the system's
   network-change notification on macOS, and a 30 s DNS re-resolve as backup.
-  On a change, or when the current tunnel's peer address is no longer in the set
-  `mesh.noqer.com` resolves to (order and rotation are ignored), the agent opens a
-  new session first. The old session drains its open streams for up to 10 minutes,
+  On a change, or when a lookup of `mesh.noqer.com` succeeds with a non-empty answer
+  that does not contain the current tunnel's peer address (order and rotation are
+  ignored), the agent opens a new session first. A failed or empty lookup never
+  replaces a session; the pings decide whether the current path is dead. The old session drains its open streams for up to 10 minutes,
   then closes.
 - **Liveness:** both sides ping every 10 s on the control stream. Three missed
   replies close the session on that side: the agent reconnects with exponential
@@ -390,7 +437,9 @@ not empty or one of those.
   fails fast when away. Cached rules allow direct traffic for at most 1 week after
   the last hub contact; after that, direct connections are refused.
 - The direct listener runs only while the hub reports home, or while the hub is
-  unreachable within the cache window.
+  unreachable within the cache window. It binds only local addresses inside
+  `homeCIDRs`, never all interfaces; with no such address (a café, a hotspot) it
+  does not listen at all.
 
 ### Platform notes
 
@@ -418,10 +467,17 @@ not empty or one of those.
   accepts TCP. Otherwise it defers and checks again every 10 minutes, so a stopped
   or restarting T3 never puts a release on probation.
 - **Downloads:** `zekihan/t3-mesh` is a public repository, so agents fetch release
-  assets anonymously; the signature, not the source, provides integrity.
+  assets anonymously; the signature, not the source, provides integrity. The agent
+  builds every URL from the version and the compiled-in prefix
+  `https://github.com/zekihan/t3-mesh/releases/download/`; the hub sends only a
+  version, never a URL. The release workflow that holds the signing key runs only
+  for tags on the protected main branch.
 - **Install layout:** `versions/<version>/t3-mesh-agent`, `current` and
   `known-good` symlinks. The service always starts a small launcher mode of the
-  `known-good` binary, which runs `current`.
+  `known-good` binary, which runs `current`. After promoting a version to
+  `known-good`, the launcher re-execs itself from the new `known-good`, so launcher
+  fixes take effect without a service restart. Before starting a new binary, the
+  launcher waits for the old one to exit, so link ports are free.
 - **Local startup check:** within 30 s of starting, independent of the hub, the new
   binary must load its cached state, bind every configured link port and the direct
   listener when cached state calls for it, and answer the launcher on a health pipe
@@ -430,7 +486,9 @@ not empty or one of those.
 - **Probation:** after that, the new binary is on probation until it has, within
   2 minutes of awake time during which the network is up and the hub completes a
   TLS handshake on `mesh.noqer.com` (the hub terminates TLS, so its process is up):
-  completed `HelloAck` and forwarded one test stream to each local `serve` target.
+  completed `HelloAck` and opened one test connection directly to each local
+  `serve` target (a local dial, not a relay through the hub, which has no rule for
+  an agent reaching its own machine).
   Sleep, offline time and hub downtime do not count, so closing z-mac's lid
   mid-update is not a failure. Only then does it become `known-good`.
 - **Rollback:** if the binary crashes, fails the local startup check, or does not
@@ -470,7 +528,7 @@ length-prefixed JSON with a `type` field. The protocol version is in the ALPN.
 | `Hello` | agent → hub | agent version, announced services, LAN addresses, direct port, cert fingerprint |
 | `HelloAck` | hub → agent | home status, `Release`, rules, peer table, revocation list, trust bundle |
 | `Update` | hub → agent | new rules, peer table, revocation list or trust bundle after a change; agents re-check live sessions against it |
-| `Release` | hub → agent | desired version, manifest URL, rollback allowed, revision; sent in `HelloAck` and again whenever the chart value changes |
+| `Release` | hub → agent | desired version, rollback allowed, revision; sent in `HelloAck` and again whenever the chart value changes |
 | `Ping` / `Pong` | both | liveness, round-trip time |
 | `Renew` / `Renewed` | agent → hub / hub → agent | CSR / certificate and chain |
 | `Status` | agent → hub | recent warnings, direct-session counts, running version, last applied `Release` and trust-bundle revisions, failed update versions and reasons |
@@ -486,11 +544,13 @@ Data streams start with one header line of JSON, then raw bytes:
 
 | Where | Change |
 |---|---|
-| `platform/cert-manager` | approver-policy, built-in approver disabled, one policy per issuer, hub policy, test that every issuer has a policy |
+| `platform/cert-manager` | approver-policy, built-in approver disabled by appending to the existing `extraArgs`, one policy per issuer usable only by cert-manager, hub policy usable only by the hub, test that every issuer has a policy |
+| `platform/network-baseline` | `t3-mesh` added to the default-deny namespace list |
 | `libs/mtls-policy` | kind `agent` with three identities; `mesh-t3-<machine>` entries listing viewers and permitted agents |
 | `zekihan/traefik-mtls-authz` | options to forward the leaf SHA-256 fingerprint and expiry in `X-Mtls-*` headers, under the same name validation and stripping as `forwardIdentityHeader`, with tests; homelab bumps the plugin version |
-| `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the policy middleware (agents excluded) and viewer header, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy for 8443 and 8080, ConfigMap, vmalert rules, Gatus canaries |
+| `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the `mtls-clients` TLS option, the policy middleware (agents excluded) and viewer headers, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy (ingress 8443/8080 from Traefik, 9090 from the scraper; egress to the API and DNS), ConfigMap, `clients-ca-bundle` ConfigMap, vmalert rules, Gatus canaries; chart tests that every viewer route uses `mtls-clients` and no middleware lists an `agent-*` URI |
 | `apps/devbox` | removed at the M2 cutover |
+| `platform/traefik` | at the M2 cutover, drop the `192.168.2.71:3773` devbox `lanPeers` entry in the same change |
 | `terraform/doppler` | minisign key synced to the `t3-mesh` repo |
 | `terraform/technitium` | LAN A and AAAA records for `mesh.noqer.com` and each viewer host, pointing at the Traefik VIPs |
 | CI | regenerate `gitops_pr.yaml` and `renovate.json` for the new chart |
@@ -515,22 +575,23 @@ Data streams start with one header line of JSON, then raw bytes:
 | Threat | Control |
 |---|---|
 | Unauthenticated access to a machine | T3 binds to loopback. The only routes in are the tunnel (hub-authenticated agent, Traefik-authorized viewer) and the direct listener (mTLS + cached rules). T3 pairing remains. |
-| Stolen phone or browser certificate | Reaches T3 login only; still needs T3 pairing. Cannot register as an agent. Revoke in `libs/mtls-policy`. |
+| Stolen phone or browser certificate | Reaches T3 login only; still needs T3 pairing. Cannot register as an agent or open a tunnel (tunnel admission accepts configured agent URIs only). Revoke in `libs/mtls-policy`. |
 | Agent certificate used as a viewer | Traefik middlewares exclude kind `agent`. |
-| Local process or web page using a link port | Loopback only, `Host`/`Origin` checks against DNS rebinding, T3 pairing. Other local users are trusted (single-user machines). |
+| Local process or web page using a link port | Loopback only, `Host` and `Origin` checks on every request against DNS rebinding and cross-site requests, T3 pairing. Other local users are trusted (single-user machines). |
+| Direct listener exposed off the LAN | Binds only addresses inside `homeCIDRs`; does not listen elsewhere. |
 | In-cluster spoofing of PROXY v2 or viewer header | NetworkPolicy admits only Traefik on 8443 and 8080. |
 | Stolen agent key | Revoke in `libs/mtls-policy`; the hub cuts the tunnel and relayed streams at once; peers close live direct sessions and refuse new ones as soon as they receive the update, and stop all direct traffic at the end of the cache window. The key file is readable only by the service user. |
-| Compromised hub | Can mint only `agent-*` certificates (approver-policy). Can reach every agent's services, as any relay could. T3 pairing still applies. |
+| Compromised hub | Can mint only the configured agent certificates (approver-policy). Can reach every agent's services, as any relay could. T3 pairing still applies. |
 | Spoofed home status | Decided by the hub from the tunnel's source address, not by the agent. Traefik trusts PROXY headers only from frpc. A wrong guess during an outage only causes a failed, identity-checked dial. |
-| Malicious update | minisign signature with embedded keys, dual-signed during key rotation, no downgrade except a hub-marked rollback to a signed release, automatic rollback. |
+| Malicious update | minisign signature with embedded keys, dual-signed during key rotation, download URL fixed in the binary, no downgrade except a hub-marked rollback to a signed release, automatic rollback. Accepted risk: a compromised hub or chart value can roll every agent back to any older signed release at or above `minStateVersion`, including one with a known flaw. |
 | Enrollment abuse | 15-minute single-use token bound to one identity, operator access via `kubectl exec`, rate limit, logging. |
 
 ## Rollout
 
 | Milestone | Scope | Done when |
 |---|---|---|
-| M0 | approver-policy and per-issuer policies, nothing else | every existing certificate renews and a forced renewal of one Let's Encrypt and one clients certificate succeeds |
-| M1 | hub, agent, tunnel, token enrollment; z-mac only | the phone opens `t3.z-mac.mesh.noqer.com` from mobile data, home and away; a forged PROXY header through the public path does not change the source the hub sees; z-mac at home is marked home over both IPv4 and IPv6 |
+| M0 | approver-policy and per-issuer policies, nothing else | every existing certificate renews; a forced renewal of one Let's Encrypt and one clients certificate succeeds; CertificateRequests from the hub ServiceAccount for `urn:noqer:mtls:clients:z-phone`, and for `agent-z-mac` with an added DNS SAN, stay unapproved |
+| M1 | hub, agent, tunnel, token enrollment; z-mac only | the phone opens `t3.z-mac.mesh.noqer.com` from mobile data, home and away; a forged PROXY header through the public path, or from a non-frpc pod, does not change the source the hub sees; z-mac at home resolves `mesh.noqer.com` to the LAN VIP and is marked home over both IPv4 and IPv6 |
 | M2 | devbox and z-arch on the mesh, link ports | the M2 gate below passes; then the hard switch below |
 | M3 | direct bypass and outage mode | home links stay up with the hub scaled to zero |
 | M4 | CSR renewal, self-update with rollback, integration test, metrics, vmalert rules and Gatus canaries | a forced renewal and a deliberately broken release both recover on z-mac |
@@ -542,7 +603,8 @@ a tunnel switch and after z-mac sleeps and wakes; the phone reaches every machin
 a viewer, home and away. The in-process test uses a stand-in service and cannot
 answer these.
 
-**devbox cutover (end of M2), one change:** remove `apps/devbox` and the
+**devbox cutover (end of M2), one change:** remove `apps/devbox`, its Traefik
+`lanPeers` entry and the
 `devbox.noqer.com` record, add `t3.devbox.mesh.noqer.com`, bind devbox's T3 to
 `127.0.0.1`, then re-pair the phone and tablet and re-link every environment that
 pointed at devbox. Clients on the old name break at the moment of the switch.
@@ -563,8 +625,11 @@ a renewal, closing live sessions on revocation (direct, relayed and viewer, incl
 a single blocked leaf), a `Release` change reaching a connected agent, a CA rollover
 through the trust bundle, and broken updates that the launcher rolls back: one that
 crashes, one that hangs before binding link ports while the hub is down, and one
-whose only failure is a stopped `serve` target (retried, not blacklisted). A broken release can strand z-mac while it is
-away, so this test runs in CI before every release.
+whose only failure is a stopped `serve` target (retried, not blacklisted). It
+also checks that a phone certificate cannot open a tunnel, that a failed DNS lookup
+keeps the session, and that a link port refuses a request with a foreign `Origin`.
+A broken release can strand z-mac while it is away, so this test runs in CI before
+every release.
 
 The homelab side keeps its usual chart tests, plus one asserting that no rendered
 Traefik middleware lists a kind `agent` identity.
@@ -593,27 +658,32 @@ Traefik middleware lists a kind `agent` identity.
 | Hostnames | `<svc>.<machine>.mesh.noqer.com`, agents dial `mesh.noqer.com` |
 | Transport | TLS + yamux, ALPN `t3-mesh/1` |
 | Viewer authorization | Traefik policy per host, agent identities excluded |
-| Viewer identity to hub | `X-Mtls-Mesh-*` headers for identity, leaf fingerprint and expiry; plugin extended for the last two |
+| Viewer identity to hub | `X-Mtls-Mesh-*` headers for identity, leaf DER SHA-256 and expiry, all required; plugin extended for the last two; `mtls-clients` TLS option on every viewer route |
 | T3 pairing | kept |
 | Agent certificates | new `agent-*` identities with client and server usage |
 | Machine-to-machine rules | `libs/mtls-policy` |
 | Direct peer verification | clients CA, URI SAN, revocation list; no leaf pinning |
 | Direct dial | one 1 s deadline for TCP, TLS and accept; TCP keepalive; no stream migration |
-| Link port protection | loopback, `Host`/`Origin` checks |
+| Link port protection | loopback, `Host` and `Origin` checks on every request; ports below the ephemeral ranges |
+| Direct listener binding | only addresses inside `homeCIDRs` |
 | Machine registration | fixed list in the hub chart |
 | Language | Go |
 | Renewal | CSR through the hub |
 | Key storage | `0600` file on every platform, including macOS (no Keychain) |
-| CSR containment | approver-policy, per-issuer policies mirroring today |
+| CSR containment | approver-policy; per-issuer policies mirroring today usable only by cert-manager; hub policy with exact agent URIs usable only by the hub |
 | First certificate | single-use token + locally generated key |
 | Home detection | hub, from the tunnel's source address; IPv4 and IPv6 LAN prefixes |
-| Agent CA trust | versioned trust bundle pushed by the hub, overlapping CAs during rollover |
+| Agent CA trust | versioned `clients-ca-bundle` ConfigMap pushed by the hub, overlapping CAs during rollover, operator re-enrollment for agents that miss it |
 | Hub outage | direct to cached LAN addresses for up to 1 week |
 | Revocation | enforced by hub and agents on new and live sessions |
 | Link ports | explicit in agent config |
 | Updates | hub-pinned self-update via a live `Release` message, public GitHub releases, minisign signature, install only while local services are up, hub-independent local startup check, 2-minute probation counted only while the hub is up, auto-rollback, no renewal or state-format change on probation, `minStateVersion` floor on rollbacks, release failures blacklisted and dependency failures retried |
 | Signing key | Doppler, two trusted keys, dual-signed manifests during rotation |
-| PROXY trust | Traefik `trustedIPs` for frpc only; forged-header test in M1 |
+| PROXY trust | Traefik `trustedIPs` = pod CIDR, limited to frpc by NetworkPolicy; forged-header and non-frpc-pod tests in M1 |
+| Tunnel admission | certificate URI must be exactly one configured agent identity |
+| Hub namespace network | default-deny baseline plus explicit ingress and egress |
+| Config reload | watch mount directories, periodic re-read, `/readyz` on stale state |
+| Downgrades | hub flag allows any signed release at or above `minStateVersion` (accepted risk); download URL fixed in the binary |
 | M2 cutover gate | real T3 linking, pairing, reconnect, sleep/wake and viewer access |
 | Hub certificate | Let's Encrypt |
 | Observability | through the hub to VictoriaMetrics and VictoriaLogs; vmalert for metric alerts, Gatus for canaries |
