@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.noqer.t3-mesh-agent</string>
+  <key>UserName</key>
+  <string>_t3mesh</string>
+  <key>GroupName</key>
+  <string>_t3mesh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/t3-mesh/install/known-good/t3-mesh-agent</string>
+    <string>launcher</string>
+    <string>--config</string>
+    <string>/Library/Application Support/t3-mesh/agent.yaml</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/t3-mesh/state</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/t3-mesh/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/t3-mesh/agent.log</string>
+</dict>
+</plist>

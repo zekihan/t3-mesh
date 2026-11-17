@@ -1,0 +1,83 @@
+name: PR Workflow
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+  workflow_call:
+    inputs:
+      publishing:
+        description: Run container build validation before publication
+        type: boolean
+        default: false
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Out The Repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Verify modules
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+      - name: Check for vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # Includes the in-process hub and agents integration test, which must pass
+      # before every release.
+      - name: Test
+        run: ./scripts/go_test.sh -race -vet=all -count=1 ./...
+
+      - name: Cross-compile
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=0
+          mkdir -p "$RUNNER_TEMP/build"
+          GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/build/t3-mesh-agent-linux-amd64" ./cmd/t3-mesh-agent
+          GOOS=darwin GOARCH=arm64 go build -trimpath -o "$RUNNER_TEMP/build/t3-mesh-agent-darwin-arm64" ./cmd/t3-mesh-agent
+          GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/build/t3-mesh-hub-linux-amd64" ./cmd/t3-mesh-hub
+
+      - name: Check packaging scripts
+        run: |
+          shellcheck scripts/make-manifest.sh scripts/build-release.sh scripts/sign-manifest.sh packaging/linux/install.sh packaging/darwin/install.sh
+
+      - name: Build hub image
+        if: ${{ inputs.publishing }}
+        run: docker build --build-arg VERSION="${GITHUB_SHA}" -t t3-mesh-hub:check .
+
+      - name: Verify clean tree
+        run: git diff --exit-code

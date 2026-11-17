@@ -1,0 +1,19 @@
+# Minimal t3-mesh agent configuration. install.sh fills in NAME and HUB.
+identity:
+  name: @NAME@
+  dir: /Library/Application Support/t3-mesh/identity
+
+hub: @HUB@
+
+serve:
+  t3: 127.0.0.1:3773
+
+# One loopback port per peer, for `t3 environment link http://127.0.0.1:<port>`.
+# Ports must stay below 32768 and never change once linked.
+# links:
+#   t3.devbox: 127.0.0.1:27301
+#   t3.z-mac:  127.0.0.1:27302
+
+# direct:
+#   enabled: true
+#   port: 27400

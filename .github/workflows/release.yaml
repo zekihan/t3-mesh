@@ -1,0 +1,230 @@
+name: Publish
+'on':
+  push:
+    tags:
+      - v*
+  schedule:
+    - cron: 17 3 * * *
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild unchanged edge inputs
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  decide:
+    uses: zekihan/release-workflows/.github/workflows/decide.yaml@6a5c94057c8fb13b4b826486374cde54cb19e3ac # main
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    with:
+      mode: ${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'edge' }}
+      image: t3-mesh-hub
+      force: ${{ inputs.force || false }}
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  checks:
+    needs: decide
+    if: ${{ needs.decide.outputs.build == 'true' }}
+    uses: ./.github/workflows/pr.yaml
+    permissions:
+      contents: read
+    with:
+      publishing: true
+  publish:
+    needs:
+      - decide
+      - checks
+    uses: zekihan/release-workflows/.github/workflows/image.yaml@6a5c94057c8fb13b4b826486374cde54cb19e3ac # main
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image: t3-mesh-hub
+      mode: ${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'edge' }}
+      version: ${{ needs.decide.outputs.version }}
+      fingerprint: ${{ needs.decide.outputs.fingerprint }}
+      platforms: linux/amd64
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+  # Agent binaries and the signed manifest. Tags only.
+  agent-build:
+    needs:
+      - decide
+      - checks
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      manifest-sha256: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - name: Check Out The Repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Refuse a tag outside main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not an ancestor of origin/main"
+            exit 1
+          fi
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Build agent binaries
+        run: scripts/build-release.sh "$GITHUB_REF_NAME" dist
+      - name: Generate manifest
+        id: manifest
+        run: |
+          scripts/make-manifest.sh "$GITHUB_REF_NAME" dist
+          cat dist/manifest.json
+          echo "sha256=$(sha256sum dist/manifest.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that sees the signing keys. They are secrets of the "release"
+  # environment, not of the repository.
+  agent-sign:
+    needs: agent-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Check Out The Repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent-dist
+          path: dist
+      - name: Verify manifest is the one that was built
+        env:
+          EXPECTED_SHA256: ${{ needs.agent-build.outputs.manifest-sha256 }}
+        run: |
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf "%s  %s\n" "$EXPECTED_SHA256" dist/manifest.json | sha256sum --strict --check -
+      - name: Install minisign
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install aead.dev/minisign/cmd/minisign@v0.3.0
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Sign manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_SECRET_KEY_NEXT: ${{ secrets.MINISIGN_SECRET_KEY_NEXT }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_PASSWORD_NEXT: ${{ secrets.MINISIGN_PASSWORD_NEXT }}
+        run: scripts/sign-manifest.sh dist/manifest.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-signature
+          path: dist/manifest.json.minisig
+          if-no-files-found: error
+          retention-days: 7
+
+  # Agents download straight from the release, so create it as a draft with all
+  # assets and publish it only once everything is attached.
+  agent-release:
+    needs:
+      - decide
+      - agent-build
+      - agent-sign
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent-dist
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: agent-signature
+          path: dist
+      - name: Verify manifest is the one that was built and signed
+        env:
+          EXPECTED_SHA256: ${{ needs.agent-build.outputs.manifest-sha256 }}
+        run: |
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf "%s  %s\n" "$EXPECTED_SHA256" dist/manifest.json | sha256sum --strict --check -
+          grep -q '^untrusted comment: ' dist/manifest.json.minisig
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          state=$(gh release list --limit 200 --json tagName,isDraft \
+            --jq ".[] | select(.tagName == \"$tag\") | .isDraft")
+          if [[ "$state" == "false" ]]; then
+            # Rerun after success: accept only an identical manifest.
+            mkdir existing
+            gh release download "$tag" --pattern manifest.json --dir existing
+            cmp existing/manifest.json dist/manifest.json
+            echo "release $tag already published with the same manifest"
+            exit 0
+          elif [[ "$state" == "true" ]]; then
+            gh release delete "$tag" --yes
+          fi
+          gh release create "$tag" --verify-tag --draft --title "$tag" --generate-notes \
+            dist/t3-mesh-agent-linux-amd64 \
+            dist/t3-mesh-agent-darwin-arm64 \
+            dist/manifest.json \
+            dist/manifest.json.minisig
+          gh release edit "$tag" --draft=false
+
+  # Verifies the immutable image versions and promotes latest. The GitHub
+  # release is created above (the shared one would publish its own manifest.json).
+  release:
+    needs:
+      - decide
+      - checks
+      - publish
+      - agent-release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    uses: zekihan/release-workflows/.github/workflows/release.yaml@6a5c94057c8fb13b4b826486374cde54cb19e3ac # main
+    permissions:
+      contents: write
+      packages: write
+    with:
+      version: ${{ needs.decide.outputs.version }}
+      binaries: false
+      github-release: false
+      image: t3-mesh-hub
+      image-digest: ${{ needs.publish.outputs.digest }}
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}

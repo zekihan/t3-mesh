@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.noqer.t3-mesh-agent-fallback</string>
+  <key>UserName</key>
+  <string>_t3mesh</string>
+  <key>GroupName</key>
+  <string>_t3mesh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/t3-mesh/install/previous-good/t3-mesh-agent</string>
+    <string>fallback</string>
+    <string>--install-dir</string>
+    <string>/Library/Application Support/t3-mesh/install</string>
+    <string>--heartbeat</string>
+    <string>/Library/Application Support/t3-mesh/state/launcher-heartbeat</string>
+    <string>--heartbeat-max-age</string>
+    <string>5m</string>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/t3-mesh/fallback.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/t3-mesh/fallback.log</string>
+</dict>
+</plist>

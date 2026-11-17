@@ -1,0 +1,41 @@
+[Unit]
+Description=t3-mesh agent fallback to previous-good
+Documentation=https://github.com/zekihan/t3-mesh
+# Started by OnFailure= of t3-mesh-agent.service, i.e. after its start limit was
+# hit. Not enabled on its own.
+# Do not let a bad previous-good turn this into a tight loop.
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=t3mesh
+Group=t3mesh
+# Run the previous-good binary: the known-good launcher is the thing that broke.
+ExecStart=/var/lib/t3-mesh/install/previous-good/t3-mesh-agent fallback --install-dir /var/lib/t3-mesh/install
+# Only reached when the fallback succeeded. The main unit is failed and
+# rate-limited, so clear that first or `restart` is refused with
+# "start request repeated too quickly". "+" runs these as root despite User=.
+ExecStartPost=+/usr/bin/systemctl reset-failed t3-mesh-agent.service
+ExecStartPost=+/usr/bin/systemctl restart --no-block t3-mesh-agent.service
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/t3-mesh
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

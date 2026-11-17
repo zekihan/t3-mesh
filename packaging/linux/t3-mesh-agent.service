@@ -1,0 +1,52 @@
+[Unit]
+Description=t3-mesh agent
+Documentation=https://github.com/zekihan/t3-mesh
+Wants=network-online.target
+After=network-online.target
+# A launcher that keeps dying hits the start limit; systemd then marks the unit
+# failed and starts the fallback, which repoints known-good at previous-good.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=t3-mesh-agent-fallback.service
+
+[Service]
+Type=simple
+User=t3mesh
+Group=t3mesh
+ExecStart=/var/lib/t3-mesh/install/known-good/t3-mesh-agent launcher --config /etc/t3-mesh/agent.yaml
+Restart=always
+RestartSec=3
+UMask=0077
+
+# The launcher stops its child on SIGTERM and waits for it.
+KillMode=mixed
+TimeoutStopSec=30
+
+# Hardening. The agent binds loopback/LAN TCP ports above 1024 and watches
+# network changes over netlink, so it needs no capabilities.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/t3-mesh
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
