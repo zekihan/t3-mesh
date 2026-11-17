@@ -14,9 +14,13 @@ func openSource(ctx context.Context) (<-chan struct{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open route socket: %w", err)
 	}
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+
+	_, err = unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC)
+	if err != nil {
 		_ = unix.Close(fd)
+
 		return nil, fmt.Errorf("set close-on-exec: %w", err)
 	}
+
 	return pumpSocket(ctx, fd, "route")
 }

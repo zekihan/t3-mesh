@@ -13,6 +13,12 @@ import (
 )
 
 const (
+	dirMode         = 0o700
+	privateFileMode = 0o600
+	publicFileMode  = 0o644
+)
+
+const (
 	keyFile      = "key.pem"
 	certFile     = "cert.pem"
 	nextKeyFile  = "next-key.pem"
@@ -33,15 +39,15 @@ var ErrKeyMismatch = errors.New("pki: certificate does not match key")
 // intact with next-* still present.
 type Store struct{ Dir string }
 
-func (s Store) path(name string) string { return filepath.Join(s.Dir, name) }
-
 // EnsureDir creates the directory with mode 0700 and narrows a wider mode.
-func (s Store) EnsureDir() error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+func (store Store) EnsureDir() error {
+	err := os.MkdirAll(store.Dir, dirMode)
+	if err != nil {
 		return fmt.Errorf("pki: create identity dir: %w", err)
 	}
 
-	if err := os.Chmod(s.Dir, 0o700); err != nil { //nolint:gosec // directory, 0700 is intended
+	err = os.Chmod(store.Dir, dirMode)
+	if err != nil {
 		return fmt.Errorf("pki: chmod identity dir: %w", err)
 	}
 
@@ -49,8 +55,8 @@ func (s Store) EnsureDir() error {
 }
 
 // Exists reports whether key.pem and cert.pem are both present.
-func (s Store) Exists() bool {
-	return fileExists(s.path(keyFile)) && fileExists(s.path(certFile))
+func (store Store) Exists() bool {
+	return fileExists(store.path(keyFile)) && fileExists(store.path(certFile))
 }
 
 func fileExists(p string) bool {
@@ -60,55 +66,23 @@ func fileExists(p string) bool {
 }
 
 // SaveKey writes key.pem.
-func (s Store) SaveKey(key *ecdsa.PrivateKey) error {
-	return s.writeKey(keyFile, key)
-}
-
-func (s Store) writeKey(name string, key *ecdsa.PrivateKey) error {
-	if err := s.EnsureDir(); err != nil {
-		return err
-	}
-
-	data, err := EncodeKeyPEM(key)
-	if err != nil {
-		return err
-	}
-
-	return WriteFileAtomic(s.path(name), data, 0o600)
+func (store Store) SaveKey(key *ecdsa.PrivateKey) error {
+	return store.writeKey(keyFile, key)
 }
 
 // SaveCert writes cert.pem as certPEM followed by chainPEM after checking that
 // the leaf matches key.pem.
-func (s Store) SaveCert(certPEM, chainPEM []byte) error {
-	key, err := s.readKey(keyFile)
+func (store Store) SaveCert(certPEM, chainPEM []byte) error {
+	key, err := store.readKey(keyFile)
 	if err != nil {
 		return err
 	}
 
-	return s.writeCert(certFile, key, certPEM, chainPEM)
-}
-
-func (s Store) writeCert(name string, key *ecdsa.PrivateKey, certPEM, chainPEM []byte) error {
-	bundle := joinPEM(certPEM, chainPEM)
-
-	certs, err := ParseCertsPEM(bundle)
-	if err != nil {
-		return err
-	}
-
-	if !matches(certs[0], key) {
-		return ErrKeyMismatch
-	}
-
-	if err := s.EnsureDir(); err != nil {
-		return err
-	}
-
-	return WriteFileAtomic(s.path(name), bundle, 0o644)
+	return store.writeCert(certFile, key, certPEM, chainPEM)
 }
 
 // SaveNext writes next-key.pem and next-cert.pem after checking they match.
-func (s Store) SaveNext(key *ecdsa.PrivateKey, certPEM, chainPEM []byte) error {
+func (store Store) SaveNext(key *ecdsa.PrivateKey, certPEM, chainPEM []byte) error {
 	bundle := joinPEM(certPEM, chainPEM)
 
 	certs, err := ParseCertsPEM(bundle)
@@ -120,11 +94,12 @@ func (s Store) SaveNext(key *ecdsa.PrivateKey, certPEM, chainPEM []byte) error {
 		return ErrKeyMismatch
 	}
 
-	if err := s.writeKey(nextKeyFile, key); err != nil {
+	err = store.writeKey(nextKeyFile, key)
+	if err != nil {
 		return err
 	}
 
-	return s.writeCert(nextCertFile, key, certPEM, chainPEM)
+	return store.writeCert(nextCertFile, key, certPEM, chainPEM)
 }
 
 func joinPEM(a, b []byte) []byte {
@@ -142,8 +117,98 @@ func matches(cert *x509.Certificate, key *ecdsa.PrivateKey) bool {
 	return ok && pub.Equal(key.Public())
 }
 
-func (s Store) readKey(name string) (*ecdsa.PrivateKey, error) {
-	data, err := os.ReadFile(s.path(name))
+// Load returns the current identity. If key.pem and cert.pem do not match
+// because a promotion was interrupted, it completes the promotion when
+// next-cert.pem matches key.pem.
+func (store Store) Load() (tls.Certificate, *x509.Certificate, error) {
+	tc, leaf, err := store.loadPair(keyFile, certFile)
+	if !errors.Is(err, ErrKeyMismatch) {
+		return tc, leaf, err
+	}
+
+	_, _, nextErr := store.loadPair(keyFile, nextCertFile)
+	if nextErr != nil {
+		return tls.Certificate{}, nil, err
+	}
+
+	rerr := store.renameSynced(nextCertFile, certFile)
+	if rerr != nil {
+		return tls.Certificate{}, nil, rerr
+	}
+
+	return store.loadPair(keyFile, certFile)
+}
+
+// LoadNext returns the pending identity from next-key.pem and next-cert.pem.
+func (store Store) LoadNext() (tls.Certificate, *x509.Certificate, error) {
+	return store.loadPair(nextKeyFile, nextCertFile)
+}
+
+// PromoteNext makes next-* the current identity; see Store for crash safety.
+func (store Store) PromoteNext() error {
+	_, _, err := store.LoadNext()
+	if err != nil {
+		return fmt.Errorf("pki: next identity invalid: %w", err)
+	}
+
+	err = store.renameSynced(nextKeyFile, keyFile)
+	if err != nil {
+		return err
+	}
+
+	return store.renameSynced(nextCertFile, certFile)
+}
+
+// DiscardNext removes next-key.pem and next-cert.pem.
+func (store Store) DiscardNext() error {
+	for _, name := range []string{nextCertFile, nextKeyFile} {
+		err := os.Remove(store.path(name))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("pki: remove %s: %w", name, err)
+		}
+	}
+
+	return syncDir(store.Dir)
+}
+
+func (store Store) path(name string) string { return filepath.Join(store.Dir, name) }
+
+func (store Store) writeKey(name string, key *ecdsa.PrivateKey) error {
+	err := store.EnsureDir()
+	if err != nil {
+		return err
+	}
+
+	data, err := EncodeKeyPEM(key)
+	if err != nil {
+		return err
+	}
+
+	return WriteFileAtomic(store.path(name), data, privateFileMode)
+}
+
+func (store Store) writeCert(name string, key *ecdsa.PrivateKey, certPEM, chainPEM []byte) error {
+	bundle := joinPEM(certPEM, chainPEM)
+
+	certs, err := ParseCertsPEM(bundle)
+	if err != nil {
+		return err
+	}
+
+	if !matches(certs[0], key) {
+		return ErrKeyMismatch
+	}
+
+	err = store.EnsureDir()
+	if err != nil {
+		return err
+	}
+
+	return WriteFileAtomic(store.path(name), bundle, publicFileMode)
+}
+
+func (store Store) readKey(name string) (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(store.path(name))
 	if err != nil {
 		return nil, fmt.Errorf("pki: read %s: %w", name, err)
 	}
@@ -151,13 +216,13 @@ func (s Store) readKey(name string) (*ecdsa.PrivateKey, error) {
 	return ParseKeyPEM(data)
 }
 
-func (s Store) loadPair(keyName, certName string) (tls.Certificate, *x509.Certificate, error) {
-	key, err := s.readKey(keyName)
+func (store Store) loadPair(keyName, certName string) (tls.Certificate, *x509.Certificate, error) {
+	key, err := store.readKey(keyName)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
 
-	data, err := os.ReadFile(s.path(certName))
+	data, err := os.ReadFile(store.path(certName))
 	if err != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("pki: read %s: %w", certName, err)
 	}
@@ -179,59 +244,11 @@ func (s Store) loadPair(keyName, certName string) (tls.Certificate, *x509.Certif
 	return tls.Certificate{Certificate: chain, PrivateKey: key, Leaf: certs[0]}, certs[0], nil
 }
 
-// Load returns the current identity. If key.pem and cert.pem do not match
-// because a promotion was interrupted, it completes the promotion when
-// next-cert.pem matches key.pem.
-func (s Store) Load() (tls.Certificate, *x509.Certificate, error) {
-	tc, leaf, err := s.loadPair(keyFile, certFile)
-	if !errors.Is(err, ErrKeyMismatch) {
-		return tc, leaf, err
-	}
-
-	if _, _, nerr := s.loadPair(keyFile, nextCertFile); nerr != nil {
-		return tls.Certificate{}, nil, err
-	}
-
-	if rerr := s.renameSynced(nextCertFile, certFile); rerr != nil {
-		return tls.Certificate{}, nil, rerr
-	}
-
-	return s.loadPair(keyFile, certFile)
-}
-
-// LoadNext returns the pending identity from next-key.pem and next-cert.pem.
-func (s Store) LoadNext() (tls.Certificate, *x509.Certificate, error) {
-	return s.loadPair(nextKeyFile, nextCertFile)
-}
-
-func (s Store) renameSynced(from, to string) error {
-	if err := os.Rename(s.path(from), s.path(to)); err != nil {
+func (store Store) renameSynced(from, to string) error {
+	err := os.Rename(store.path(from), store.path(to))
+	if err != nil {
 		return fmt.Errorf("pki: rename %s: %w", from, err)
 	}
 
-	return syncDir(s.Dir)
-}
-
-// PromoteNext makes next-* the current identity; see Store for crash safety.
-func (s Store) PromoteNext() error {
-	if _, _, err := s.LoadNext(); err != nil {
-		return fmt.Errorf("pki: next identity invalid: %w", err)
-	}
-
-	if err := s.renameSynced(nextKeyFile, keyFile); err != nil {
-		return err
-	}
-
-	return s.renameSynced(nextCertFile, certFile)
-}
-
-// DiscardNext removes next-key.pem and next-cert.pem.
-func (s Store) DiscardNext() error {
-	for _, name := range []string{nextCertFile, nextKeyFile} {
-		if err := os.Remove(s.path(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("pki: remove %s: %w", name, err)
-		}
-	}
-
-	return syncDir(s.Dir)
+	return syncDir(store.Dir)
 }

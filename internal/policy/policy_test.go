@@ -9,7 +9,7 @@ import (
 )
 
 func TestCheck(t *testing.T) {
-	now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC)
 	rules := proto.Rules{Allow: map[string][]string{"t3.devbox": {"z-phone", "agent-z-arch"}}}
 	revs := proto.Revocations{
 		DisabledIdentities:  []string{"z-tablet"},
@@ -24,20 +24,21 @@ func TestCheck(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		mod  func(s *Session)
 		want error
+		mod  func(s *Session)
+		name string
 	}{
-		{"allowed", func(*Session) {}, nil},
-		{"disabled", func(s *Session) { s.Identity = "z-tablet" }, ErrDisabled},
-		{"blocked upper", func(s *Session) { s.Fingerprint = "AA" }, ErrBlocked},
-		{"expired", func(s *Session) { s.NotAfter = now }, ErrExpired},
-		{"other machine", func(s *Session) { s.Machine = "z-mac" }, ErrNotAllowed},
+		{name: "allowed", mod: func(*Session) {}, want: nil},
+		{name: "disabled", mod: func(s *Session) { s.Identity = "z-tablet" }, want: ErrDisabled},
+		{name: "blocked upper", mod: func(s *Session) { s.Fingerprint = "AA" }, want: ErrBlocked},
+		{name: "expired", mod: func(s *Session) { s.NotAfter = now }, want: ErrExpired},
+		{name: "other machine", mod: func(s *Session) { s.Machine = "z-mac" }, want: ErrNotAllowed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := ok
 			tc.mod(&s)
+
 			err := Check(rules, revs, s, now)
 			if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
@@ -47,14 +48,17 @@ func TestCheck(t *testing.T) {
 }
 
 func TestIdentityFromURI(t *testing.T) {
-	if n, err := IdentityFromURI(
+	n, err := IdentityFromURI(
 		"urn:noqer:mtls:clients:agent-z-mac",
-	); err != nil ||
+	)
+	if err != nil ||
 		n != "agent-z-mac" {
 		t.Fatalf("got %q, %v", n, err)
 	}
+
 	for _, bad := range []string{"urn:noqer:mtls:clients:", "urn:other:x", "urn:noqer:mtls:clients:a:b"} {
-		if _, err := IdentityFromURI(bad); err == nil {
+		_, err := IdentityFromURI(bad)
+		if err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
 	}

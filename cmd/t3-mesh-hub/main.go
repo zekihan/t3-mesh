@@ -45,7 +45,8 @@ var (
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "t3-mesh-hub: %v\n", err)
 		os.Exit(1)
 	}
@@ -135,7 +136,8 @@ func parseServe(args []string) (serveOptions, error) {
 	)
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
 
@@ -143,7 +145,8 @@ func parseServe(args []string) (serveOptions, error) {
 		return serveOptions{}, fmt.Errorf("serve: %w %q", errArguments, fs.Args())
 	}
 
-	if err := opts.logLevel.UnmarshalText([]byte(*level)); err != nil {
+	err = opts.logLevel.UnmarshalText([]byte(*level))
+	if err != nil {
 		return serveOptions{}, fmt.Errorf("--log-level: %w", err)
 	}
 
@@ -236,14 +239,20 @@ func serve(args []string) error {
 
 	onChange := func(old, next *hubconfig.Snapshot) {
 		if next.Issuer != startIssuer {
-			log.Warn("issuer settings changed; restart the hub to apply them")
+			log.Warn("Issuer settings changed; restart the hub to apply them")
 		}
 
 		srv.OnConfigChange(old, next)
 	}
 
-	log.Info("hub starting", "version", version, "tunnels", opts.tunnelAddr,
-		"viewers", opts.viewerAddr, "ops", opts.opsAddr, "adminSocket", opts.adminSocket)
+	log.Info(
+		"Hub starting",
+		slog.String("version", version),
+		slog.String("tunnels", opts.tunnelAddr),
+		slog.String("viewers", opts.viewerAddr),
+		slog.String("ops", opts.opsAddr),
+		slog.String("adminSocket", opts.adminSocket),
+	)
 
 	return runAll(ctx, log,
 		component{name: "config watcher", run: func(ctx context.Context) error {
@@ -288,7 +297,12 @@ func runAll(ctx context.Context, log *slog.Logger, components ...component) erro
 			}
 
 			if err != nil {
-				log.Error("component failed", "component", comp.name, "err", err)
+				log.ErrorContext(
+					ctx,
+					"Component failed",
+					slog.String("component", comp.name),
+					slog.Any("err", err),
+				)
 				once.Do(func() { first = err })
 				cancel()
 			}
@@ -315,8 +329,14 @@ func serveHTTP(ctx context.Context, log *slog.Logger, srv *http.Server) error {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 
-	if err := srv.Shutdown(sctx); err != nil {
-		log.Warn("http shutdown timed out; closing connections", "addr", srv.Addr, "err", err)
+	err := srv.Shutdown(sctx)
+	if err != nil {
+		log.WarnContext(
+			ctx,
+			"Http shutdown timed out; closing connections",
+			slog.String("addr", srv.Addr),
+			slog.Any("err", err),
+		)
 
 		_ = srv.Close()
 	}
@@ -345,7 +365,8 @@ func enrollToken(args []string) error {
 		"admin unix socket of the running hub",
 	)
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}

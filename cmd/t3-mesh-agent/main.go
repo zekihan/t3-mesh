@@ -52,7 +52,8 @@ var (
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "t3-mesh-agent: %v\n", err)
 		os.Exit(1)
 	}
@@ -73,7 +74,8 @@ func run(args []string) error {
 	case "fallback":
 		return fallbackCmd(args[1:])
 	case launcher.SelfTestChildArg:
-		if err := launcher.SelfTestChild(args[1:]); err != nil {
+		err := launcher.SelfTestChild(args[1:])
+		if err != nil {
 			return fmt.Errorf("selftest child: %w", err)
 		}
 
@@ -101,7 +103,8 @@ func runAgent(args []string) error {
 	configPath := fs.String("config", "", "agent configuration file")
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -113,7 +116,8 @@ func runAgent(args []string) error {
 		return fmt.Errorf("run: %w %q", errArguments, fs.Args())
 	}
 
-	if err := requireFlag("config", *configPath); err != nil {
+	err = requireFlag("config", *configPath)
+	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
 
@@ -137,9 +141,14 @@ func runAgent(args []string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 
-	log.Info("agent starting", "version", version, "name", cfg.Identity.Name)
+	log.Info(
+		"Agent starting",
+		slog.String("version", version),
+		slog.String("name", cfg.Identity.Name),
+	)
 
-	if err := agt.Run(ctx); err != nil {
+	err = agt.Run(ctx)
+	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
 
@@ -155,7 +164,8 @@ func launcherCmd(args []string) error {
 	selfTest := fs.Bool("self-test", false, "supervise dummy children through every path and exit")
 	level := fs.String("log-level", "info", "launcher log level: debug, info, warn or error")
 
-	if err := fs.Parse(args[1:]); err != nil {
+	err := fs.Parse(args[1:])
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -183,7 +193,8 @@ func launcherCmd(args []string) error {
 		return selfTestCmd(ctx)
 	}
 
-	if err = requireFlag("config", *configPath); err != nil {
+	err = requireFlag("config", *configPath)
+	if err != nil {
 		return fmt.Errorf("launcher: %w", err)
 	}
 
@@ -193,7 +204,9 @@ func launcherCmd(args []string) error {
 	}
 
 	layout := launcher.Layout{Dir: cfg.InstallDir}
-	if err = checkInstalled(layout); err != nil {
+
+	err = checkInstalled(layout)
+	if err != nil {
 		return fmt.Errorf("launcher: %w", err)
 	}
 
@@ -217,7 +230,8 @@ func selfTestCmd(ctx context.Context) error {
 		return fmt.Errorf("launcher: locate binary: %w", err)
 	}
 
-	if err := launcher.SelfTest(ctx, exe); err != nil {
+	err = launcher.SelfTest(ctx, exe)
+	if err != nil {
 		return fmt.Errorf("self-test: %w", err)
 	}
 
@@ -229,11 +243,13 @@ func selfTestCmd(ctx context.Context) error {
 // checkInstalled reports an install layout that lacks the links the launcher
 // starts from, as on a fresh manual install that was never staged by install.sh.
 func checkInstalled(layout launcher.Layout) error {
-	if _, err := layout.KnownGood(); err != nil {
+	_, err := layout.KnownGood()
+	if err != nil {
 		return fmt.Errorf("%w %s: %w", errNotSetUp, layout.Dir, err)
 	}
 
-	if _, err := layout.Current(); err != nil {
+	_, err = layout.Current()
+	if err != nil {
 		return fmt.Errorf("%w %s: %w", errNotSetUp, layout.Dir, err)
 	}
 
@@ -245,7 +261,8 @@ func enrollCmd(args []string) error {
 	configPath := fs.String("config", "", "agent configuration file")
 	token := fs.String("token", "", "single-use enrollment token from the hub")
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -257,11 +274,13 @@ func enrollCmd(args []string) error {
 		return fmt.Errorf("enroll: %w %q", errArguments, fs.Args())
 	}
 
-	if err := requireFlag("config", *configPath); err != nil {
+	err = requireFlag("config", *configPath)
+	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
 
-	if err := requireFlag("token", *token); err != nil {
+	err = requireFlag("token", *token)
+	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
 
@@ -276,7 +295,8 @@ func enrollCmd(args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, enrollTimeout)
 	defer cancel()
 
-	if err := agent.Enroll(ctx, cfg, *token, nil); err != nil {
+	err = agent.Enroll(ctx, cfg, *token, nil)
+	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
 
@@ -298,7 +318,8 @@ func fallbackCmd(args []string) error {
 		"age after which the heartbeat counts as stale",
 	)
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -310,7 +331,8 @@ func fallbackCmd(args []string) error {
 		return fmt.Errorf("fallback: %w %q", errArguments, fs.Args())
 	}
 
-	if err := requireFlag("install-dir", *installDir); err != nil {
+	err = requireFlag("install-dir", *installDir)
+	if err != nil {
 		return fmt.Errorf("fallback: %w", err)
 	}
 
@@ -330,11 +352,15 @@ func fallbackCmd(args []string) error {
 			return fmt.Errorf("fallback: %w", errMaxAgeFlag)
 		}
 
-		if err := layout.FallbackToPrevious(); err != nil {
+		err = layout.FallbackToPrevious()
+		if err != nil {
 			return fmt.Errorf("fallback: %w", err)
 		}
 
-		log.Info("known-good and current now point at previous-good", "install", layout.Dir)
+		log.Info(
+			"Known-good and current now point at previous-good",
+			slog.String("install", layout.Dir),
+		)
 
 		return nil
 	}
@@ -349,13 +375,20 @@ func fallbackCmd(args []string) error {
 	}
 
 	if !repointed {
-		log.Info("nothing to do", "install", layout.Dir, "heartbeat", *heartbeat)
+		log.Info(
+			"Nothing to do",
+			slog.String("install", layout.Dir),
+			slog.String("heartbeat", *heartbeat),
+		)
 
 		return nil
 	}
 
-	log.Info("known-good and current now point at previous-good",
-		"install", layout.Dir, "heartbeat", *heartbeat)
+	log.Info(
+		"Known-good and current now point at previous-good",
+		slog.String("install", layout.Dir),
+		slog.String("heartbeat", *heartbeat),
+	)
 
 	return nil
 }
@@ -367,7 +400,8 @@ func newLogger(level slog.Level) *slog.Logger {
 func parseLogLevel(s string) (slog.Level, error) {
 	var level slog.Level
 
-	if err := level.UnmarshalText([]byte(s)); err != nil {
+	err := level.UnmarshalText([]byte(s))
+	if err != nil {
 		return 0, fmt.Errorf("--log-level: %w", err)
 	}
 

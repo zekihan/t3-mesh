@@ -20,6 +20,19 @@ import (
 	"github.com/zekihan/t3-mesh/internal/policy"
 )
 
+var (
+	errNoPrivateKeyBlock = errors.New("pki: no PRIVATE KEY PEM block")
+	errKeyNotECDSA       = errors.New("pki: key is not ECDSA")
+	errKeyNotP256        = errors.New("pki: key is not P-256")
+	errNoCSRBlock        = errors.New("pki: no CERTIFICATE REQUEST PEM block")
+	errCSRKeyNotP256     = errors.New("pki: CSR key is not ECDSA P-256")
+	errCSRSubject        = errors.New("pki: CSR has subject attributes")
+	errCSRSANs           = errors.New("pki: CSR has DNS, IP or email SANs")
+	errURISANs           = errors.New("URI SANs, want 1")
+	errNoCertBlocks      = errors.New("pki: no CERTIFICATE PEM blocks")
+	errNoPeerCert        = errors.New("pki: no peer certificate")
+)
+
 // GenerateKey returns a new P-256 private key.
 func GenerateKey() (*ecdsa.PrivateKey, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -44,7 +57,7 @@ func EncodeKeyPEM(key *ecdsa.PrivateKey) ([]byte, error) {
 func ParseKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil || block.Type != "PRIVATE KEY" {
-		return nil, errors.New("pki: no PRIVATE KEY PEM block")
+		return nil, errNoPrivateKeyBlock
 	}
 
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
@@ -54,11 +67,11 @@ func ParseKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
 
 	key, ok := parsed.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("pki: key is not ECDSA")
+		return nil, errKeyNotECDSA
 	}
 
 	if key.Curve != elliptic.P256() {
-		return nil, errors.New("pki: key is not P-256")
+		return nil, errKeyNotP256
 	}
 
 	return key, nil
@@ -67,7 +80,9 @@ func ParseKeyPEM(data []byte) (*ecdsa.PrivateKey, error) {
 // CreateCSR returns a PEM CSR carrying only the identity URI SAN.
 func CreateCSR(key *ecdsa.PrivateKey, identity string) ([]byte, error) {
 	uriStr := policy.IdentityURI(identity)
-	if _, err := policy.IdentityFromURI(uriStr); err != nil {
+
+	_, err := policy.IdentityFromURI(uriStr)
+	if err != nil {
 		return nil, fmt.Errorf("pki: %w", err)
 	}
 
@@ -92,7 +107,7 @@ func CreateCSR(key *ecdsa.PrivateKey, identity string) ([]byte, error) {
 func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return nil, "", errors.New("pki: no CERTIFICATE REQUEST PEM block")
+		return nil, "", errNoCSRBlock
 	}
 
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
@@ -100,25 +115,26 @@ func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 		return nil, "", fmt.Errorf("pki: parse CSR: %w", err)
 	}
 
-	if err = csr.CheckSignature(); err != nil {
+	err = csr.CheckSignature()
+	if err != nil {
 		return nil, "", fmt.Errorf("pki: CSR signature: %w", err)
 	}
 
 	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok || pub.Curve != elliptic.P256() {
-		return nil, "", errors.New("pki: CSR key is not ECDSA P-256")
+		return nil, "", errCSRKeyNotP256
 	}
 
 	if len(csr.Subject.Names) > 0 || len(csr.Subject.ExtraNames) > 0 {
-		return nil, "", errors.New("pki: CSR has subject attributes")
+		return nil, "", errCSRSubject
 	}
 
 	if len(csr.DNSNames) > 0 || len(csr.IPAddresses) > 0 || len(csr.EmailAddresses) > 0 {
-		return nil, "", errors.New("pki: CSR has DNS, IP or email SANs")
+		return nil, "", errCSRSANs
 	}
 
 	if len(csr.URIs) != 1 {
-		return nil, "", fmt.Errorf("pki: CSR has %d URI SANs, want 1", len(csr.URIs))
+		return nil, "", fmt.Errorf("pki: CSR has %d %w", len(csr.URIs), errURISANs)
 	}
 
 	name, err := policy.IdentityFromURI(csr.URIs[0].String())
@@ -140,7 +156,7 @@ func Fingerprint(cert *x509.Certificate) string {
 // SAN.
 func CertIdentity(cert *x509.Certificate) (string, error) {
 	if len(cert.URIs) != 1 {
-		return "", fmt.Errorf("pki: certificate has %d URI SANs, want 1", len(cert.URIs))
+		return "", fmt.Errorf("pki: certificate has %d %w", len(cert.URIs), errURISANs)
 	}
 
 	name, err := policy.IdentityFromURI(cert.URIs[0].String())
@@ -176,7 +192,7 @@ func ParseCertsPEM(data []byte) ([]*x509.Certificate, error) {
 	}
 
 	if len(certs) == 0 {
-		return nil, errors.New("pki: no CERTIFICATE PEM blocks")
+		return nil, errNoCertBlocks
 	}
 
 	return certs, nil
@@ -206,7 +222,7 @@ func VerifyPeer(
 	now time.Time,
 ) (*x509.Certificate, error) {
 	if len(rawCerts) == 0 {
-		return nil, errors.New("pki: no peer certificate")
+		return nil, errNoPeerCert
 	}
 
 	certs := make([]*x509.Certificate, 0, len(rawCerts))
@@ -255,23 +271,28 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 		}
 	}()
 
-	if err = tmp.Chmod(mode); err != nil {
+	err = tmp.Chmod(mode)
+	if err != nil {
 		return fmt.Errorf("pki: chmod temp file: %w", err)
 	}
 
-	if _, err = tmp.Write(data); err != nil {
+	_, err = tmp.Write(data)
+	if err != nil {
 		return fmt.Errorf("pki: write temp file: %w", err)
 	}
 
-	if err = tmp.Sync(); err != nil {
+	err = tmp.Sync()
+	if err != nil {
 		return fmt.Errorf("pki: sync temp file: %w", err)
 	}
 
-	if err = tmp.Close(); err != nil {
+	err = tmp.Close()
+	if err != nil {
 		return fmt.Errorf("pki: close temp file: %w", err)
 	}
 
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	err = os.Rename(tmp.Name(), path)
+	if err != nil {
 		return fmt.Errorf("pki: rename temp file: %w", err)
 	}
 
@@ -279,14 +300,15 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 }
 
 func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // caller-controlled identity directory
+	dirFile, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("pki: open dir: %w", err)
 	}
 
-	defer func() { _ = d.Close() }()
+	defer func() { _ = dirFile.Close() }()
 
-	if err := d.Sync(); err != nil {
+	err = dirFile.Sync()
+	if err != nil {
 		return fmt.Errorf("pki: sync dir: %w", err)
 	}
 

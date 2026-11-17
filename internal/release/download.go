@@ -15,6 +15,19 @@ import (
 	"aead.dev/minisign"
 )
 
+const (
+	binaryMode = 0o755
+	dirMode    = 0o755
+)
+
+var (
+	errManifestVersion = errors.New("manifest is for")
+	errExceeds         = errors.New("exceeds")
+	errHTTPStatus      = errors.New("http status")
+	errNoAsset         = errors.New("no asset for")
+	errSHA256Mismatch  = errors.New("sha256 mismatch")
+)
+
 // DefaultBaseURL is the compiled-in release download prefix.
 const DefaultBaseURL = "https://github.com/zekihan/t3-mesh/releases/download/"
 
@@ -33,147 +46,186 @@ type Downloader struct {
 	Keys    []minisign.PublicKey // default DefaultKeys()
 }
 
-func (d *Downloader) client() *http.Client {
-	if d.Client != nil {
-		return d.Client
-	}
-	return http.DefaultClient
-}
-
-func (d *Downloader) assetURL(version, name string) (string, error) {
-	if _, err := ParseVersion(version); err != nil {
-		return "", err
-	}
-	base := d.BaseURL
-	if base == "" {
-		base = DefaultBaseURL
-	}
-	if !strings.HasSuffix(base, "/") {
-		base += "/"
-	}
-	return base + version + "/" + name, nil
-}
-
 // Fetch downloads and verifies the manifest of version.
-func (d *Downloader) Fetch(ctx context.Context, version string) (Manifest, error) {
-	keys := d.Keys
+func (dl *Downloader) Fetch(ctx context.Context, version string) (Manifest, error) {
+	keys := dl.Keys
 	if keys == nil {
 		var err error
-		if keys, err = DefaultKeys(); err != nil {
+
+		keys, err = DefaultKeys()
+		if err != nil {
 			return Manifest{}, err
 		}
 	}
-	data, err := d.get(ctx, version, ManifestAsset, MaxManifestSize)
+
+	data, err := dl.get(ctx, version, ManifestAsset, MaxManifestSize)
 	if err != nil {
 		return Manifest{}, err
 	}
-	sig, err := d.get(ctx, version, SignatureAsset, MaxSignatureSize)
+
+	sig, err := dl.get(ctx, version, SignatureAsset, MaxSignatureSize)
 	if err != nil {
 		return Manifest{}, err
 	}
-	m, err := VerifyManifest(data, sig, keys)
+
+	man, err := VerifyManifest(data, sig, keys)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("release %s: %w", version, err)
 	}
-	if m.Version != version {
-		return Manifest{}, fmt.Errorf("release %s: manifest is for %s", version, m.Version)
-	}
-	return m, nil
-}
 
-func (d *Downloader) get(ctx context.Context, version, name string, limit int64) ([]byte, error) {
-	rc, err := d.open(ctx, version, name)
-	if err != nil {
-		return nil, err
+	if man.Version != version {
+		return Manifest{}, fmt.Errorf("release %s: %w %s", version, errManifestVersion, man.Version)
 	}
-	defer rc.Close()
-	b, err := io.ReadAll(io.LimitReader(rc, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", name, err)
-	}
-	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes", name, limit)
-	}
-	return b, nil
-}
 
-func (d *Downloader) open(ctx context.Context, version, name string) (io.ReadCloser, error) {
-	u, err := d.assetURL(version, name)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	resp, err := d.client().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", name, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("download %s: http status %d", name, resp.StatusCode)
-	}
-	return resp.Body, nil
+	return man, nil
 }
 
 // Download fetches the binary for platform listed in m (which must come from
 // Fetch or VerifyManifest), checks its SHA-256 and atomically writes it to
 // destPath with mode 0755.
-func (d *Downloader) Download(
+func (dl *Downloader) Download(
 	ctx context.Context,
-	m Manifest,
+	man Manifest,
 	platform, destPath string,
 ) (err error) {
-	a, ok := m.Asset(platform)
+	asset, ok := man.Asset(platform)
 	if !ok {
-		return fmt.Errorf("release %s has no asset for %s", m.Version, platform)
+		return fmt.Errorf("release %s has %w %s", man.Version, errNoAsset, platform)
 	}
-	if err := m.Validate(); err != nil {
+
+	err = man.Validate()
+	if err != nil {
 		return err
 	}
-	rc, err := d.open(ctx, m.Version, a.Name)
+
+	rc, err := dl.open(ctx, man.Version, asset.Name)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
 
 	dir := filepath.Dir(destPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+
+	err = os.MkdirAll(dir, dirMode)
+	if err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
+
 	tmp, err := os.CreateTemp(dir, ".download-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
 		}
 	}()
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(rc, MaxBinarySize+1))
+
+	sum := sha256.New()
+
+	n, err := io.Copy(io.MultiWriter(tmp, sum), io.LimitReader(rc, MaxBinarySize+1))
 	if err != nil {
-		return fmt.Errorf("download %s: %w", a.Name, err)
+		return fmt.Errorf("download %s: %w", asset.Name, err)
 	}
+
 	if n > MaxBinarySize {
-		return fmt.Errorf("%s exceeds %d bytes", a.Name, int64(MaxBinarySize))
+		return fmt.Errorf("%s %w %d bytes", asset.Name, errExceeds, int64(MaxBinarySize))
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, a.SHA256) {
-		return errors.New("sha256 mismatch for " + a.Name)
+
+	if got := hex.EncodeToString(sum.Sum(nil)); !strings.EqualFold(got, asset.SHA256) {
+		return fmt.Errorf("%w for %s", errSHA256Mismatch, asset.Name)
 	}
-	if err = tmp.Chmod(0o755); err != nil {
+
+	err = tmp.Chmod(binaryMode)
+	if err != nil {
 		return fmt.Errorf("chmod: %w", err)
 	}
-	if err = tmp.Sync(); err != nil {
+
+	err = tmp.Sync()
+	if err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
-	if err = tmp.Close(); err != nil {
+
+	err = tmp.Close()
+	if err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
-	if err = os.Rename(tmp.Name(), destPath); err != nil {
+
+	err = os.Rename(tmp.Name(), destPath)
+	if err != nil {
 		return fmt.Errorf("install %s: %w", destPath, err)
 	}
+
 	return nil
+}
+
+func (dl *Downloader) client() *http.Client {
+	if dl.Client != nil {
+		return dl.Client
+	}
+
+	return http.DefaultClient
+}
+
+func (dl *Downloader) assetURL(version, name string) (string, error) {
+	_, err := ParseVersion(version)
+	if err != nil {
+		return "", err
+	}
+
+	base := dl.BaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+
+	return base + version + "/" + name, nil
+}
+
+func (dl *Downloader) get(ctx context.Context, version, name string, limit int64) ([]byte, error) {
+	rc, err := dl.open(ctx, version, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s %w %d bytes", name, errExceeds, limit)
+	}
+
+	return data, nil
+}
+
+func (dl *Downloader) open(ctx context.Context, version, name string) (io.ReadCloser, error) {
+	u, err := dl.assetURL(version, name)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := dl.client().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", name, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+
+		return nil, fmt.Errorf("download %s: %w %d", name, errHTTPStatus, resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }

@@ -58,8 +58,8 @@ func Target(svc, machine string) string {
 }
 
 // SplitTarget splits "<svc>.<machine>".
-func SplitTarget(target string) (svc, machine string, ok bool) {
-	svc, machine, ok = strings.Cut(target, ".")
+func SplitTarget(target string) (string, string, bool) {
+	svc, machine, ok := strings.Cut(target, ".")
 	if !ok || svc == "" || machine == "" {
 		return "", "", false
 	}
@@ -73,7 +73,7 @@ func Allowed(rules proto.Rules, identity, svc, machine string) bool {
 }
 
 // Revoked returns ErrDisabled or ErrBlocked when the identity or leaf is
-// revoked, nil otherwise. fingerprint may be empty when unknown.
+// revoked, nil otherwise. The fingerprint may be empty when unknown.
 func Revoked(revs proto.Revocations, identity, fingerprint string) error {
 	if slices.Contains(revs.DisabledIdentities, identity) {
 		return fmt.Errorf("%w: %s", ErrDisabled, identity)
@@ -97,17 +97,30 @@ type Session struct {
 }
 
 // Check returns nil when s is still allowed at now under rules and revs.
-func Check(rules proto.Rules, revs proto.Revocations, s Session, now time.Time) error {
-	if err := Revoked(revs, s.Identity, s.Fingerprint); err != nil {
+//
+//nolint:gocritic // exported API takes Session by value
+func Check(rules proto.Rules, revs proto.Revocations, sess Session, now time.Time) error {
+	err := Revoked(revs, sess.Identity, sess.Fingerprint)
+	if err != nil {
 		return err
 	}
 
-	if !s.NotAfter.IsZero() && !now.Before(s.NotAfter) {
-		return fmt.Errorf("%w: %s at %s", ErrExpired, s.Identity, s.NotAfter.Format(time.RFC3339))
+	if !sess.NotAfter.IsZero() && !now.Before(sess.NotAfter) {
+		return fmt.Errorf(
+			"%w: %s at %s",
+			ErrExpired,
+			sess.Identity,
+			sess.NotAfter.Format(time.RFC3339),
+		)
 	}
 
-	if !Allowed(rules, s.Identity, s.Svc, s.Machine) {
-		return fmt.Errorf("%w: %s → %s", ErrNotAllowed, s.Identity, Target(s.Svc, s.Machine))
+	if !Allowed(rules, sess.Identity, sess.Svc, sess.Machine) {
+		return fmt.Errorf(
+			"%w: %s → %s",
+			ErrNotAllowed,
+			sess.Identity,
+			Target(sess.Svc, sess.Machine),
+		)
 	}
 
 	return nil

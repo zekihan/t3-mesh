@@ -8,15 +8,18 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,21 +38,23 @@ import (
 	"github.com/zekihan/t3-mesh/internal/pki/pkitest"
 )
 
+var errOpenStream = errors.New("open stream: status")
+
 const viewerDomain = "mesh.test"
 
-func eventually(t *testing.T, d time.Duration, what string, cond func() bool) {
+func eventually(t *testing.T, dur time.Duration, what string, cond func() bool) {
 	t.Helper()
 
-	deadline := time.Now().Add(d)
+	deadline := time.Now().Add(dur)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		<-time.After(20 * time.Millisecond)
 	}
 
-	t.Fatalf("timed out after %s waiting for: %s", d, what)
+	t.Fatalf("timed out after %s waiting for: %s", dur, what)
 }
 
 func logger() *slog.Logger {
@@ -76,7 +81,7 @@ func freePort(t *testing.T, host string) int {
 	defer portMu.Unlock()
 
 	for range 100 {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		ln, err := new(net.ListenConfig).Listen(t.Context(), "tcp", net.JoinHostPort(host, "0"))
 		if err != nil {
 			t.Fatalf("free port: %v", err)
 		}
@@ -128,28 +133,28 @@ func directAddr() netip.Addr {
 // ---- hub configuration ----
 
 type hubCfg struct {
-	release  string
-	disabled []string
-	blocked  []string
-	// noRelayRule removes agent-a from the mesh-t3-b entry.
-	noRelayRule bool
+	release     string
+	disabled    []string
+	blocked     []string
 	home        []string
+	noRelayRule bool
 }
 
-func (c hubCfg) yaml() string {
-	rel := c.release
+func (hc *hubCfg) yaml() string {
+	rel := hc.release
 	if rel == "" {
 		rel = "v0.3.0"
 	}
 
 	list := func(in []string) string { return "[" + strings.Join(in, ",") + "]" }
-	quoted := make([]string, len(c.home))
-	for i, h := range c.home {
+
+	quoted := make([]string, len(hc.home))
+	for i, h := range hc.home {
 		quoted[i] = `"` + h + `"`
 	}
 
 	bIDs := "z-phone, agent-a"
-	if c.noRelayRule {
+	if hc.noRelayRule {
 		bIDs = "z-phone"
 	}
 
@@ -166,7 +171,7 @@ policy:
     mesh-t3-b: {identities: [%s]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, list(quoted), viewerDomain, rel, bIDs, list(c.disabled), list(c.blocked))
+`, list(quoted), viewerDomain, rel, bIDs, list(hc.disabled), list(hc.blocked))
 }
 
 // ---- mesh (hub side) ----
@@ -175,19 +180,19 @@ policy:
 type trackListener struct {
 	net.Listener
 
-	mu    sync.Mutex
 	conns []net.Conn
+	mu    sync.Mutex
 }
 
 func (l *trackListener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
+	conn, err := l.Listener.Accept()
 	if err == nil {
 		l.mu.Lock()
-		l.conns = append(l.conns, c)
+		l.conns = append(l.conns, conn)
 		l.mu.Unlock()
 	}
 
-	return c, err //nolint:wrapcheck // passthrough
+	return conn, err //nolint:wrapcheck // passthrough
 }
 
 func (l *trackListener) count() int {
@@ -205,32 +210,31 @@ func (l *trackListener) since(n int) []net.Conn {
 }
 
 type meshOpts struct {
-	cfg hubCfg
-	// extraCAs are in the trust bundle from the start.
 	extraCAs []*pkitest.CA
+	cfg      hubCfg
 }
 
 type mesh struct {
-	t       *testing.T
+	direct  netip.Addr
+	ops     *httptest.Server
+	viewer  *httptest.Server
+	stopHub func()
 	ca      *pkitest.CA
-	pool    *x509.CertPool
-	dir     string
-	paths   hubconfig.Paths
 	watcher *hubconfig.Watcher
 	srv     *hub.Server
-	fake    *issuertest.Fake
-	tokens  *enroll.Tokens
+	pool    *x509.CertPool
+	t       *testing.T
 	tl      *trackListener
+	tokens  *enroll.Tokens
+	fake    *issuertest.Fake
+	paths   hubconfig.Paths
 	hubAddr string
-	viewer  *httptest.Server
-	ops     *httptest.Server
-	clock   atomic.Int64
-	direct  netip.Addr
-	stopHub func()
+	dir     string
 	cfg     hubCfg
+	clock   atomic.Int64
 }
 
-func (m *mesh) now() time.Time { return time.Now().Add(time.Duration(m.clock.Load())) }
+func (msh *mesh) now() time.Time { return time.Now().Add(time.Duration(msh.clock.Load())) }
 
 func writeAtomic(t *testing.T, tmpDir, path, content string) {
 	t.Helper()
@@ -240,104 +244,108 @@ func writeAtomic(t *testing.T, tmpDir, path, content string) {
 		t.Fatal(err)
 	}
 
-	if _, err = tmp.WriteString(content); err != nil {
+	_, err = tmp.WriteString(content)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = tmp.Close(); err != nil {
+	err = tmp.Close()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	err = os.Rename(tmp.Name(), path)
+	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func newMesh(t *testing.T, o meshOpts) *mesh {
+func newMesh(t *testing.T, opts *meshOpts) *mesh {
 	t.Helper()
 
-	m := &mesh{
+	msh := &mesh{
 		t:      t,
 		ca:     pkitest.NewCA(t, "clients"),
 		dir:    t.TempDir(),
-		cfg:    o.cfg,
+		cfg:    opts.cfg,
 		direct: directAddr(),
 	}
-	m.pool = x509.NewCertPool()
-	m.pool.AddCert(m.ca.Cert)
-	m.paths = hubconfig.Paths{
-		ConfigDir: filepath.Join(m.dir, "config"),
-		TrustDir:  filepath.Join(m.dir, "trust"),
-		CertDir:   filepath.Join(m.dir, "cert"),
+	msh.pool = x509.NewCertPool()
+	msh.pool.AddCert(msh.ca.Cert)
+	msh.paths = hubconfig.Paths{
+		ConfigDir: filepath.Join(msh.dir, "config"),
+		TrustDir:  filepath.Join(msh.dir, "trust"),
+		CertDir:   filepath.Join(msh.dir, "cert"),
 	}
 
-	for _, d := range []string{m.paths.ConfigDir, m.paths.TrustDir, m.paths.CertDir, filepath.Join(m.dir, "tmp")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+	for _, d := range []string{msh.paths.ConfigDir, msh.paths.TrustDir, msh.paths.CertDir, filepath.Join(msh.dir, "tmp")} {
+		err := os.MkdirAll(d, 0o755) //nolint:gosec // test directory is not secret
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if m.cfg.home == nil {
-		m.cfg.home = []string{"127.0.0.0/8"}
-		if m.direct.IsValid() && !m.direct.IsLoopback() {
-			m.cfg.home = append(m.cfg.home, m.direct.String()+"/32")
+	if msh.cfg.home == nil {
+		msh.cfg.home = []string{"127.0.0.0/8"}
+		if msh.direct.IsValid() && !msh.direct.IsLoopback() {
+			msh.cfg.home = append(msh.cfg.home, msh.direct.String()+"/32")
 		}
 	}
 
-	m.writeConfig(m.cfg)
-	m.writeTrust("trust-1", append([]*pkitest.CA{m.ca}, o.extraCAs...)...)
+	msh.writeConfig(&msh.cfg)
+	msh.writeTrust("trust-1", append([]*pkitest.CA{msh.ca}, opts.extraCAs...)...)
 
-	srvCert := m.ca.IssueServer(t, "localhost", "127.0.0.1")
+	srvCert := msh.ca.IssueServer(t, "localhost", "127.0.0.1")
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(srvCert.PrivateKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	tmp := filepath.Join(m.dir, "tmp")
-	writeAtomic(t, tmp, filepath.Join(m.paths.CertDir, hubconfig.CertFile),
+	tmp := filepath.Join(msh.dir, "tmp")
+	writeAtomic(t, tmp, filepath.Join(msh.paths.CertDir, hubconfig.CertFile),
 		string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srvCert.Certificate[0]})))
-	writeAtomic(t, tmp, filepath.Join(m.paths.CertDir, hubconfig.KeyFile),
+	writeAtomic(t, tmp, filepath.Join(msh.paths.CertDir, hubconfig.KeyFile),
 		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})))
 
-	m.watcher, err = hubconfig.NewWatcher(m.paths, logger())
+	msh.watcher, err = hubconfig.NewWatcher(msh.paths, logger())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	m.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) {
-		return m.ca.SignCSR(csr, 365*24*time.Hour)
+	msh.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) {
+		return msh.ca.SignCSR(csr, 365*24*time.Hour)
 	}}
-	m.tokens = enroll.NewTokens(m.now)
+	msh.tokens = enroll.NewTokens(msh.now)
 
-	m.srv, err = hub.New(hub.Options{
-		Config: m.watcher, Issuer: m.fake, Tokens: m.tokens, Log: logger(), Now: m.now,
+	msh.srv, err = hub.New(hub.Options{
+		Config: msh.watcher, Issuer: msh.fake, Tokens: msh.tokens, Log: logger(), Now: msh.now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	m.tl = &trackListener{Listener: ln}
-	m.hubAddr = ln.Addr().String()
+	msh.tl = &trackListener{Listener: ln}
+	msh.hubAddr = ln.Addr().String()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	var wg sync.WaitGroup
 
-	wg.Go(func() { _ = m.watcher.Run(ctx, m.srv.OnConfigChange) })
-	wg.Go(func() { _ = m.srv.ServeTunnels(ctx, m.tl) })
+	wg.Go(func() { _ = msh.watcher.Run(ctx, msh.srv.OnConfigChange) })
+	wg.Go(func() { _ = msh.srv.ServeTunnels(ctx, msh.tl) })
 
-	m.viewer = httptest.NewServer(m.srv.ViewerHandler())
-	m.ops = httptest.NewServer(m.srv.OpsHandler())
+	msh.viewer = httptest.NewServer(msh.srv.ViewerHandler())
+	msh.ops = httptest.NewServer(msh.srv.OpsHandler())
 
 	var once sync.Once
 
-	m.stopHub = func() {
+	msh.stopHub = func() {
 		once.Do(func() {
 			cancel()
 
@@ -353,112 +361,137 @@ func newMesh(t *testing.T, o meshOpts) *mesh {
 		})
 	}
 
-	t.Cleanup(m.stopHub)
+	t.Cleanup(msh.stopHub)
 	t.Cleanup(func() {
-		m.viewer.CloseClientConnections()
-		m.viewer.Close()
-		m.ops.Close()
+		msh.viewer.CloseClientConnections()
+		msh.viewer.Close()
+		msh.ops.Close()
 	})
 
-	eventually(t, 5*time.Second, "hub ready", m.srv.Ready)
+	eventually(t, 5*time.Second, "hub ready", msh.srv.Ready)
 
-	return m
+	return msh
 }
 
-func (m *mesh) writeConfig(c hubCfg) {
-	m.t.Helper()
-	m.cfg = c
-	m.writeRaw(c.yaml())
+func (msh *mesh) writeConfig(c *hubCfg) {
+	msh.t.Helper()
+	msh.cfg = *c
+	msh.writeRaw(c.yaml())
 }
 
-func (m *mesh) writeRaw(content string) {
-	m.t.Helper()
+func (msh *mesh) writeRaw(content string) {
+	msh.t.Helper()
 	writeAtomic(
-		m.t,
-		filepath.Join(m.dir, "tmp"),
-		filepath.Join(m.paths.ConfigDir, hubconfig.ConfigFile),
+		msh.t,
+		filepath.Join(msh.dir, "tmp"),
+		filepath.Join(msh.paths.ConfigDir, hubconfig.ConfigFile),
 		content,
 	)
 }
 
-func (m *mesh) writeTrust(rev string, cas ...*pkitest.CA) {
-	m.t.Helper()
+func (msh *mesh) writeTrust(rev string, cas ...*pkitest.CA) {
+	msh.t.Helper()
 
 	var b strings.Builder
 	for _, ca := range cas {
 		b.Write(ca.CertPEM)
 	}
 
-	tmp := filepath.Join(m.dir, "tmp")
-	writeAtomic(m.t, tmp, filepath.Join(m.paths.TrustDir, hubconfig.TrustFile), b.String())
-	writeAtomic(m.t, tmp, filepath.Join(m.paths.TrustDir, hubconfig.RevFile), rev)
+	tmp := filepath.Join(msh.dir, "tmp")
+	writeAtomic(msh.t, tmp, filepath.Join(msh.paths.TrustDir, hubconfig.TrustFile), b.String())
+	writeAtomic(msh.t, tmp, filepath.Join(msh.paths.TrustDir, hubconfig.RevFile), rev)
 }
 
 // update rewrites config.yaml and waits until the hub watcher loaded it.
-func (m *mesh) update(f func(c *hubCfg)) {
-	m.t.Helper()
+func (msh *mesh) update(f func(c *hubCfg)) {
+	msh.t.Helper()
 
-	old := m.watcher.Current().Fingerprint
-	c := m.cfg
+	old := msh.watcher.Current().Fingerprint
+	c := msh.cfg
 
 	f(&c)
-	m.writeConfig(c)
+	msh.writeConfig(&c)
 
 	eventually(
-		m.t,
+		msh.t,
 		5*time.Second,
 		"hub reloads config",
-		func() bool { return m.watcher.Current().Fingerprint != old },
+		func() bool { return msh.watcher.Current().Fingerprint != old },
 	)
 }
 
 // ---- status ----
 
 type machineStatus struct {
-	Connected      bool
-	Sessions       int
-	OpenStreams    int64
-	LinkStreams    int64
-	DirectSessions int
-	CertNotAfter   *time.Time
-	Acked          struct{ Release, Rules, Revocations, TrustBundle string }
-	Warnings       []string
-	Alerts         map[string]bool
+	CertNotAfter *time.Time      `json:"certNotAfter"`
+	Alerts       map[string]bool `json:"alerts"`
+	Acked        struct {
+		Release     string `json:"release"`
+		Rules       string `json:"rules"`
+		Revocations string `json:"revocations"`
+		TrustBundle string `json:"trustBundle"`
+	} `json:"acked"`
+	Warnings       []string `json:"warnings"`
+	Sessions       int      `json:"sessions"`
+	OpenStreams    int64    `json:"openStreams"`
+	LinkStreams    int64    `json:"linkStreams"`
+	DirectSessions int      `json:"directSessions"`
+	Connected      bool     `json:"connected"`
 }
 
 type statusDoc struct {
-	PolicyRevision      string
-	TrustBundleRevision string
-	Release             struct{ Version, Revision string }
-	Stale               bool
-	ConfigError         string
-	Machines            map[string]machineStatus
+	Machines map[string]machineStatus `json:"machines"`
+	Release  struct {
+		Version  string `json:"version"`
+		Revision string `json:"revision"`
+	} `json:"release"`
+	PolicyRevision      string `json:"policyRevision"`
+	TrustBundleRevision string `json:"trustBundleRevision"`
+	ConfigError         string `json:"configError"`
+	Stale               bool   `json:"stale"`
 }
 
-func (m *mesh) status() statusDoc {
-	m.t.Helper()
-
-	resp, err := http.Get(m.ops.URL + "/status")
+// get issues a GET bound to the test's context.
+func (msh *mesh) get(url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(msh.t.Context(), http.MethodGet, url, http.NoBody)
 	if err != nil {
-		m.t.Fatalf("status: %v", err)
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (msh *mesh) status() statusDoc {
+	msh.t.Helper()
+
+	resp, err := msh.get(msh.ops.URL + "/status")
+	if err != nil {
+		msh.t.Fatalf("status: %v", err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
-	var d statusDoc
-	if err = json.NewDecoder(resp.Body).Decode(&d); err != nil {
-		m.t.Fatalf("decode status: %v", err)
+	var doc statusDoc
+
+	err = json.NewDecoder(resp.Body).Decode(&doc)
+	if err != nil {
+		msh.t.Fatalf("decode status: %v", err)
 	}
 
-	return d
+	return doc
 }
 
-func (m *mesh) opsGet(path string) (int, string) {
-	m.t.Helper()
+func (msh *mesh) opsGet(path string) (int, string) {
+	msh.t.Helper()
 
-	resp, err := http.Get(m.ops.URL + path)
+	resp, err := msh.get(msh.ops.URL + path)
 	if err != nil {
-		m.t.Fatalf("GET %s: %v", path, err)
+		msh.t.Fatalf("GET %s: %v", path, err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
@@ -468,20 +501,20 @@ func (m *mesh) opsGet(path string) (int, string) {
 	return resp.StatusCode, strings.TrimSpace(string(b))
 }
 
-func (m *mesh) waitConnected(machine string) {
-	m.t.Helper()
+func (msh *mesh) waitConnected(machine string) {
+	msh.t.Helper()
 	eventually(
-		m.t,
+		msh.t,
 		10*time.Second,
 		machine+" connected to hub",
-		func() bool { return m.status().Machines[machine].Connected },
+		func() bool { return msh.status().Machines[machine].Connected },
 	)
 }
 
 // rawDial opens a TLS connection to the hub without any protocol on top.
-func (m *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
+func (msh *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
 	cfg := &tls.Config{
-		RootCAs:    m.pool,
+		RootCAs:    msh.pool,
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{alpn},
@@ -492,53 +525,50 @@ func (m *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
 
 	d := net.Dialer{Timeout: 5 * time.Second}
 
-	raw, err := d.Dial("tcp", m.hubAddr)
+	raw, err := d.Dial("tcp", msh.hubAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
-	c := tls.Client(raw, cfg)
-	if err = c.Handshake(); err != nil {
+	conn := tls.Client(raw, cfg)
+
+	err = conn.HandshakeContext(msh.t.Context())
+	if err != nil {
 		_ = raw.Close()
 
 		return nil, fmt.Errorf("handshake: %w", err)
 	}
 
-	return c, nil
+	return conn, nil
 }
 
 // ---- nodes (agent side) ----
 
 type node struct {
-	m          *mesh
-	name       string
-	identity   string
+	cert       tls.Certificate
 	t3         *httptest.Server
+	m          *mesh
 	t3stop     chan struct{}
 	cfg        *agentconfig.Config
-	cert       tls.Certificate
+	cancel     context.CancelFunc
+	done       chan struct{}
+	identity   string
+	name       string
+	hubConns   []net.Conn
 	linkPort   int
 	directPort int
 	clock      atomic.Int64
-	hubConns   []net.Conn
-	cancel     context.CancelFunc
-	done       chan struct{}
 }
 
 type nodeOpts struct {
-	ca       *pkitest.CA
-	notAfter time.Time
-	direct   bool
-	// directPort 0 picks a free port on the LAN address.
+	notAfter   time.Time
+	ca         *pkitest.CA
+	links      []string
 	directPort int
-	// links lists "svc.machine" link keys.
-	links []string
-	// noIdentity leaves the identity directory empty (for enrollment).
+	cacheTTL   time.Duration
+	direct     bool
 	noIdentity bool
-	// noStart prepares the node without running the agent.
-	noStart bool
-	// cacheTTL overrides the direct cache window (default 1h).
-	cacheTTL time.Duration
+	noStart    bool
 }
 
 type healthStub struct{}
@@ -549,24 +579,77 @@ func (healthStub) Promote() error         { return nil }
 func (healthStub) Fail(_, _ string) error { return nil }
 func (healthStub) Restart() error         { return nil }
 
-func (n *node) nowFn() time.Time { return time.Now().Add(time.Duration(n.clock.Load())) }
+func (nd *node) nowFn() time.Time { return time.Now().Add(time.Duration(nd.clock.Load())) }
 
-func (m *mesh) hubTLS() *tls.Config {
-	return &tls.Config{RootCAs: m.pool, ServerName: "localhost"}
+func (msh *mesh) hubTLS() *tls.Config {
+	return &tls.Config{RootCAs: msh.pool, ServerName: "localhost"}
 }
 
-func (m *mesh) newNode(name string, o nodeOpts) *node {
-	m.t.Helper()
+func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
+	msh.t.Helper()
 
-	t := m.t
-	n := &node{
-		m:        m,
+	t := msh.t
+	nd := &node{
+		m:        msh,
 		name:     name,
 		identity: "agent-" + name,
 		t3stop:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
 
+	nd.startT3(name)
+
+	dir := t.TempDir()
+	nd.linkPort = freePort(t, "127.0.0.1")
+
+	links := map[string]string{}
+	for _, k := range opts.links {
+		links[k] = fmt.Sprintf("127.0.0.1:%d", nd.linkPort)
+	}
+
+	nd.directPort = opts.directPort
+	if opts.direct && nd.directPort == 0 {
+		nd.directPort = freePort(t, msh.direct.String())
+	}
+
+	nd.cfg = &agentconfig.Config{
+		Serve:    map[string]string{"t3": nd.t3.Listener.Addr().String()},
+		Links:    links,
+		Identity: agentconfig.Identity{Name: nd.identity, Dir: filepath.Join(dir, "identity")},
+		Direct: agentconfig.Direct{
+			Enabled:  opts.direct,
+			Port:     nd.directPort,
+			CacheTTL: cmpTTL(opts.cacheTTL),
+		},
+		StateDir:   filepath.Join(dir, "state"),
+		InstallDir: filepath.Join(dir, "install"),
+		Hub:        msh.hubAddr,
+	}
+
+	// A first start has no cached home prefixes, so the first Hello would list no
+	// direct addresses. Seed them as an agent that has connected before would have.
+	if opts.direct {
+		seed := &state.Cache{FormatVersion: state.FormatVersion, HomeCIDRs: msh.cfg.home}
+
+		err := state.Save(nd.cfg.StateDir, seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !opts.noIdentity {
+		msh.seedIdentity(nd, opts)
+	}
+
+	if !opts.noStart {
+		nd.start()
+	}
+
+	return nd
+}
+
+// startT3 runs the node's stand-in for the local T3.
+func (nd *node) startT3(name string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		mt := 0
@@ -585,156 +668,122 @@ func (m *mesh) newNode(name string, o nodeOpts) *node {
 
 		select {
 		case <-r.Context().Done():
-		case <-n.t3stop:
+		case <-nd.t3stop:
 		case <-time.After(30 * time.Second):
 		}
 	})
 
-	n.t3 = httptest.NewServer(mux)
+	nd.t3 = httptest.NewServer(mux)
 
-	t.Cleanup(func() {
-		close(n.t3stop)
-		n.t3.CloseClientConnections()
-		n.t3.Close()
+	nd.m.t.Cleanup(func() {
+		close(nd.t3stop)
+		nd.t3.CloseClientConnections()
+		nd.t3.Close()
 	})
+}
 
-	dir := t.TempDir()
-	n.linkPort = freePort(t, "127.0.0.1")
+// seedIdentity issues the node's identity certificate and stores it.
+func (msh *mesh) seedIdentity(nd *node, opts *nodeOpts) {
+	t := msh.t
 
-	links := map[string]string{}
-	for _, k := range o.links {
-		links[k] = fmt.Sprintf("127.0.0.1:%d", n.linkPort)
+	ca := opts.ca
+	if ca == nil {
+		ca = msh.ca
 	}
 
-	n.directPort = o.directPort
-	if o.direct && n.directPort == 0 {
-		n.directPort = freePort(t, m.direct.String())
+	notAfter := opts.notAfter
+	if notAfter.IsZero() {
+		notAfter = time.Now().Add(365 * 24 * time.Hour)
 	}
 
-	n.cfg = &agentconfig.Config{
-		Serve:    map[string]string{"t3": n.t3.Listener.Addr().String()},
-		Links:    links,
-		Identity: agentconfig.Identity{Name: n.identity, Dir: filepath.Join(dir, "identity")},
-		Direct: agentconfig.Direct{
-			Enabled:  o.direct,
-			Port:     n.directPort,
-			CacheTTL: cmpTTL(o.cacheTTL),
-		},
-		StateDir:   filepath.Join(dir, "state"),
-		InstallDir: filepath.Join(dir, "install"),
-		Hub:        m.hubAddr,
+	cert, certPEM, _ := ca.IssueIdentity(t, nd.identity, true, notAfter)
+	store := pki.Store{Dir: nd.cfg.Identity.Dir}
+
+	key, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("identity key is %T, want *ecdsa.PrivateKey", cert.PrivateKey)
 	}
 
-	// A first start has no cached home prefixes, so the first Hello would list no
-	// direct addresses. Seed them as an agent that has connected before would have.
-	if o.direct {
-		seed := &state.Cache{FormatVersion: state.FormatVersion, HomeCIDRs: m.cfg.home}
-		if err := state.Save(n.cfg.StateDir, seed); err != nil {
-			t.Fatal(err)
-		}
+	err := store.SaveKey(key)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if !o.noIdentity {
-		ca := o.ca
-		if ca == nil {
-			ca = m.ca
-		}
-
-		notAfter := o.notAfter
-		if notAfter.IsZero() {
-			notAfter = time.Now().Add(365 * 24 * time.Hour)
-		}
-
-		cert, certPEM, _ := ca.IssueIdentity(t, n.identity, true, notAfter)
-		store := pki.Store{Dir: n.cfg.Identity.Dir}
-
-		if err := store.SaveKey(
-			cert.PrivateKey.(*ecdsa.PrivateKey),
-		); err != nil { //nolint:forcetypeassert // ECDSA from pkitest
-			t.Fatal(err)
-		}
-
-		if err := store.SaveCert(certPEM, ca.CertPEM); err != nil {
-			t.Fatal(err)
-		}
-
-		n.cert = cert
-		m.fake.SetNewest(n.identity, pki.Fingerprint(cert.Leaf))
+	err = store.SaveCert(certPEM, ca.CertPEM)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if !o.noStart {
-		n.start()
-	}
-
-	return n
+	nd.cert = cert
+	msh.fake.SetNewest(nd.identity, pki.Fingerprint(cert.Leaf))
 }
 
 // start runs the agent and waits until the hub sees it.
-func (n *node) start() {
-	n.m.t.Helper()
+func (nd *node) start() {
+	nd.m.t.Helper()
 
-	a, err := agent.New(agent.Options{
-		Config: n.cfg, Version: "dev", Log: logger(), Now: n.nowFn,
-		HubTLS: n.m.hubTLS(), Health: healthStub{},
-		LocalAddrs: func() ([]netip.Addr, error) { return []netip.Addr{n.m.direct}, nil },
+	agt, err := agent.New(agent.Options{
+		Config: nd.cfg, Version: "dev", Log: logger(), Now: nd.nowFn,
+		HubTLS: nd.m.hubTLS(), Health: healthStub{},
+		LocalAddrs: func() ([]netip.Addr, error) { return []netip.Addr{nd.m.direct}, nil },
 		GatewayMAC: func() (string, error) { return fixedGatewayMAC, nil },
 	})
 	if err != nil {
-		n.m.t.Fatal(err)
+		nd.m.t.Fatal(err)
 	}
 
-	before := n.m.tl.count()
+	before := nd.m.tl.count()
 	ctx, cancel := context.WithCancel(context.Background())
-	n.cancel = cancel
+	nd.cancel = cancel
 
 	errc := make(chan error, 1)
 
 	go func() {
-		errc <- a.Run(ctx)
+		errc <- agt.Run(ctx)
 
-		close(n.done)
+		close(nd.done)
 	}()
 
-	n.m.t.Cleanup(func() {
+	nd.m.t.Cleanup(func() {
 		cancel()
 
 		select {
-		case <-n.done:
+		case <-nd.done:
 		case <-time.After(15 * time.Second):
-			n.m.t.Errorf("agent %s did not stop", n.name)
+			nd.m.t.Errorf("agent %s did not stop", nd.name)
 		}
 	})
 
-	n.m.waitConnected(n.name)
+	nd.m.waitConnected(nd.name)
 
 	select {
 	case err = <-errc:
-		n.m.t.Fatalf("agent %s exited: %v", n.name, err)
+		nd.m.t.Fatalf("agent %s exited: %v", nd.name, err)
 	default:
 	}
 
-	n.hubConns = n.m.tl.since(before)
+	nd.hubConns = nd.m.tl.since(before)
 }
 
 // dropTunnel closes the hub side of the TCP connections this node opened at start.
-func (n *node) dropTunnel() {
-	for _, c := range n.hubConns {
+func (nd *node) dropTunnel() {
+	for _, c := range nd.hubConns {
 		_ = c.Close()
 	}
 }
 
-func (n *node) linkURL(path string) string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", n.linkPort, path)
+func (nd *node) linkURL(path string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", nd.linkPort, path)
 }
 
 // waitDirectListening waits until the node's direct port accepts TCP.
-func (n *node) waitDirectListening() {
-	n.m.t.Helper()
+func (nd *node) waitDirectListening() {
+	nd.m.t.Helper()
 
-	addr := net.JoinHostPort(n.m.direct.String(), fmt.Sprint(n.directPort))
+	addr := net.JoinHostPort(nd.m.direct.String(), strconv.Itoa(nd.directPort))
 
-	eventually(n.m.t, 10*time.Second, n.name+" direct listener", func() bool {
-		c, err := net.DialTimeout("tcp", addr, time.Second)
+	eventually(nd.m.t, 10*time.Second, nd.name+" direct listener", func() bool {
+		c, err := (&net.Dialer{Timeout: time.Second}).DialContext(nd.m.t.Context(), "tcp", addr)
 		if err != nil {
 			return false
 		}
@@ -755,14 +804,12 @@ var httpc = &http.Client{
 func get(t *testing.T, url string, hdr http.Header, host string) (int, string) {
 	t.Helper()
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for k, v := range hdr {
-		req.Header[k] = v
-	}
+	maps.Copy(req.Header, hdr)
 
 	if host != "" {
 		req.Host = host
@@ -786,15 +833,15 @@ type phone struct {
 	fp   string
 }
 
-func (m *mesh) newPhone() phone {
-	m.t.Helper()
+func (msh *mesh) newPhone() phone {
+	msh.t.Helper()
 
-	cert, _, _ := m.ca.IssueIdentity(m.t, "z-phone", false, time.Now().Add(365*24*time.Hour))
+	cert, _, _ := msh.ca.IssueIdentity(msh.t, "z-phone", false, time.Now().Add(365*24*time.Hour))
 
 	return phone{cert: cert, fp: pki.Fingerprint(cert.Leaf)}
 }
 
-func (p phone) headers() http.Header {
+func (p *phone) headers() http.Header {
 	h := http.Header{}
 	h.Set("X-Mtls-Mesh-Viewer", "z-phone")
 	h.Set("X-Mtls-Mesh-Fingerprint", p.fp)
@@ -803,10 +850,10 @@ func (p phone) headers() http.Header {
 	return h
 }
 
-func (m *mesh) viewerGet(p phone, machine, path string) (int, string) {
-	m.t.Helper()
+func (msh *mesh) viewerGet(p *phone, machine, path string) (int, string) {
+	msh.t.Helper()
 
-	return get(m.t, m.viewer.URL+path, p.headers(), "t3."+machine+"."+viewerDomain)
+	return get(msh.t, msh.viewer.URL+path, p.headers(), "t3."+machine+"."+viewerDomain)
 }
 
 // held is an open streaming response whose first chunk has been read. A
@@ -843,14 +890,12 @@ func (h *held) isOpen() bool {
 // tryHold opens a streaming request and reads its first chunk. The caller owns
 // the returned stream.
 func tryHold(url string, hdr http.Header, host string) (*held, error) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
 
-	for k, v := range hdr {
-		req.Header[k] = v
-	}
+	maps.Copy(req.Header, hdr)
 
 	if host != "" {
 		req.Host = host
@@ -866,45 +911,45 @@ func tryHold(url string, hdr http.Header, host string) (*held, error) {
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 
-		return nil, fmt.Errorf("open stream: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w %d", errOpenStream, resp.StatusCode)
 	}
 
-	h := &held{resp: resp, br: bufio.NewReader(resp.Body), ended: make(chan struct{})}
+	hold := &held{resp: resp, br: bufio.NewReader(resp.Body), ended: make(chan struct{})}
 
-	line, err := h.br.ReadString('\n')
+	line, err := hold.br.ReadString('\n')
 	if err != nil || line != "first\n" {
-		h.close()
+		hold.close()
 
-		return nil, fmt.Errorf("first chunk: %q, %v", line, err)
+		return nil, fmt.Errorf("first chunk: %q, %w", line, err)
 	}
 
 	go func() {
-		_, _ = io.Copy(io.Discard, h.br)
+		_, _ = io.Copy(io.Discard, hold.br)
 
-		close(h.ended)
+		close(hold.ended)
 	}()
 
-	return h, nil
+	return hold, nil
 }
 
 func openHold(t *testing.T, url string, hdr http.Header, host string) *held {
 	t.Helper()
 
-	h, err := tryHold(url, hdr, host)
+	hold, err := tryHold(url, hdr, host)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Cleanup(h.close)
+	t.Cleanup(hold.close)
 
-	return h
+	return hold
 }
 
 // openViewerHold opens a streaming request through the viewer handler.
-func (m *mesh) openViewerHold(p phone, machine string) *held {
-	m.t.Helper()
+func (msh *mesh) openViewerHold(p *phone, machine string) *held {
+	msh.t.Helper()
 
-	return openHold(m.t, m.viewer.URL+"/hold", p.headers(), "t3."+machine+"."+viewerDomain)
+	return openHold(msh.t, msh.viewer.URL+"/hold", p.headers(), "t3."+machine+"."+viewerDomain)
 }
 
 func cmpTTL(d time.Duration) time.Duration {

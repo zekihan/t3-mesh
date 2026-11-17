@@ -20,6 +20,12 @@ import (
 	"github.com/zekihan/t3-mesh/internal/policy"
 )
 
+const (
+	serialBits = 120
+)
+
+var errNoCSRBlock = errors.New("pkitest: no PEM block in CSR")
+
 // CA is a self-signed test certificate authority.
 type CA struct {
 	Cert    *x509.Certificate
@@ -27,36 +33,36 @@ type CA struct {
 	CertPEM []byte
 }
 
-func serial(t testing.TB) *big.Int {
-	t.Helper()
+func serial(tb testing.TB) *big.Int {
+	tb.Helper()
 
-	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), serialBits))
 	if err != nil {
-		t.Fatalf("serial: %v", err)
+		tb.Fatalf("serial: %v", err)
 	}
 
 	return n
 }
 
-func genKey(t testing.TB) *ecdsa.PrivateKey {
-	t.Helper()
+func genKey(tb testing.TB) *ecdsa.PrivateKey {
+	tb.Helper()
 
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		tb.Fatalf("generate key: %v", err)
 	}
 
 	return k
 }
 
 // NewCA creates a CA with the given common name.
-func NewCA(t testing.TB, name string) *CA {
-	t.Helper()
+func NewCA(tb testing.TB, name string) *CA {
+	tb.Helper()
 
-	key := genKey(t)
+	key := genKey(tb)
 	now := time.Now()
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial(t),
+		SerialNumber:          serial(tb),
 		Subject:               pkix.Name{CommonName: name},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
@@ -67,12 +73,12 @@ func NewCA(t testing.TB, name string) *CA {
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		t.Fatalf("create CA: %v", err)
+		tb.Fatalf("create CA: %v", err)
 	}
 
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		t.Fatalf("parse CA: %v", err)
+		tb.Fatalf("parse CA: %v", err)
 	}
 
 	return &CA{
@@ -82,28 +88,17 @@ func NewCA(t testing.TB, name string) *CA {
 	}
 }
 
-func (ca *CA) issue(t testing.TB, tmpl *x509.Certificate, pub *ecdsa.PublicKey) []byte {
-	t.Helper()
-
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, pub, ca.Key)
-	if err != nil {
-		t.Fatalf("issue certificate: %v", err)
-	}
-
-	return der
-}
-
-func leafPair(t testing.TB, der []byte, key *ecdsa.PrivateKey) (tls.Certificate, []byte, []byte) {
-	t.Helper()
+func leafPair(tb testing.TB, der []byte, key *ecdsa.PrivateKey) (tls.Certificate, []byte, []byte) {
+	tb.Helper()
 
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
-		t.Fatalf("parse leaf: %v", err)
+		tb.Fatalf("parse leaf: %v", err)
 	}
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		t.Fatalf("marshal key: %v", err)
+		tb.Fatalf("marshal key: %v", err)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
@@ -115,16 +110,16 @@ func leafPair(t testing.TB, der []byte, key *ecdsa.PrivateKey) (tls.Certificate,
 // IssueIdentity issues a leaf with one URI SAN for identity, valid from an
 // hour ago until notAfter.
 func (ca *CA) IssueIdentity(
-	t testing.TB,
+	tb testing.TB,
 	identity string,
 	server bool,
 	notAfter time.Time,
 ) (tls.Certificate, []byte, []byte) {
-	t.Helper()
+	tb.Helper()
 
 	uri, err := url.Parse(policy.IdentityURI(identity))
 	if err != nil {
-		t.Fatalf("parse identity URI: %v", err)
+		tb.Fatalf("parse identity URI: %v", err)
 	}
 
 	usage := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
@@ -132,9 +127,9 @@ func (ca *CA) IssueIdentity(
 		usage = append(usage, x509.ExtKeyUsageServerAuth)
 	}
 
-	key := genKey(t)
-	der := ca.issue(t, &x509.Certificate{
-		SerialNumber: serial(t),
+	key := genKey(tb)
+	der := ca.issue(tb, &x509.Certificate{
+		SerialNumber: serial(tb),
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -142,15 +137,15 @@ func (ca *CA) IssueIdentity(
 		URIs:         []*url.URL{uri},
 	}, &key.PublicKey)
 
-	return leafPair(t, der, key)
+	return leafPair(tb, der, key)
 }
 
 // IssueServer issues a serverAuth leaf for the given DNS names and IPs.
-func (ca *CA) IssueServer(t testing.TB, hosts ...string) tls.Certificate {
-	t.Helper()
+func (ca *CA) IssueServer(tb testing.TB, hosts ...string) tls.Certificate {
+	tb.Helper()
 
 	tmpl := &x509.Certificate{
-		SerialNumber: serial(t),
+		SerialNumber: serial(tb),
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -165,18 +160,18 @@ func (ca *CA) IssueServer(t testing.TB, hosts ...string) tls.Certificate {
 		}
 	}
 
-	key := genKey(t)
-	tc, _, _ := leafPair(t, ca.issue(t, tmpl, &key.PublicKey), key)
+	key := genKey(tb)
+	tc, _, _ := leafPair(tb, ca.issue(tb, tmpl, &key.PublicKey), key)
 
 	return tc
 }
 
 // SignCSR signs a CSR, keeping the SANs it carries, with clientAuth and
 // serverAuth for d. The chain is the CA certificate.
-func (ca *CA) SignCSR(csrPEM []byte, d time.Duration) (certPEM, chainPEM []byte, err error) {
+func (ca *CA) SignCSR(csrPEM []byte, dur time.Duration) ([]byte, []byte, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
-		return nil, nil, errors.New("pkitest: no PEM block in CSR")
+		return nil, nil, errNoCSRBlock
 	}
 
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
@@ -184,21 +179,23 @@ func (ca *CA) SignCSR(csrPEM []byte, d time.Duration) (certPEM, chainPEM []byte,
 		return nil, nil, fmt.Errorf("pkitest: parse CSR: %w", err)
 	}
 
-	if err = csr.CheckSignature(); err != nil {
+	err = csr.CheckSignature()
+	if err != nil {
 		return nil, nil, fmt.Errorf("pkitest: CSR signature: %w", err)
 	}
 
-	sn, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	sn, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), serialBits))
 	if err != nil {
 		return nil, nil, fmt.Errorf("pkitest: serial: %w", err)
 	}
 
 	now := time.Now()
+
 	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
 		SerialNumber:   sn,
 		Subject:        csr.Subject,
 		NotBefore:      now.Add(-time.Minute),
-		NotAfter:       now.Add(d),
+		NotAfter:       now.Add(dur),
 		KeyUsage:       x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		URIs:           csr.URIs,
@@ -211,4 +208,15 @@ func (ca *CA) SignCSR(csrPEM []byte, d time.Duration) (certPEM, chainPEM []byte,
 	}
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), ca.CertPEM, nil
+}
+
+func (ca *CA) issue(tb testing.TB, tmpl *x509.Certificate, pub *ecdsa.PublicKey) []byte {
+	tb.Helper()
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, pub, ca.Key)
+	if err != nil {
+		tb.Fatalf("issue certificate: %v", err)
+	}
+
+	return der
 }

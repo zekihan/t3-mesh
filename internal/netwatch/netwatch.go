@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+const (
+	eventBuffer = 16
+)
+
 // EventKind says why an Event was emitted.
 type EventKind int
 
@@ -36,8 +40,8 @@ func (k EventKind) String() string {
 
 // Event is a coalesced notification.
 type Event struct {
-	Kind EventKind
 	At   time.Time
+	Kind EventKind
 }
 
 const (
@@ -77,31 +81,37 @@ func newRealClock() realClock { return realClock{start: time.Now()} }
 
 func (c realClock) Read() reading {
 	now := time.Now()
+
 	return reading{Wall: now.Round(0), Mono: now.Sub(c.start)}
 }
 
 // config holds the injectable parts of Watch.
 type config struct {
-	// open starts delivering OS change notifications. The returned channel
+	clock clock
+	// Open starts delivering OS change notifications. The returned channel
 	// carries one value per raw notification and is closed on fatal error or
 	// when ctx ends.
-	open     func(ctx context.Context) (<-chan struct{}, error)
+	open func(ctx context.Context) (<-chan struct{}, error)
+	// Tick overrides the wake ticker in tests.
+	tick     <-chan time.Time
 	debounce time.Duration
-	interval time.Duration // wake check period, used when tick is nil
+	// Interval is the wake check period, used when tick is nil.
+	interval time.Duration
 	slack    time.Duration
-	clock    clock
-	tick     <-chan time.Time // overrides the wake ticker in tests
 }
 
 func watch(ctx context.Context, log *slog.Logger, cfg config) <-chan Event {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	out := make(chan Event, 16)
+
+	out := make(chan Event, eventBuffer)
 	go func() {
 		defer close(out)
+
 		run(ctx, log, cfg, out)
 	}()
+
 	return out
 }
 
@@ -114,10 +124,15 @@ func send(out chan<- Event, kind EventKind, at time.Time) {
 
 func run(ctx context.Context, log *slog.Logger, cfg config, out chan<- Event) {
 	var raw <-chan struct{}
+
 	if cfg.open != nil {
 		ch, err := cfg.open(ctx)
 		if err != nil {
-			log.Warn("netwatch: cannot open network change socket, wake detection only", "err", err)
+			log.WarnContext(
+				ctx,
+				"Netwatch: cannot open network change socket, wake detection only",
+				slog.Any("err", err),
+			)
 		} else {
 			raw = ch
 		}
@@ -127,6 +142,7 @@ func run(ctx context.Context, log *slog.Logger, cfg config, out chan<- Event) {
 	if tick == nil {
 		t := time.NewTicker(cfg.interval)
 		defer t.Stop()
+
 		tick = t.C
 	}
 
@@ -135,9 +151,11 @@ func run(ctx context.Context, log *slog.Logger, cfg config, out chan<- Event) {
 		<-debounce.C
 	}
 	defer debounce.Stop()
+
 	pending := false
 
 	last := cfg.clock.Read()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -145,23 +163,32 @@ func run(ctx context.Context, log *slog.Logger, cfg config, out chan<- Event) {
 		case _, ok := <-raw:
 			if !ok {
 				if ctx.Err() == nil {
-					log.Warn("netwatch: network change socket closed, wake detection only")
+					log.WarnContext(
+						ctx,
+						"Netwatch: network change socket closed, wake detection only",
+					)
 				}
+
 				raw = nil
+
 				continue
 			}
+
 			if !pending {
 				pending = true
+
 				debounce.Reset(cfg.debounce)
 			}
 		case <-debounce.C:
 			pending = false
+
 			send(out, EventNetwork, cfg.clock.Read().Wall)
 		case <-tick:
 			now := cfg.clock.Read()
 			if slept(last, now, cfg.slack) {
 				send(out, EventWake, now.Wall)
 			}
+
 			last = now
 		}
 	}
@@ -172,6 +199,7 @@ func run(ctx context.Context, log *slog.Logger, cfg config, out chan<- Event) {
 func slept(prev, cur reading, slack time.Duration) bool {
 	wall := cur.Wall.Sub(prev.Wall)
 	mono := cur.Mono - prev.Mono
+
 	return wall-mono > slack
 }
 

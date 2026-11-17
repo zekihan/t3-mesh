@@ -2,6 +2,7 @@ package netwatch
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strings"
 	"sync"
@@ -24,11 +25,13 @@ func TestParseProcRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if gw.addr != netip.MustParseAddr("192.168.0.2") || gw.iface != "eth0" {
 		t.Fatalf("got %+v", gw)
 	}
+
 	_, err = parseProcRoute(strings.NewReader("Iface\tDestination\n"))
-	if err != ErrNoGateway {
+	if !errors.Is(err, ErrNoGateway) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -42,6 +45,7 @@ func TestParseProcARP(t *testing.T) {
 	if err != nil || mac.String() != "aa:bb:cc:dd:ee:02" {
 		t.Fatalf("mac=%v err=%v", mac, err)
 	}
+
 	mac, err = parseProcARP(
 		strings.NewReader(arpSample),
 		netip.MustParseAddr("192.168.0.1"),
@@ -50,18 +54,22 @@ func TestParseProcARP(t *testing.T) {
 	if err != nil || mac.String() != "aa:bb:cc:dd:ee:01" {
 		t.Fatalf("fallback mac=%v err=%v", mac, err)
 	}
-	if _, err = parseProcARP(
+
+	_, err = parseProcARP(
 		strings.NewReader(arpSample),
 		netip.MustParseAddr("192.168.0.3"),
 		"",
-	); err != ErrNoMAC {
+	)
+	if !errors.Is(err, ErrNoMAC) {
 		t.Fatalf("incomplete entry err = %v", err)
 	}
-	if _, err = parseProcARP(
+
+	_, err = parseProcARP(
 		strings.NewReader(arpSample),
 		netip.MustParseAddr("10.0.0.1"),
 		"",
-	); err != ErrNoMAC {
+	)
+	if !errors.Is(err, ErrNoMAC) {
 		t.Fatalf("missing entry err = %v", err)
 	}
 }
@@ -79,10 +87,12 @@ func TestAddrsIn(t *testing.T) {
 		netip.MustParsePrefix("fd12:3456:789a:1::/64"),
 	}
 	got := AddrsIn(addrs, pfx)
+
 	want := []string{"192.168.1.5", "fd12:3456:789a:1::7", "192.168.2.9"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v", got)
 	}
+
 	for i := range want {
 		if got[i].String() != want[i] {
 			t.Fatalf("got %v want %v", got, want)
@@ -95,6 +105,7 @@ func TestAddrPresentIn(t *testing.T) {
 	if !addrPresentIn(addrs, netip.MustParseAddr("::ffff:192.168.1.5")) {
 		t.Fatal("mapped address should match")
 	}
+
 	if addrPresentIn(addrs, netip.MustParseAddr("192.168.1.6")) {
 		t.Fatal("unexpected match")
 	}
@@ -105,6 +116,7 @@ func TestLocalAddrs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, a := range addrs {
 		if a.Is4In6() || a.IsLoopback() || a.Zone() != "" {
 			t.Fatalf("bad address %v", a)
@@ -113,13 +125,14 @@ func TestLocalAddrs(t *testing.T) {
 }
 
 type fakeClock struct {
-	mu sync.Mutex
 	r  reading
+	mu sync.Mutex
 }
 
 func (f *fakeClock) Read() reading {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	return f.r
 }
 
@@ -130,38 +143,45 @@ func (f *fakeClock) set(r reading) {
 }
 
 func TestSlept(t *testing.T) {
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 	prev := reading{Wall: base, Mono: 0}
 	if slept(prev, reading{Wall: base.Add(5 * time.Second), Mono: 5 * time.Second}, 5*time.Second) {
 		t.Fatal("normal tick flagged")
 	}
+
 	if slept(prev, reading{Wall: base.Add(-time.Hour), Mono: 5 * time.Second}, 5*time.Second) {
 		t.Fatal("backward jump flagged")
 	}
+
 	if !slept(prev, reading{Wall: base.Add(time.Hour), Mono: 5 * time.Second}, 5*time.Second) {
 		t.Fatal("sleep not flagged")
 	}
 }
 
-func recv(t *testing.T, ch <-chan Event, d time.Duration) (Event, bool) {
+func recv(t *testing.T, ch <-chan Event, dur time.Duration) (Event, bool) {
 	t.Helper()
+
 	select {
 	case e, ok := <-ch:
 		if !ok {
 			t.Fatal("channel closed")
 		}
+
 		return e, true
-	case <-time.After(d):
+	case <-time.After(dur):
 		return Event{}, false
 	}
 }
 
 func TestWakeDetectionFakeClock(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	fc := &fakeClock{}
 	fc.set(reading{Wall: base})
+
 	tick := make(chan time.Time)
 	out := watch(
 		ctx,
@@ -171,26 +191,33 @@ func TestWakeDetectionFakeClock(t *testing.T) {
 
 	step := func(wall, mono time.Duration) {
 		fc.set(reading{Wall: base.Add(wall), Mono: mono})
+
 		tick <- time.Time{}
 	}
 	step(5*time.Second, 5*time.Second)
+
 	if _, ok := recv(t, out, 50*time.Millisecond); ok {
 		t.Fatal("unexpected event on normal tick")
 	}
+
 	step(3600*time.Second, 10*time.Second)
+
 	e, ok := recv(t, out, time.Second)
 	if !ok || e.Kind != EventWake {
 		t.Fatalf("want wake, got %+v ok=%v", e, ok)
 	}
+
 	step(3605*time.Second, 15*time.Second)
+
 	if _, ok := recv(t, out, 50*time.Millisecond); ok {
 		t.Fatal("wake repeated")
 	}
 }
 
 func TestCoalescing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+
 	raw := make(chan struct{}, 1)
 	out := watch(ctx, nil, config{
 		open:     func(context.Context) (<-chan struct{}, error) { return raw, nil },
@@ -199,17 +226,22 @@ func TestCoalescing(t *testing.T) {
 		slack:    time.Second,
 		debounce: 50 * time.Millisecond,
 	})
+
 	for range 100 {
 		raw <- struct{}{}
 	}
+
 	e, ok := recv(t, out, time.Second)
 	if !ok || e.Kind != EventNetwork {
 		t.Fatalf("want network event, got %+v", e)
 	}
+
 	if _, ok := recv(t, out, 150*time.Millisecond); ok {
 		t.Fatal("burst produced more than one event")
 	}
+
 	raw <- struct{}{}
+
 	if _, ok := recv(t, out, time.Second); !ok {
 		t.Fatal("no event after second burst")
 	}
@@ -218,8 +250,11 @@ func TestCoalescing(t *testing.T) {
 func TestWatchRealSocketCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	out := Watch(ctx, nil)
+
 	cancel()
+
 	deadline := time.After(2 * time.Second)
+
 	for {
 		select {
 		case _, ok := <-out:
@@ -233,17 +268,22 @@ func TestWatchRealSocketCancel(t *testing.T) {
 }
 
 func TestOpenFailureKeepsWakeDetection(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+
 	fc := &fakeClock{}
 	tick := make(chan time.Time)
+
 	out := watch(ctx, nil, config{
 		open:  func(context.Context) (<-chan struct{}, error) { return nil, ErrNoGateway },
 		clock: fc, tick: tick, slack: time.Second,
 	})
 	tick <- time.Time{} // synchronizes with the initial reading
-	fc.set(reading{Wall: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)})
+
+	fc.set(reading{Wall: time.Date(2026, time.January, 1, 1, 0, 0, 0, time.UTC)})
+
 	tick <- time.Time{}
+
 	if e, ok := recv(t, out, time.Second); !ok || e.Kind != EventWake {
 		t.Fatalf("got %+v", e)
 	}

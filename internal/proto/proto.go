@@ -12,7 +12,11 @@ import (
 	"strconv"
 )
 
-// Protocol version carried in the tunnel ALPN.
+const (
+	lengthPrefixSize = 4
+)
+
+// ProtocolVersion is the protocol version carried in the tunnel ALPN.
 const ProtocolVersion = 1
 
 // ALPN protocol names.
@@ -75,7 +79,7 @@ type Message interface {
 }
 
 // Hello is the first message an agent sends on the control stream.
-type Hello struct {
+type Hello struct { //nolint:govet // JSON field order is the wire format
 	Version         string   `json:"version"`
 	Services        []string `json:"services"`
 	LANAddrs        []string `json:"lanAddrs,omitempty"`
@@ -101,7 +105,7 @@ type PeerTable struct {
 
 // Rules says which identities may reach which services. Keys are
 // "<svc>.<machine>", values are identity names (e.g. "agent-z-arch", "z-phone").
-type Rules struct {
+type Rules struct { //nolint:govet // JSON field order is the wire format
 	Revision string              `json:"revision"`
 	Allow    map[string][]string `json:"allow"`
 }
@@ -121,7 +125,7 @@ type TrustBundle struct {
 }
 
 // HelloAck answers Hello.
-type HelloAck struct {
+type HelloAck struct { //nolint:govet // JSON field order is the wire format
 	Machine     string      `json:"machine"`
 	Home        bool        `json:"home"`
 	Release     Release     `json:"release"`
@@ -130,7 +134,7 @@ type HelloAck struct {
 	Revocations Revocations `json:"revocations"`
 	TrustBundle TrustBundle `json:"trustBundle"`
 	// HomeCIDRs are the LAN prefixes; the direct listener binds only inside them.
-	HomeCIDRs []string `json:"homeCIDRs,omitempty"`
+	HomeCIDRs []string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
 }
 
 // Update carries changed state. Nil fields are unchanged.
@@ -140,11 +144,11 @@ type Update struct {
 	Peers       *PeerTable   `json:"peers,omitempty"`
 	Revocations *Revocations `json:"revocations,omitempty"`
 	TrustBundle *TrustBundle `json:"trustBundle,omitempty"`
-	HomeCIDRs   []string     `json:"homeCIDRs,omitempty"`
+	HomeCIDRs   []string     `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
 }
 
 // Release is the desired agent version.
-type Release struct {
+type Release struct { //nolint:govet // JSON field order is the wire format
 	Version         string `json:"version"`
 	RollbackAllowed bool   `json:"rollbackAllowed"`
 	Revision        string `json:"revision"`
@@ -189,7 +193,7 @@ type FailedUpdate struct {
 }
 
 // Status is the agent's periodic report.
-type Status struct {
+type Status struct { //nolint:govet // JSON field order is the wire format
 	Version             string         `json:"version"`
 	Warnings            []string       `json:"warnings,omitempty"`
 	DirectSessions      int            `json:"directSessions"`
@@ -253,11 +257,12 @@ func WriteMessage(w io.Writer, msg Message) error {
 		return ErrTooLarge
 	}
 
-	buf := make([]byte, 4+len(data))
+	buf := make([]byte, lengthPrefixSize+len(data))
 	binary.BigEndian.PutUint32(buf, uint32(len(data))) //nolint:gosec // bounded above
-	copy(buf[4:], data)
+	copy(buf[lengthPrefixSize:], data)
 
-	if _, err := w.Write(buf); err != nil {
+	_, err = w.Write(buf)
+	if err != nil {
 		return fmt.Errorf("proto: write: %w", err)
 	}
 
@@ -265,24 +270,32 @@ func WriteMessage(w io.Writer, msg Message) error {
 }
 
 // ReadMessage reads one length-prefixed JSON message of at most limit bytes.
+//
+//nolint:ireturn // Message is the polymorphic wire type
 func ReadMessage(r io.Reader, limit int) (Message, error) {
-	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+	var hdr [lengthPrefixSize]byte
+
+	_, err := io.ReadFull(r, hdr[:])
+	if err != nil {
 		return nil, fmt.Errorf("proto: read length: %w", err)
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
-	if uint64(n) > uint64(limit) {
+	if uint64(n) > uint64(limit) { //nolint:gosec // negative limit means a huge bound
 		return nil, ErrTooLarge
 	}
 
 	data := make([]byte, n)
-	if _, err := io.ReadFull(r, data); err != nil {
+
+	_, err = io.ReadFull(r, data)
+	if err != nil {
 		return nil, fmt.Errorf("proto: read body: %w", err)
 	}
 
 	var env envelope
-	if err := json.Unmarshal(data, &env); err != nil {
+
+	err = json.Unmarshal(data, &env)
+	if err != nil {
 		return nil, fmt.Errorf("proto: unmarshal envelope: %w", err)
 	}
 
@@ -291,7 +304,8 @@ func ReadMessage(r io.Reader, limit int) (Message, error) {
 		return nil, err
 	}
 
-	if err := json.Unmarshal(env.Body, msg); err != nil {
+	err = json.Unmarshal(env.Body, msg)
+	if err != nil {
 		return nil, fmt.Errorf("proto: unmarshal %s: %w", env.Type, err)
 	}
 
@@ -329,40 +343,40 @@ func newMessage(typ string) (any, error) {
 	}
 }
 
-func deref(v any) Message {
-	switch m := v.(type) {
+func deref(val any) Message { //nolint:ireturn // Message is the polymorphic wire type
+	switch typed := val.(type) {
 	case *Hello:
-		return *m
+		return *typed
 	case *HelloAck:
-		return *m
+		return *typed
 	case *Update:
-		return *m
+		return *typed
 	case *Release:
-		return *m
+		return *typed
 	case *Ping:
-		return *m
+		return *typed
 	case *Pong:
-		return *m
+		return *typed
 	case *Renew:
-		return *m
+		return *typed
 	case *Renewed:
-		return *m
+		return *typed
 	case *Reject:
-		return *m
+		return *typed
 	case *Status:
-		return *m
+		return *typed
 	case *Enroll:
-		return *m
+		return *typed
 	case *Enrolled:
-		return *m
+		return *typed
 	default:
-		panic(fmt.Sprintf("proto: unexpected %T", v))
+		panic(fmt.Sprintf("proto: unexpected %T", val))
 	}
 }
 
 // StreamHeader is the first line on every data stream.
 //
-// hub → agent viewer traffic sets Svc and Viewer; hub → agent relayed traffic
+// Hub → agent viewer traffic sets Svc and Viewer; hub → agent relayed traffic
 // sets Svc and From; agent → hub link traffic sets To ("<svc>.<machine>");
 // direct connections set Svc.
 type StreamHeader struct {
@@ -374,7 +388,7 @@ type StreamHeader struct {
 
 // StreamReply is the accept line sent back on agent → hub link streams and on
 // direct connections, before raw bytes flow.
-type StreamReply struct {
+type StreamReply struct { //nolint:govet // JSON field order is the wire format
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
@@ -391,7 +405,9 @@ func WriteLine(w io.Writer, v any) error {
 	}
 
 	data = append(data, '\n')
-	if _, err := w.Write(data); err != nil {
+
+	_, err = w.Write(data)
+	if err != nil {
 		return fmt.Errorf("proto: write line: %w", err)
 	}
 
@@ -400,10 +416,10 @@ func WriteLine(w io.Writer, v any) error {
 
 // ReadLine reads one JSON line into v without consuming bytes past the newline,
 // so raw stream bytes after the line stay unread in r.
-func ReadLine(r io.Reader, v any) error {
+func ReadLine(r io.Reader, dst any) error {
 	var (
 		line []byte
-		b    [1]byte
+		one  [1]byte
 	)
 
 	for {
@@ -411,21 +427,23 @@ func ReadLine(r io.Reader, v any) error {
 			return ErrTooLarge
 		}
 
-		if _, err := io.ReadFull(r, b[:]); err != nil {
+		_, err := io.ReadFull(r, one[:])
+		if err != nil {
 			return fmt.Errorf("proto: read line: %w", err)
 		}
 
-		if b[0] == '\n' {
+		if one[0] == '\n' {
 			break
 		}
 
-		line = append(line, b[0])
+		line = append(line, one[0])
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(line))
 	dec.DisallowUnknownFields()
 
-	if err := dec.Decode(v); err != nil {
+	err := dec.Decode(dst)
+	if err != nil {
 		return fmt.Errorf("proto: decode line: %w", err)
 	}
 

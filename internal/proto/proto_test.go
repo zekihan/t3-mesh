@@ -20,17 +20,21 @@ func TestMessageRoundTrip(t *testing.T) {
 		Ping{Seq: 3, SentUnixNano: 42},
 		Reject{Reason: RejectOther},
 	}
+
 	var buf bytes.Buffer
 	for _, m := range msgs {
-		if err := WriteMessage(&buf, m); err != nil {
+		err := WriteMessage(&buf, m)
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	for _, want := range msgs {
 		got, err := ReadMessage(&buf, MaxMessageSize)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %#v, want %#v", got, want)
 		}
@@ -39,27 +43,39 @@ func TestMessageRoundTrip(t *testing.T) {
 
 func TestReadMessageLimit(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteMessage(&buf, Enroll{Token: string(make([]byte, MaxEnrollSize))}); err != nil {
+
+	err := WriteMessage(&buf, Enroll{Token: string(make([]byte, MaxEnrollSize))})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadMessage(&buf, MaxEnrollSize); !errors.Is(err, ErrTooLarge) {
+
+	_, err = ReadMessage(&buf, MaxEnrollSize)
+	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
 	}
 }
 
 func TestReadLineLeavesRest(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteLine(&buf, StreamHeader{Svc: "t3", Viewer: "z-phone"}); err != nil {
+
+	err := WriteLine(&buf, StreamHeader{Svc: "t3", Viewer: "z-phone"})
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	buf.WriteString("GET / HTTP/1.1\r\n")
-	var h StreamHeader
-	if err := ReadLine(&buf, &h); err != nil {
+
+	var hdr StreamHeader
+
+	err = ReadLine(&buf, &hdr)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Viewer != "z-phone" {
-		t.Fatalf("viewer = %q", h.Viewer)
+
+	if hdr.Viewer != "z-phone" {
+		t.Fatalf("viewer = %q", hdr.Viewer)
 	}
+
 	rest, _ := io.ReadAll(&buf)
 	if string(rest) != "GET / HTTP/1.1\r\n" {
 		t.Fatalf("rest = %q", rest)

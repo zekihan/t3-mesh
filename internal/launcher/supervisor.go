@@ -16,6 +16,17 @@ import (
 	"time"
 )
 
+const (
+	defaultStartupTimeout = 30 * time.Second
+	defaultAliveTimeout   = 30 * time.Second
+	defaultStopTimeout    = 10 * time.Second
+	backoffFactor         = 2
+	messageBuffer         = 16
+	healthReadTimeout     = 500 * time.Millisecond
+	scanInitialBuffer     = 4096
+	scanMaxBuffer         = 64 * 1024
+)
+
 // File names inside Config.StateDir.
 const (
 	OutcomeFile   = "launcher-outcome.json"
@@ -32,75 +43,83 @@ type Outcome struct {
 
 // Config configures Run.
 type Config struct {
-	Layout   Layout
-	StateDir string
-	// Args are the arguments passed to the child.
-	Args []string
+	Log *slog.Logger
 	// ArgsFor, when set, overrides Args per version.
 	ArgsFor func(version string) []string
-	// StartupTimeout is how long a child on probation has to send ready (30 s).
-	StartupTimeout time.Duration
-	// AliveTimeout is the longest silence tolerated after ready (30 s).
-	AliveTimeout time.Duration
-	// StopTimeout is the SIGTERM grace before SIGKILL (10 s).
-	StopTimeout time.Duration
-	// HeartbeatInterval is how often the heartbeat file is touched (1 min).
-	HeartbeatInterval time.Duration
-	// MinBackoff and MaxBackoff bound restarts of the known-good (1 s, 1 min).
-	MinBackoff, MaxBackoff time.Duration
-	Log                    *slog.Logger
-
-	// Command builds the child command; default exec.Command.
-	Command func(binary string, args []string) *exec.Cmd
-	// ReexecArgs is the launcher's own argument list (without argv[0]) used
-	// when re-executing after promotion; default os.Args[1:].
-	ReexecArgs []string
+	events  func(ev string)
 	// Exec replaces the process image; default syscall.Exec. If it returns,
 	// Run returns its error (nil when a test hook returns nil).
 	Exec func(path string, argv, env []string) error
-
-	events func(ev string)
+	// Command builds the child command; default exec.Command.
+	Command  func(binary string, args []string) *exec.Cmd
+	StateDir string
+	Layout   Layout
+	// Args are the arguments passed to the child.
+	Args []string
+	// ReexecArgs is the launcher's own argument list (without argv[0]) used
+	// when re-executing after promotion; default os.Args[1:].
+	ReexecArgs []string
+	// StopTimeout is the SIGTERM grace before SIGKILL (10 s).
+	StopTimeout time.Duration
+	// MinBackoff and MaxBackoff bound restarts of the known-good (1 s, 1 min).
+	MaxBackoff time.Duration
+	MinBackoff time.Duration
+	// HeartbeatInterval is how often the heartbeat file is touched (1 min).
+	HeartbeatInterval time.Duration
+	// AliveTimeout is the longest silence tolerated after ready (30 s).
+	AliveTimeout time.Duration
+	// StartupTimeout is how long a child on probation has to send ready (30 s).
+	StartupTimeout time.Duration
 }
 
-func (c *Config) defaults() {
-	if c.StartupTimeout <= 0 {
-		c.StartupTimeout = 30 * time.Second
+func (cfg *Config) defaults() {
+	if cfg.StartupTimeout <= 0 {
+		cfg.StartupTimeout = defaultStartupTimeout
 	}
-	if c.AliveTimeout <= 0 {
-		c.AliveTimeout = 30 * time.Second
+
+	if cfg.AliveTimeout <= 0 {
+		cfg.AliveTimeout = defaultAliveTimeout
 	}
-	if c.StopTimeout <= 0 {
-		c.StopTimeout = 10 * time.Second
+
+	if cfg.StopTimeout <= 0 {
+		cfg.StopTimeout = defaultStopTimeout
 	}
-	if c.HeartbeatInterval <= 0 {
-		c.HeartbeatInterval = time.Minute
+
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = time.Minute
 	}
-	if c.MinBackoff <= 0 {
-		c.MinBackoff = time.Second
+
+	if cfg.MinBackoff <= 0 {
+		cfg.MinBackoff = time.Second
 	}
-	if c.MaxBackoff < c.MinBackoff {
-		c.MaxBackoff = time.Minute
-		if c.MaxBackoff < c.MinBackoff {
-			c.MaxBackoff = c.MinBackoff
+
+	if cfg.MaxBackoff < cfg.MinBackoff {
+		cfg.MaxBackoff = max(time.Minute, cfg.MinBackoff)
+	}
+
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
+
+	if cfg.Command == nil {
+		cfg.Command = func(binary string, args []string) *exec.Cmd {
+			// Not tied to ctx: stop() gives the child a SIGTERM grace before killing it.
+			return exec.CommandContext(context.Background(), binary, args...)
 		}
 	}
-	if c.Log == nil {
-		c.Log = slog.Default()
+
+	if cfg.Exec == nil {
+		cfg.Exec = syscall.Exec
 	}
-	if c.Command == nil {
-		c.Command = func(binary string, args []string) *exec.Cmd { return exec.Command(binary, args...) }
-	}
-	if c.Exec == nil {
-		c.Exec = syscall.Exec
-	}
-	if c.ReexecArgs == nil && len(os.Args) > 1 {
-		c.ReexecArgs = os.Args[1:]
+
+	if cfg.ReexecArgs == nil && len(os.Args) > 1 {
+		cfg.ReexecArgs = os.Args[1:]
 	}
 }
 
-func (c *Config) event(ev string) {
-	if c.events != nil {
-		c.events(ev)
+func (cfg *Config) event(ev string) {
+	if cfg.events != nil {
+		cfg.events(ev)
 	}
 }
 
@@ -115,78 +134,142 @@ const (
 )
 
 type result struct {
+	reason  string
+	failure string
 	kind    resultKind
-	reason  string // outcome reason for failures on probation
-	failure string // outcome kind
 	ran     time.Duration
 }
 
-// Run supervises the current binary until ctx is cancelled.
+// Run supervises the current binary until ctx is canceled.
+//
+//nolint:gocritic // exported API takes Config by value
 func Run(ctx context.Context, cfg Config) error {
 	cfg.defaults()
 	backoff := cfg.MinBackoff
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		cur, err := cfg.Layout.Current()
+
+	for !canceled(ctx) {
+		cur, knownGood, err := resolveVersions(cfg.Layout)
 		if err != nil {
-			return fmt.Errorf("launcher: resolve current: %w", err)
+			return err
 		}
-		kg, err := cfg.Layout.KnownGood()
-		if err != nil {
-			return fmt.Errorf("launcher: resolve known-good: %w", err)
-		}
-		probation := cur != kg
-		if probation {
-			cfg.Log.Info("starting version on probation", "version", cur, "known_good", kg)
-		} else {
-			cfg.Log.Info("starting known-good version", "version", cur)
-		}
+
+		probation := cur != knownGood
+		logStart(ctx, &cfg, cur, knownGood, probation)
+
 		res := superviseOnce(ctx, &cfg, cur, probation)
 		switch res.kind {
 		case resCtx:
 			return nil
 		case resRestart:
-			cfg.Log.Info("child requested restart into current", "version", cur)
-			backoff = cfg.MinBackoff
+			cfg.Log.InfoContext(
+				ctx,
+				"Child requested restart into current",
+				slog.String("version", cur),
+			)
 
-			continue
+			backoff = cfg.MinBackoff
 		case resPromoted:
-			if err := cfg.Layout.Promote(); err != nil {
-				return fmt.Errorf("launcher: promote %s: %w", cur, err)
-			}
-			cfg.event("promoted")
-			cfg.Log.Info("promoted, re-executing launcher", "version", cur)
-			path := cfg.Layout.Dir + "/" + linkKnownGood + "/" + BinaryName
-			argv := append([]string{path}, cfg.ReexecArgs...)
-			if err := cfg.Exec(path, argv, os.Environ()); err != nil {
-				return fmt.Errorf("launcher: re-exec %s: %w", path, err)
-			}
-			return nil
+			return promoteAndReexec(ctx, &cfg, cur)
 		case resFailed, resExited:
 			if probation {
-				if err := rollback(&cfg, cur, res); err != nil {
+				err := rollback(&cfg, cur, res)
+				if err != nil {
 					return err
 				}
+
 				backoff = cfg.MinBackoff
+
 				continue
 			}
-			cfg.Log.Error("known-good version stopped, nothing to roll back to",
-				"version", cur, "reason", res.reason, "backoff", backoff)
+
+			cfg.Log.ErrorContext(
+				ctx,
+				"Known-good version stopped, nothing to roll back to",
+				slog.String("version", cur),
+				slog.String("reason", res.reason),
+				slog.Duration("backoff", backoff),
+			)
+
 			if res.ran > cfg.MaxBackoff {
 				backoff = cfg.MinBackoff
 			}
-			t := time.NewTimer(backoff)
-			select {
-			case <-ctx.Done():
-				t.Stop()
+
+			if !sleepCtx(ctx, backoff) {
 				return nil
-			case <-t.C:
 			}
-			backoff = min(backoff*2, cfg.MaxBackoff)
+
+			backoff = min(backoff*backoffFactor, cfg.MaxBackoff)
+		default:
+			// Every result kind is handled above.
 		}
 	}
+
+	return nil
+}
+
+func canceled(ctx context.Context) bool { return ctx.Err() != nil }
+
+// sleepCtx waits for d and reports false when ctx ends first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func resolveVersions(l Layout) (string, string, error) {
+	cur, err := l.Current()
+	if err != nil {
+		return "", "", fmt.Errorf("launcher: resolve current: %w", err)
+	}
+
+	knownGood, err := l.KnownGood()
+	if err != nil {
+		return "", "", fmt.Errorf("launcher: resolve known-good: %w", err)
+	}
+
+	return cur, knownGood, nil
+}
+
+func logStart(ctx context.Context, cfg *Config, cur, knownGood string, probation bool) {
+	if probation {
+		cfg.Log.InfoContext(
+			ctx,
+			"Starting version on probation",
+			slog.String("version", cur),
+			slog.String("knownGood", knownGood),
+		)
+
+		return
+	}
+
+	cfg.Log.InfoContext(ctx, "Starting known-good version", slog.String("version", cur))
+}
+
+// promoteAndReexec repoints known-good at cur and re-executes the launcher.
+func promoteAndReexec(ctx context.Context, cfg *Config, cur string) error {
+	err := cfg.Layout.Promote()
+	if err != nil {
+		return fmt.Errorf("launcher: promote %s: %w", cur, err)
+	}
+
+	cfg.event("promoted")
+	cfg.Log.InfoContext(ctx, "Promoted, re-executing launcher", slog.String("version", cur))
+
+	path := cfg.Layout.Dir + "/" + linkKnownGood + "/" + BinaryName
+	argv := append([]string{path}, cfg.ReexecArgs...)
+
+	err = cfg.Exec(path, argv, os.Environ())
+	if err != nil {
+		return fmt.Errorf("launcher: re-exec %s: %w", path, err)
+	}
+
+	return nil
 }
 
 func rollback(cfg *Config, failed string, res result) error {
@@ -194,14 +277,25 @@ func rollback(cfg *Config, failed string, res result) error {
 	if reason == "" {
 		reason = "crash"
 	}
+
 	if kind != KindDependency {
 		kind = KindRelease
 	}
-	cfg.Log.Error("rolling back failed version", "version", failed, "reason", reason, "kind", kind)
-	if err := cfg.Layout.Rollback(); err != nil {
+
+	cfg.Log.Error(
+		"Rolling back failed version",
+		slog.String("version", failed),
+		slog.String("reason", reason),
+		slog.String("kind", kind),
+	)
+
+	err := cfg.Layout.Rollback()
+	if err != nil {
 		return fmt.Errorf("launcher: rollback from %s: %w", failed, err)
 	}
+
 	cfg.event("rollback")
+
 	if cfg.StateDir != "" {
 		out := Outcome{
 			Version: failed,
@@ -209,29 +303,41 @@ func rollback(cfg *Config, failed string, res result) error {
 			Kind:    kind,
 			At:      time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := writeJSONAtomic(filepath.Join(cfg.StateDir, OutcomeFile), out); err != nil {
-			cfg.Log.Error("write launcher outcome", "err", err)
+
+		err := writeJSONAtomic(filepath.Join(cfg.StateDir, OutcomeFile), out)
+		if err != nil {
+			cfg.Log.Error("Write launcher outcome", slog.Any("err", err))
 		}
 	}
+
 	return nil
 }
 
 func writeJSONAtomic(path string, v any) error {
-	b, err := json.Marshal(v)
+	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("launcher: encode %s: %w", path, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+
+	err = os.MkdirAll(filepath.Dir(path), dirMode)
+	if err != nil {
 		return fmt.Errorf("launcher: create state dir: %w", err)
 	}
+
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+
+	err = os.WriteFile(tmp, data, fileMode)
+	if err != nil {
 		return fmt.Errorf("launcher: write %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+
+	err = os.Rename(tmp, path)
+	if err != nil {
 		_ = os.Remove(tmp)
+
 		return fmt.Errorf("launcher: rename %s: %w", tmp, err)
 	}
+
 	return nil
 }
 
@@ -240,221 +346,337 @@ func touch(path string) error {
 }
 
 func touchAt(path string, now time.Time) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, fileMode)
 	if err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
 	}
-	if err := f.Close(); err != nil {
+
+	err = f.Close()
+	if err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
 	}
-	if err := os.Chtimes(path, now, now); err != nil {
+
+	err = os.Chtimes(path, now, now)
+	if err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
 	}
+
 	return nil
 }
 
 func envWithHealth() []string {
 	var env []string
+
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, HealthFDEnv+"=") {
 			env = append(env, e)
 		}
 	}
+
 	return append(env, HealthFDEnv+"=3")
 }
 
-// superviseOnce starts the child and watches it until it ends, fails, is
-// promoted or ctx is cancelled. The child has stopped when it returns.
-func superviseOnce(ctx context.Context, cfg *Config, version string, probation bool) result {
-	start := time.Now()
-	fail := func(reason string) result {
-		return result{kind: resFailed, reason: reason, failure: KindRelease, ran: time.Since(start)}
-	}
-	r, w, err := os.Pipe()
-	if err != nil {
-		cfg.Log.Error("create health pipe", "err", err)
-		return fail("crash")
-	}
-	defer r.Close()
+// childWatch is the state of one supervised child process.
+type childWatch struct {
+	cfg       *Config
+	cmd       *exec.Cmd
+	exitCh    chan error
+	msgs      chan Message
+	deadline  <-chan time.Time
+	timer     *time.Timer
+	start     time.Time
+	version   string
+	probation bool
+	ready     bool
+	exited    bool
+}
+
+func failed(start time.Time, reason string) result {
+	return result{kind: resFailed, reason: reason, failure: KindRelease, ran: time.Since(start)}
+}
+
+// childCommand builds the child command with the health pipe as fd 3.
+func childCommand(cfg *Config, version string, pipe *os.File) *exec.Cmd {
 	args := cfg.Args
 	if cfg.ArgsFor != nil {
 		args = cfg.ArgsFor(version)
 	}
+
 	cmd := cfg.Command(cfg.Layout.Binary(version), args)
-	cmd.ExtraFiles = []*os.File{w}
+
+	cmd.ExtraFiles = []*os.File{pipe}
 	if cmd.Env == nil {
 		cmd.Env = envWithHealth()
 	} else {
 		cmd.Env = append(cmd.Env, HealthFDEnv+"=3")
 	}
+
 	if cmd.Stdout == nil {
 		cmd.Stdout = os.Stdout
 	}
+
 	if cmd.Stderr == nil {
 		cmd.Stderr = os.Stderr
 	}
-	err = cmd.Start()
-	_ = w.Close()
+
+	return cmd
+}
+
+// superviseOnce starts the child and watches it until it ends, fails, is
+// promoted or ctx is canceled. The child has stopped when it returns.
+func superviseOnce(ctx context.Context, cfg *Config, version string, probation bool) result {
+	start := time.Now()
+
+	rd, wr, err := os.Pipe()
 	if err != nil {
-		cfg.Log.Error("start child", "version", version, "err", err)
-		return fail("crash")
+		cfg.Log.ErrorContext(ctx, "Create health pipe", slog.Any("err", err))
+
+		return failed(start, "crash")
+	}
+	defer rd.Close()
+
+	cmd := childCommand(cfg, version, wr)
+
+	err = cmd.Start()
+	_ = wr.Close()
+
+	if err != nil {
+		cfg.Log.ErrorContext(
+			ctx,
+			"Start child",
+			slog.String("version", version),
+			slog.Any("err", err),
+		)
+
+		return failed(start, "crash")
 	}
 
-	exitCh := make(chan error, 1)
-	go func() { exitCh <- cmd.Wait() }()
+	cw := &childWatch{
+		cfg:       cfg,
+		cmd:       cmd,
+		exitCh:    make(chan error, 1),
+		msgs:      make(chan Message, messageBuffer),
+		start:     start,
+		version:   version,
+		probation: probation,
+	}
+	go func() { cw.exitCh <- cmd.Wait() }()
+
 	done := make(chan struct{})
 	defer close(done)
-	msgs := make(chan Message, 16)
-	go readMessages(r, msgs, done, cfg.Log)
 
-	exited := false
-	stop := func() {
-		if exited {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		t := time.NewTimer(cfg.StopTimeout)
-		select {
-		case <-exitCh:
-			t.Stop()
-		case <-t.C:
-			cfg.Log.Warn("child ignored SIGTERM, killing", "version", version)
-			_ = cmd.Process.Kill()
-			<-exitCh
-		}
-		exited = true
-	}
+	go readMessages(rd, cw.msgs, done, cfg.Log)
 
-	ready := false
-	var deadline <-chan time.Time
-	var dt *time.Timer
-	setDeadline := func(d time.Duration) {
-		if dt == nil {
-			dt = time.NewTimer(d)
-		} else {
-			dt.Reset(d)
-		}
-		deadline = dt.C
-	}
 	defer func() {
-		if dt != nil {
-			dt.Stop()
+		if cw.timer != nil {
+			cw.timer.Stop()
 		}
 	}()
+
 	if probation {
-		setDeadline(cfg.StartupTimeout)
-	}
-	hb := time.NewTicker(cfg.HeartbeatInterval)
-	defer hb.Stop()
-	heartbeat := func() {
-		if cfg.StateDir == "" {
-			return
-		}
-		if err := os.MkdirAll(cfg.StateDir, 0o755); err == nil {
-			err = touch(filepath.Join(cfg.StateDir, HeartbeatFile))
-			if err != nil {
-				cfg.Log.Warn("heartbeat", "err", err)
-			}
-		}
+		cw.setDeadline(cfg.StartupTimeout)
 	}
 
+	hb := time.NewTicker(cfg.HeartbeatInterval)
+	defer hb.Stop()
+
+	return cw.loop(ctx, hb.C)
+}
+
+func (cw *childWatch) loop(ctx context.Context, hb <-chan time.Time) result {
 	for {
 		select {
 		case <-ctx.Done():
-			stop()
+			cw.stop(ctx)
+
 			return result{kind: resCtx}
-		case err := <-exitCh:
-			exited = true
-			reason := "crash"
-			if m, ok := drainFail(msgs); ok {
-				cfg.Log.Warn("child reported failure before exiting", "reason", m.Reason)
-				return result{
-					kind:    resFailed,
-					reason:  m.Reason,
-					failure: normKind(m.Kind),
-					ran:     time.Since(start),
-				}
-			}
-			cfg.Log.Warn("child exited", "version", version, "err", err)
-			return result{
-				kind:    resExited,
-				reason:  reason,
-				failure: KindRelease,
-				ran:     time.Since(start),
-			}
-		case m, ok := <-msgs:
+		case err := <-cw.exitCh:
+			return cw.onExit(ctx, err)
+		case hmsg, ok := <-cw.msgs:
 			if !ok {
-				msgs = nil
+				cw.msgs = nil
+
 				continue
 			}
-			switch m.Type {
-			case "ready":
-				ready = true
-				cfg.event("ready")
-				heartbeat()
-				setDeadline(cfg.AliveTimeout)
-			case "alive":
-				cfg.event("alive")
-				if ready {
-					setDeadline(cfg.AliveTimeout)
-				}
-			case "promote":
-				if !probation {
-					cfg.Log.Debug("ignoring promote from known-good")
-					continue
-				}
-				stop()
-				return result{kind: resPromoted, ran: time.Since(start)}
-			case "restart":
-				stop()
-				return result{kind: resRestart, ran: time.Since(start)}
-			case "fail":
-				cfg.Log.Error(
-					"child requested rollback",
-					"version",
-					version,
-					"reason",
-					m.Reason,
-					"kind",
-					m.Kind,
-				)
-				stop()
-				reason := m.Reason
-				if reason == "" {
-					reason = "fail"
-				}
-				return result{
-					kind:    resFailed,
-					reason:  reason,
-					failure: normKind(m.Kind),
-					ran:     time.Since(start),
-				}
+
+			res, finished := cw.onMessage(ctx, hmsg)
+			if finished {
+				return res
 			}
-		case <-deadline:
-			reason := "liveness"
-			if !ready {
-				reason = "startup-check"
-			}
-			cfg.Log.Error("child health deadline missed", "version", version, "reason", reason)
-			stop()
-			return result{
-				kind:    resFailed,
-				reason:  reason,
-				failure: KindRelease,
-				ran:     time.Since(start),
-			}
-		case <-hb.C:
-			if ready {
-				heartbeat()
+		case <-cw.deadline:
+			return cw.onDeadline(ctx)
+		case <-hb:
+			if cw.ready {
+				cw.heartbeat(ctx)
 			}
 		}
 	}
+}
+
+func (cw *childWatch) setDeadline(d time.Duration) {
+	if cw.timer == nil {
+		cw.timer = time.NewTimer(d)
+	} else {
+		cw.timer.Reset(d)
+	}
+
+	cw.deadline = cw.timer.C
+}
+
+// stop asks the child to terminate and kills it after the grace period.
+func (cw *childWatch) stop(ctx context.Context) {
+	if cw.exited {
+		return
+	}
+
+	_ = cw.cmd.Process.Signal(syscall.SIGTERM) //nolint:errcheck // child may have exited
+
+	t := time.NewTimer(cw.cfg.StopTimeout)
+	select {
+	case <-cw.exitCh: //nolint:errcheck // only the exit, not its status, matters here
+		t.Stop()
+	case <-t.C:
+		cw.cfg.Log.WarnContext(
+			ctx,
+			"Child ignored SIGTERM, killing",
+			slog.String("version", cw.version),
+		)
+
+		_ = cw.cmd.Process.Kill() //nolint:errcheck // child may have exited
+
+		<-cw.exitCh //nolint:errcheck // only the exit, not its status, matters here
+	}
+
+	cw.exited = true
+}
+
+func (cw *childWatch) heartbeat(ctx context.Context) {
+	if cw.cfg.StateDir == "" {
+		return
+	}
+
+	err := os.MkdirAll(cw.cfg.StateDir, dirMode)
+	if err == nil {
+		err = touch(filepath.Join(cw.cfg.StateDir, HeartbeatFile))
+		if err != nil {
+			cw.cfg.Log.WarnContext(ctx, "Heartbeat", slog.Any("err", err))
+		}
+	}
+}
+
+// onExit builds the result for a child that exited by itself.
+func (cw *childWatch) onExit(ctx context.Context, err error) result {
+	cw.exited = true
+
+	failMsg, ok := drainFail(cw.msgs)
+	if ok {
+		cw.cfg.Log.WarnContext(
+			ctx,
+			"Child reported failure before exiting",
+			slog.String("reason", failMsg.Reason),
+		)
+
+		return result{
+			kind:    resFailed,
+			reason:  failMsg.Reason,
+			failure: normKind(failMsg.Kind),
+			ran:     time.Since(cw.start),
+		}
+	}
+
+	cw.cfg.Log.WarnContext(
+		ctx,
+		"Child exited",
+		slog.String("version", cw.version),
+		slog.Any("err", err),
+	)
+
+	return result{
+		kind:    resExited,
+		reason:  "crash",
+		failure: KindRelease,
+		ran:     time.Since(cw.start),
+	}
+}
+
+// onMessage handles one health message; finished reports that res is final.
+func (cw *childWatch) onMessage(ctx context.Context, hmsg Message) (result, bool) {
+	switch hmsg.Type {
+	case msgReady:
+		cw.ready = true
+
+		cw.cfg.event(msgReady)
+		cw.heartbeat(ctx)
+		cw.setDeadline(cw.cfg.AliveTimeout)
+	case "alive":
+		cw.cfg.event("alive")
+
+		if cw.ready {
+			cw.setDeadline(cw.cfg.AliveTimeout)
+		}
+	case msgPromote:
+		if !cw.probation {
+			cw.cfg.Log.DebugContext(ctx, "Ignoring promote from known-good")
+
+			return result{}, false
+		}
+
+		cw.stop(ctx)
+
+		return result{kind: resPromoted, ran: time.Since(cw.start)}, true
+	case msgRestart:
+		cw.stop(ctx)
+
+		return result{kind: resRestart, ran: time.Since(cw.start)}, true
+	case msgFail:
+		cw.cfg.Log.ErrorContext(
+			ctx,
+			"Child requested rollback",
+			slog.String("version", cw.version),
+			slog.String("reason", hmsg.Reason),
+			slog.String("kind", hmsg.Kind),
+		)
+		cw.stop(ctx)
+
+		reason := hmsg.Reason
+		if reason == "" {
+			reason = "fail"
+		}
+
+		return result{
+			kind:    resFailed,
+			reason:  reason,
+			failure: normKind(hmsg.Kind),
+			ran:     time.Since(cw.start),
+		}, true
+	}
+
+	return result{}, false
+}
+
+// onDeadline builds the result for a child that missed its health deadline.
+func (cw *childWatch) onDeadline(ctx context.Context) result {
+	reason := "liveness"
+	if !cw.ready {
+		reason = "startup-check"
+	}
+
+	cw.cfg.Log.ErrorContext(
+		ctx,
+		"Child health deadline missed",
+		slog.String("version", cw.version),
+		slog.String("reason", reason),
+	)
+	cw.stop(ctx)
+
+	return failed(cw.start, reason)
 }
 
 func normKind(k string) string {
 	if k == KindDependency {
 		return KindDependency
 	}
+
 	return KindRelease
 }
 
@@ -464,18 +686,21 @@ func drainFail(msgs <-chan Message) (Message, bool) {
 	if msgs == nil {
 		return Message{}, false
 	}
-	t := time.NewTimer(500 * time.Millisecond)
-	defer t.Stop()
+
+	timer := time.NewTimer(healthReadTimeout)
+	defer timer.Stop()
+
 	for {
 		select {
 		case m, ok := <-msgs:
 			if !ok {
 				return Message{}, false
 			}
-			if m.Type == "fail" {
+
+			if m.Type == msgFail {
 				return m, true
 			}
-		case <-t.C:
+		case <-timer.C:
 			return Message{}, false
 		}
 	}
@@ -483,21 +708,29 @@ func drainFail(msgs <-chan Message) (Message, bool) {
 
 func readMessages(r io.Reader, out chan<- Message, done <-chan struct{}, log *slog.Logger) {
 	defer close(out)
+
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 4096), 64*1024)
+	sc.Buffer(make([]byte, 0, scanInitialBuffer), scanMaxBuffer)
+
 	for sc.Scan() {
-		var m Message
-		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-			log.Warn("bad health message", "err", err)
+		var hmsg Message
+
+		err := json.Unmarshal(sc.Bytes(), &hmsg)
+		if err != nil {
+			log.Warn("Bad health message", slog.Any("err", err))
+
 			continue
 		}
+
 		select {
-		case out <- m:
+		case out <- hmsg:
 		case <-done:
 			return
 		}
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, os.ErrClosed) {
-		log.Debug("health pipe read", "err", err)
+
+	err := sc.Err()
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		log.Debug("Health pipe read", slog.Any("err", err))
 	}
 }

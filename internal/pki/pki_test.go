@@ -70,7 +70,8 @@ func TestKeyRoundTrip(t *testing.T) {
 		t.Fatal("key changed in round trip")
 	}
 
-	if _, err := pki.ParseKeyPEM([]byte("junk")); err == nil {
+	_, err = pki.ParseKeyPEM([]byte("junk"))
+	if err == nil {
 		t.Fatal("junk accepted")
 	}
 
@@ -84,7 +85,8 @@ func TestKeyRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := pki.ParseKeyPEM(data); err == nil {
+	_, err = pki.ParseKeyPEM(data)
+	if err == nil {
 		t.Fatal("P-384 key accepted")
 	}
 }
@@ -110,7 +112,8 @@ func TestCSRRoundTrip(t *testing.T) {
 		t.Fatalf("subject = %q", csr.Subject)
 	}
 
-	if _, err := pki.CreateCSR(key, "bad/name"); err == nil {
+	_, err = pki.CreateCSR(key, "bad/name")
+	if err == nil {
 		t.Fatal("bad identity accepted")
 	}
 }
@@ -118,6 +121,7 @@ func TestCSRRoundTrip(t *testing.T) {
 func TestValidateCSRRejects(t *testing.T) {
 	key := mustKey(t)
 	good := uri(t, policy.IdentityURI("agent-x"))
+
 	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +182,8 @@ func TestValidateCSRRejects(t *testing.T) {
 
 	for name, csr := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := pki.ValidateCSR(csr); err == nil {
+			_, _, err := pki.ValidateCSR(csr)
+			if err == nil {
 				t.Fatal("accepted")
 			}
 		})
@@ -189,7 +194,8 @@ func TestValidateCSRRejects(t *testing.T) {
 		block, _ := pem.Decode(csr)
 		block.Bytes[len(block.Bytes)-1] ^= 0xff
 
-		if _, _, err := pki.ValidateCSR(pem.EncodeToMemory(block)); err == nil {
+		_, _, err := pki.ValidateCSR(pem.EncodeToMemory(block))
+		if err == nil {
 			t.Fatal("accepted")
 		}
 	})
@@ -214,15 +220,18 @@ func TestCertHelpers(t *testing.T) {
 		t.Fatalf("fingerprint %q", fp)
 	}
 
-	if _, err := pki.ParseCertsPEM([]byte("x")); err == nil {
+	_, err = pki.ParseCertsPEM([]byte("x"))
+	if err == nil {
 		t.Fatal("empty accepted")
 	}
 
-	if _, err := pki.PoolFromPEM(nil); err == nil {
+	_, err = pki.PoolFromPEM(nil)
+	if err == nil {
 		t.Fatal("empty pool accepted")
 	}
 
-	if _, err := pki.CertIdentity(ca.Cert); err == nil {
+	_, err = pki.CertIdentity(ca.Cert)
+	if err == nil {
 		t.Fatal("CA has no identity")
 	}
 }
@@ -230,6 +239,7 @@ func TestCertHelpers(t *testing.T) {
 func TestVerifyPeer(t *testing.T) {
 	ca := pkitest.NewCA(t, "ca")
 	other := pkitest.NewCA(t, "other")
+
 	roots, err := pki.PoolFromPEM(ca.CertPEM)
 	if err != nil {
 		t.Fatal(err)
@@ -249,81 +259,89 @@ func TestVerifyPeer(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 
-	if _, err := pki.VerifyPeer(
+	_, err = pki.VerifyPeer(
 		server.Certificate,
 		roots,
 		x509.ExtKeyUsageServerAuth,
 		now,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("server usage: %v", err)
 	}
 
-	if _, err := pki.VerifyPeer(
+	_, err = pki.VerifyPeer(
 		client.Certificate,
 		otherRoots,
 		x509.ExtKeyUsageClientAuth,
 		now,
-	); err == nil {
+	)
+	if err == nil {
 		t.Fatal("wrong CA accepted")
 	}
 
-	if _, err := pki.VerifyPeer(
+	_, err = pki.VerifyPeer(
 		client.Certificate,
 		roots,
 		x509.ExtKeyUsageServerAuth,
 		now,
-	); err == nil {
+	)
+	if err == nil {
 		t.Fatal("wrong usage accepted")
 	}
 
-	if _, err := pki.VerifyPeer(
+	_, err = pki.VerifyPeer(
 		client.Certificate,
 		roots,
 		x509.ExtKeyUsageClientAuth,
 		now.Add(2*time.Hour),
-	); err == nil {
+	)
+	if err == nil {
 		t.Fatal("expired accepted")
 	}
 
-	if _, err := pki.VerifyPeer(nil, roots, x509.ExtKeyUsageClientAuth, now); err == nil {
+	_, err = pki.VerifyPeer(nil, roots, x509.ExtKeyUsageClientAuth, now)
+	if err == nil {
 		t.Fatal("empty chain accepted")
 	}
 
-	if _, err := pki.VerifyPeer(
+	_, err = pki.VerifyPeer(
 		[][]byte{{1, 2}},
 		roots,
 		x509.ExtKeyUsageClientAuth,
 		now,
-	); err == nil {
+	)
+	if err == nil {
 		t.Fatal("garbage accepted")
 	}
 }
 
 func TestWriteFileAtomic(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "f")
+	path := filepath.Join(t.TempDir(), "f")
 
 	for _, content := range []string{"one", "two"} {
-		if err := pki.WriteFileAtomic(p, []byte(content), 0o600); err != nil {
+		err := pki.WriteFileAtomic(path, []byte(content), 0o600)
+		if err != nil {
 			t.Fatal(err)
 		}
 
-		got, err := os.ReadFile(p)
+		got, err := os.ReadFile(path)
 		if err != nil || string(got) != content {
 			t.Fatalf("got %q %v", got, err)
 		}
 	}
 
-	st, err := os.Stat(p)
+	st, err := os.Stat(path)
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v %v", st.Mode(), err)
 	}
 
-	entries, err := os.ReadDir(filepath.Dir(p))
+	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("leftover files: %v %v", entries, err)
 	}
 
-	if err := pki.WriteFileAtomic(filepath.Join(t.TempDir(), "no", "f"), nil, 0o600); err == nil {
+	err = pki.WriteFileAtomic(filepath.Join(t.TempDir(), "no", "f"), nil, 0o600)
+	if err == nil {
 		t.Fatal("missing dir accepted")
 	}
 }
@@ -334,7 +352,7 @@ func issue(
 	ca *pkitest.CA,
 	key *ecdsa.PrivateKey,
 	identity string,
-) (certPEM, chainPEM []byte) {
+) ([]byte, []byte) {
 	t.Helper()
 
 	csr, err := pki.CreateCSR(key, identity)
@@ -342,7 +360,7 @@ func issue(
 		t.Fatal(err)
 	}
 
-	certPEM, chainPEM, err = ca.SignCSR(csr, time.Hour)
+	certPEM, chainPEM, err := ca.SignCSR(csr, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,31 +382,35 @@ func mode(t *testing.T, p string) os.FileMode {
 func TestStoreRoundTrip(t *testing.T) {
 	ca := pkitest.NewCA(t, "ca")
 	dir := filepath.Join(t.TempDir(), "id")
-	s := pki.Store{Dir: dir}
+	store := pki.Store{Dir: dir}
 
-	if s.Exists() {
+	if store.Exists() {
 		t.Fatal("exists before save")
 	}
 
 	key := mustKey(t)
-	if err := s.SaveKey(key); err != nil {
+
+	err := store.SaveKey(key)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if s.Exists() {
+	if store.Exists() {
 		t.Fatal("exists without cert")
 	}
 
 	certPEM, chain := issue(t, ca, key, "agent-devbox")
-	if err := s.SaveCert(certPEM, chain); err != nil {
+
+	err = store.SaveCert(certPEM, chain)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !s.Exists() {
+	if !store.Exists() {
 		t.Fatal("not exists")
 	}
 
-	tc, leaf, err := s.Load()
+	tc, leaf, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,18 +437,23 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	// A cert for another key is refused.
 	otherCert, otherChain := issue(t, ca, mustKey(t), "agent-devbox")
-	if err := s.SaveCert(otherCert, otherChain); !errors.Is(err, pki.ErrKeyMismatch) {
+
+	err = store.SaveCert(otherCert, otherChain)
+	if !errors.Is(err, pki.ErrKeyMismatch) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestEnsureDirNarrows(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "id")
-	if err := os.Mkdir(dir, 0o755); err != nil { //nolint:gosec // test needs wide mode
+
+	err := os.Mkdir(dir, 0o755) //nolint:gosec // test needs wide mode
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := (pki.Store{Dir: dir}).EnsureDir(); err != nil {
+	err = (pki.Store{Dir: dir}).EnsureDir()
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,134 +466,159 @@ func saved(t *testing.T) (pki.Store, *pkitest.CA, *ecdsa.PrivateKey) {
 	t.Helper()
 
 	ca := pkitest.NewCA(t, "ca")
-	s := pki.Store{Dir: filepath.Join(t.TempDir(), "id")}
+	store := pki.Store{Dir: filepath.Join(t.TempDir(), "id")}
 	key := mustKey(t)
 
-	if err := s.SaveKey(key); err != nil {
-		t.Fatal(err)
-	}
-
-	c, ch := issue(t, ca, key, "agent-a")
-	if err := s.SaveCert(c, ch); err != nil {
-		t.Fatal(err)
-	}
-
-	return s, ca, key
-}
-
-func TestPromoteNext(t *testing.T) {
-	s, ca, oldKey := saved(t)
-	newKey := mustKey(t)
-	c, ch := issue(t, ca, newKey, "agent-a")
-
-	if err := s.SaveNext(newKey, c, ch); err != nil {
-		t.Fatal(err)
-	}
-
-	if m := mode(t, filepath.Join(s.Dir, "next-key.pem")); m != 0o600 {
-		t.Fatalf("next key mode %o", m)
-	}
-
-	tc, _, err := s.LoadNext()
+	err := store.SaveKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !tc.PrivateKey.(*ecdsa.PrivateKey).Equal(newKey) { //nolint:forcetypeassert
+	c, ch := issue(t, ca, key, "agent-a")
+
+	err = store.SaveCert(c, ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return store, ca, key
+}
+
+func TestPromoteNext(t *testing.T) {
+	store, ca, oldKey := saved(t)
+	newKey := mustKey(t)
+	c, ch := issue(t, ca, newKey, "agent-a")
+
+	err := store.SaveNext(newKey, c, ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m := mode(t, filepath.Join(store.Dir, "next-key.pem")); m != 0o600 {
+		t.Fatalf("next key mode %o", m)
+	}
+
+	tc, _, err := store.LoadNext()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !sameKey(tc.PrivateKey, newKey) {
 		t.Fatal("wrong next key")
 	}
 
 	// Current is still the old pair.
-	cur, _, err := s.Load()
-	if err != nil || !cur.PrivateKey.(*ecdsa.PrivateKey).Equal(oldKey) { //nolint:forcetypeassert
+	cur, _, err := store.Load()
+	if err != nil ||
+		!sameKey(cur.PrivateKey, oldKey) {
 		t.Fatalf("current changed: %v", err)
 	}
 
-	if err := s.PromoteNext(); err != nil {
+	err = store.PromoteNext()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	cur, _, err = s.Load()
-	if err != nil || !cur.PrivateKey.(*ecdsa.PrivateKey).Equal(newKey) { //nolint:forcetypeassert
+	cur, _, err = store.Load()
+	if err != nil ||
+		!sameKey(cur.PrivateKey, newKey) {
 		t.Fatalf("not promoted: %v", err)
 	}
 
-	if _, _, err := s.LoadNext(); err == nil {
+	_, _, err = store.LoadNext()
+	if err == nil {
 		t.Fatal("next still present")
 	}
 }
 
 func TestPromoteCrashRecovery(t *testing.T) {
-	s, ca, _ := saved(t)
+	store, ca, _ := saved(t)
 	newKey := mustKey(t)
 	c, ch := issue(t, ca, newKey, "agent-a")
 
-	if err := s.SaveNext(newKey, c, ch); err != nil {
+	err := store.SaveNext(newKey, c, ch)
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Simulate a crash after the key rename but before the cert rename.
-	if err := os.Rename(
-		filepath.Join(s.Dir, "next-key.pem"),
-		filepath.Join(s.Dir, "key.pem"),
-	); err != nil {
+	err = os.Rename(
+		filepath.Join(store.Dir, "next-key.pem"),
+		filepath.Join(store.Dir, "key.pem"),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	tc, _, err := s.Load()
+	tc, _, err := store.Load()
 	if err != nil {
 		t.Fatalf("no recovery: %v", err)
 	}
 
-	if !tc.PrivateKey.(*ecdsa.PrivateKey).Equal(newKey) { //nolint:forcetypeassert
+	if !sameKey(tc.PrivateKey, newKey) {
 		t.Fatal("recovered wrong key")
 	}
 
-	if _, err := os.Stat(filepath.Join(s.Dir, "next-cert.pem")); !errors.Is(err, os.ErrNotExist) {
+	_, err = os.Stat(filepath.Join(store.Dir, "next-cert.pem"))
+	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("next-cert remains: %v", err)
 	}
 }
 
 func TestLoadMismatchWithoutNext(t *testing.T) {
-	s, _, _ := saved(t)
+	store, _, _ := saved(t)
 
-	if err := s.SaveKey(mustKey(t)); err != nil {
+	err := store.SaveKey(mustKey(t))
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, _, err := s.Load(); !errors.Is(err, pki.ErrKeyMismatch) {
+	_, _, err = store.Load()
+	if !errors.Is(err, pki.ErrKeyMismatch) {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestSaveNextMismatchAndDiscard(t *testing.T) {
-	s, ca, _ := saved(t)
-	c, ch := issue(t, ca, mustKey(t), "agent-a")
+	store, ca, _ := saved(t)
+	crt, ch := issue(t, ca, mustKey(t), "agent-a")
 
-	if err := s.SaveNext(mustKey(t), c, ch); !errors.Is(err, pki.ErrKeyMismatch) {
+	err := store.SaveNext(mustKey(t), crt, ch)
+	if !errors.Is(err, pki.ErrKeyMismatch) {
 		t.Fatalf("err = %v", err)
 	}
 
 	k := mustKey(t)
-	c, ch = issue(t, ca, k, "agent-a")
+	crt, ch = issue(t, ca, k, "agent-a")
 
-	if err := s.SaveNext(k, c, ch); err != nil {
+	err = store.SaveNext(k, crt, ch)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := s.DiscardNext(); err != nil {
+	err = store.DiscardNext()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := s.DiscardNext(); err != nil {
+	err = store.DiscardNext()
+	if err != nil {
 		t.Fatalf("second discard: %v", err)
 	}
 
-	if err := s.PromoteNext(); err == nil {
+	err = store.PromoteNext()
+	if err == nil {
 		t.Fatal("promote without next succeeded")
 	}
 
-	if !s.Exists() {
+	if !store.Exists() {
 		t.Fatal("current lost")
 	}
+}
+
+// sameKey reports whether priv is key.
+func sameKey(priv any, key *ecdsa.PrivateKey) bool {
+	got, ok := priv.(*ecdsa.PrivateKey)
+
+	return ok && got.Equal(key)
 }

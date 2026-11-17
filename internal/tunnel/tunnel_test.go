@@ -13,19 +13,24 @@ import (
 
 func TestControlPingAndMessages(t *testing.T) {
 	a, b := net.Pipe()
+
 	ca, cb := NewControl(a), NewControl(b)
 	defer ca.Close()
 	defer cb.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	if _, err := ca.PingNow(ctx); err != nil {
+
+	_, err := ca.PingNow(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ca.Send(proto.Status{Version: "v1.0.0"}); err != nil {
+	err = ca.Send(proto.Status{Version: "v1.0.0"})
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	select {
 	case m := <-cb.Messages():
 		if s, ok := m.(proto.Status); !ok || s.Version != "v1.0.0" {
@@ -42,12 +47,14 @@ func TestLivenessDetectsDeadPeer(t *testing.T) {
 	// b never reads: drain nothing so pings block, then time out.
 	go func() { _, _ = io.Copy(io.Discard, b) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
+
 	err := ca.RunLiveness(ctx, 20*time.Millisecond, 3)
 	if !errors.Is(err, ErrDead) {
 		t.Fatalf("err = %v, want ErrDead", err)
 	}
+
 	select {
 	case <-ca.Done():
 	default:
@@ -57,16 +64,19 @@ func TestLivenessDetectsDeadPeer(t *testing.T) {
 
 func TestJoin(t *testing.T) {
 	a1, a2 := net.Pipe()
+
 	b1, b2 := net.Pipe()
 	go Join(a2, b1)
 	go func() {
 		_, _ = a1.Write([]byte("hello"))
 		_ = a1.Close()
 	}()
+
 	got, err := io.ReadAll(b2)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(got) != "hello" {
 		t.Fatalf("got %q", got)
 	}

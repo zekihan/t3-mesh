@@ -21,18 +21,22 @@ func DefaultGatewayMAC() (netip.Addr, net.HardwareAddr, error) {
 		return netip.Addr{}, nil, fmt.Errorf("open route table: %w", err)
 	}
 	defer rf.Close()
+
 	gw, err := parseProcRoute(rf)
 	if err != nil {
 		return netip.Addr{}, nil, err
 	}
+
 	af, err := os.Open(procARPPath)
 	if err != nil {
 		return gw.addr, nil, fmt.Errorf("open arp table: %w", err)
 	}
 	defer af.Close()
+
 	mac, err := parseProcARP(af, gw.addr, gw.iface)
 	if err != nil {
 		return gw.addr, nil, err
 	}
+
 	return gw.addr, mac, nil
 }

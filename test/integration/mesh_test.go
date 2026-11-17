@@ -33,7 +33,8 @@ func skipNoDirect(t *testing.T, m *mesh) {
 
 	if !m.direct.IsValid() {
 		t.Skip(
-			"BLOCKED: no private LAN IPv4 address and the agent does not advertise loopback direct addresses (internal/agent/tunnel.go lanAddrs drops IsLoopback)",
+			"BLOCKED: no private LAN IPv4 address and the agent does not advertise " +
+				"loopback direct addresses (internal/agent/tunnel.go lanAddrs drops IsLoopback)",
 		)
 	}
 }
@@ -41,20 +42,20 @@ func skipNoDirect(t *testing.T, m *mesh) {
 // expectRefused asserts the hub closes a connection made with c (or never
 // completed the handshake): in TLS 1.3 the client's handshake finishes before
 // the server judges the client certificate, so refusal shows up on first read.
-func expectRefused(t *testing.T, c *tls.Conn, dialErr error) {
+func expectRefused(t *testing.T, conn *tls.Conn, dialErr error) {
 	t.Helper()
 
 	if dialErr != nil {
 		return
 	}
 
-	defer func() { _ = c.Close() }()
+	defer func() { _ = conn.Close() }()
 
-	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 	buf := make([]byte, 1)
 
-	_, err := c.Read(buf)
+	_, err := conn.Read(buf)
 	if err == nil {
 		t.Fatal("hub kept the connection and sent data, want refusal")
 	}
@@ -66,66 +67,69 @@ func expectRefused(t *testing.T, c *tls.Conn, dialErr error) {
 }
 
 // tryTunnel opens a tunnel with cert and returns the hub's first reply.
-func (m *mesh) tryTunnel(cert tls.Certificate) proto.Message {
-	m.t.Helper()
+//
+//nolint:ireturn // Message is the polymorphic wire type
+func (msh *mesh) tryTunnel(cert *tls.Certificate) proto.Message {
+	msh.t.Helper()
 
-	c, err := m.rawDial(&cert, proto.TunnelALPN(proto.ProtocolVersion))
+	conn, err := msh.rawDial(cert, proto.TunnelALPN(proto.ProtocolVersion))
 	if err != nil {
-		m.t.Fatalf("tunnel dial: %v", err)
+		msh.t.Fatalf("tunnel dial: %v", err)
 	}
 
-	defer func() { _ = c.Close() }()
+	defer func() { _ = conn.Close() }()
 
-	ymx, err := yamux.Client(c, tunnel.YamuxConfig())
+	ymx, err := yamux.Client(conn, tunnel.YamuxConfig())
 	if err != nil {
-		m.t.Fatal(err)
+		msh.t.Fatal(err)
 	}
 
 	defer func() { _ = ymx.Close() }()
 
 	st, err := ymx.OpenStream()
 	if err != nil {
-		m.t.Fatal(err)
+		msh.t.Fatal(err)
 	}
 
 	ctrl := tunnel.NewControl(st)
 
-	if err = ctrl.Send(
+	err = ctrl.Send(
 		proto.Hello{
 			Version:         "v0.0.0",
 			Services:        []string{"t3"},
 			CertFingerprint: pki.Fingerprint(cert.Leaf),
 		},
-	); err != nil {
-		m.t.Fatal(err)
+	)
+	if err != nil {
+		msh.t.Fatal(err)
 	}
 
 	select {
 	case msg, ok := <-ctrl.Messages():
 		if !ok {
-			m.t.Fatal("control stream closed without a reply")
+			msh.t.Fatal("control stream closed without a reply")
 		}
 
 		return msg
 	case <-time.After(5 * time.Second):
-		m.t.Fatal("no reply to Hello")
+		msh.t.Fatal("no reply to Hello")
 	}
 
 	return nil
 }
 
-func (m *mesh) twoNodes(a, b nodeOpts) (*node, *node) {
-	m.t.Helper()
+func (msh *mesh) twoNodes(a, b *nodeOpts) (*node, *node) {
+	msh.t.Helper()
 
-	nb := m.newNode("b", b)
-	na := m.newNode("a", a)
+	nb := msh.newNode("b", b)
+	na := msh.newNode("a", a)
 
 	return na, nb
 }
 
 // awaitDirect waits until a request through from's link takes the direct path:
 // the hub then relays no stream for it.
-func awaitDirect(t *testing.T, m *mesh, from *node) {
+func awaitDirect(t *testing.T, msh *mesh, from *node) {
 	t.Helper()
 
 	eventually(t, 15*time.Second, "link on "+from.name+" goes direct", func() bool {
@@ -136,7 +140,7 @@ func awaitDirect(t *testing.T, m *mesh, from *node) {
 
 		defer h.close()
 
-		return m.status().Machines[from.name].LinkStreams == 0
+		return msh.status().Machines[from.name].LinkStreams == 0
 	})
 }
 
@@ -145,12 +149,12 @@ func awaitDirect(t *testing.T, m *mesh, from *node) {
 func TestViewerAndAdmission(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	m.twoNodes(nodeOpts{}, nodeOpts{})
+	msh := newMesh(t, &meshOpts{})
+	msh.twoNodes(&nodeOpts{}, &nodeOpts{})
 
-	p := m.newPhone()
+	ph := msh.newPhone()
 
-	if code, body := m.viewerGet(p, "b", "/"); code != http.StatusOK || body != "t3@b mtls=0" {
+	if code, body := msh.viewerGet(&ph, "b", "/"); code != http.StatusOK || body != "t3@b mtls=0" {
 		t.Fatalf(
 			"viewer -> b: %d %q, want 200 \"t3@b mtls=0\" (X-Mtls headers must be stripped)",
 			code,
@@ -158,76 +162,93 @@ func TestViewerAndAdmission(t *testing.T) {
 		)
 	}
 
-	if code, body := m.viewerGet(p, "a", "/"); code != http.StatusOK || body != "t3@a mtls=0" {
+	if code, body := msh.viewerGet(&ph, "a", "/"); code != http.StatusOK || body != "t3@a mtls=0" {
 		t.Fatalf("viewer -> a: %d %q", code, body)
 	}
 
 	if code, _ := get(
 		t,
-		m.viewer.URL+"/",
+		msh.viewer.URL+"/",
 		nil,
 		"t3.b."+viewerDomain,
 	); code != http.StatusForbidden {
 		t.Fatalf("viewer without headers: %d, want 403", code)
 	}
 
-	h := p.headers()
+	h := ph.headers()
 	h.Set("X-Mtls-Mesh-Viewer", "agent-a")
 
-	if code, _ := get(t, m.viewer.URL+"/", h, "t3.b."+viewerDomain); code != http.StatusForbidden {
+	if code, _ := get(
+		t,
+		msh.viewer.URL+"/",
+		h,
+		"t3.b."+viewerDomain,
+	); code != http.StatusForbidden {
 		t.Fatalf("agent identity as viewer: %d, want 403", code)
 	}
 
 	if code, _ := get(
 		t,
-		m.viewer.URL+"/",
-		p.headers(),
+		msh.viewer.URL+"/",
+		ph.headers(),
 		"t3.nope."+viewerDomain,
 	); code != http.StatusNotFound {
 		t.Fatalf("unknown machine: %d, want 404", code)
 	}
 
-	st := m.status()
+	st := msh.status()
 	for _, name := range []string{"a", "b"} {
 		if ms := st.Machines[name]; !ms.Connected || ms.Sessions != 1 {
 			t.Fatalf("machine %s status: %+v", name, ms)
 		}
 	}
 
+	checkAdmission(t, msh, &ph)
+}
+
+// checkAdmission checks which raw TLS connections the hub refuses.
+func checkAdmission(t *testing.T, msh *mesh, p *phone) {
+	t.Helper()
+
 	// A phone certificate chains to the clients CA but is not an agent identity.
-	c, err := m.rawDial(&p.cert, proto.TunnelALPN(proto.ProtocolVersion))
-	expectRefused(t, c, err)
+	conn, err := msh.rawDial(&p.cert, proto.TunnelALPN(proto.ProtocolVersion))
+	expectRefused(t, conn, err)
 
 	// No certificate and no outstanding token: refused even on the enroll ALPN.
-	c, err = m.rawDial(nil, proto.ALPNEnroll)
-	expectRefused(t, c, err)
+	conn, err = msh.rawDial(nil, proto.ALPNEnroll)
+	expectRefused(t, conn, err)
 
-	c, err = m.rawDial(nil, proto.TunnelALPN(proto.ProtocolVersion))
-	expectRefused(t, c, err)
+	conn, err = msh.rawDial(nil, proto.TunnelALPN(proto.ProtocolVersion))
+	expectRefused(t, conn, err)
 
 	// With a token outstanding the enroll ALPN is accepted: the hub waits for
 	// the Enroll message, so the connection stays open.
-	if _, _, err = m.tokens.Create("agent-a"); err != nil {
+	_, _, err = msh.tokens.Create("agent-a")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	c, err = m.rawDial(nil, proto.ALPNEnroll)
+	conn, err = msh.rawDial(nil, proto.ALPNEnroll)
 	if err != nil {
 		t.Fatalf("enroll connection with a token outstanding: %v", err)
 	}
 
-	defer func() { _ = c.Close() }()
+	defer func() { _ = conn.Close() }()
 
-	_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 
-	if _, err = c.Read(make([]byte, 1)); err == nil {
+	_, err = conn.Read(make([]byte, 1))
+	if err == nil {
 		t.Fatal("unexpected data from hub")
-	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() { //nolint:errorlint // plain check
+	}
+
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("enroll connection with a token outstanding was refused: %v", err)
 	}
 
 	// The tunnel ALPN still needs an agent certificate.
-	c2, err := m.rawDial(nil, proto.TunnelALPN(proto.ProtocolVersion))
+	c2, err := msh.rawDial(nil, proto.TunnelALPN(proto.ProtocolVersion))
 	expectRefused(t, c2, err)
 }
 
@@ -236,12 +257,15 @@ func TestViewerAndAdmission(t *testing.T) {
 func TestLinkOverTunnel(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	a, b := m.twoNodes(nodeOpts{links: []string{"t3.b"}}, nodeOpts{links: []string{"t3.a"}})
+	msh := newMesh(t, &meshOpts{})
+	nodeA, nodeB := msh.twoNodes(
+		&nodeOpts{links: []string{"t3.b"}},
+		&nodeOpts{links: []string{"t3.a"}},
+	)
 
 	if code, body := get(
 		t,
-		a.linkURL("/"),
+		nodeA.linkURL("/"),
 		nil,
 		"",
 	); code != http.StatusOK ||
@@ -249,17 +273,17 @@ func TestLinkOverTunnel(t *testing.T) {
 		t.Fatalf("a link t3.b: %d %q", code, body)
 	}
 
-	h := openHold(t, a.linkURL("/hold"), nil, "")
+	h := openHold(t, nodeA.linkURL("/hold"), nil, "")
 	defer h.close()
 
-	st := m.status()
+	st := msh.status()
 	if st.Machines["a"].LinkStreams != 1 || st.Machines["b"].OpenStreams != 1 {
 		t.Fatalf("relayed stream not visible at the hub: a.linkStreams=%d b.openStreams=%d",
 			st.Machines["a"].LinkStreams, st.Machines["b"].OpenStreams)
 	}
 
 	// b has no rule to reach a: the hub refuses the stream.
-	if code, _ := get(t, b.linkURL("/"), nil, ""); code != http.StatusBadGateway {
+	if code, _ := get(t, nodeB.linkURL("/"), nil, ""); code != http.StatusBadGateway {
 		t.Fatalf("b link t3.a without a rule: %d, want 502", code)
 	}
 
@@ -268,12 +292,12 @@ func TestLinkOverTunnel(t *testing.T) {
 		"origin":     {"Origin": {"http://evil.example"}},
 		"fetch-site": {"Sec-Fetch-Site": {"cross-site"}},
 	} {
-		if code, _ := get(t, a.linkURL("/"), hdr, ""); code != http.StatusForbidden {
+		if code, _ := get(t, nodeA.linkURL("/"), hdr, ""); code != http.StatusForbidden {
 			t.Fatalf("link with foreign %s: %d, want 403", name, code)
 		}
 	}
 
-	if code, _ := get(t, a.linkURL("/"), nil, "evil.example"); code != http.StatusForbidden {
+	if code, _ := get(t, nodeA.linkURL("/"), nil, "evil.example"); code != http.StatusForbidden {
 		t.Fatalf("link with foreign Host: %d, want 403", code)
 	}
 }
@@ -283,26 +307,29 @@ func TestLinkOverTunnel(t *testing.T) {
 func TestDirectAndRevocation(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	skipNoDirect(t, m)
-	a, b := m.twoNodes(nodeOpts{direct: true, links: []string{"t3.b"}}, nodeOpts{direct: true})
-	a.waitDirectListening()
-	b.waitDirectListening()
+	msh := newMesh(t, &meshOpts{})
+	skipNoDirect(t, msh)
+	nodeA, nodeB := msh.twoNodes(
+		&nodeOpts{direct: true, links: []string{"t3.b"}},
+		&nodeOpts{direct: true},
+	)
+	nodeA.waitDirectListening()
+	nodeB.waitDirectListening()
 
-	awaitDirect(t, m, a)
+	awaitDirect(t, msh, nodeA)
 
-	h := openHold(t, a.linkURL("/hold"), nil, "")
-	if st := m.status(); st.Machines["a"].LinkStreams != 0 || st.Machines["b"].OpenStreams != 0 {
+	hold := openHold(t, nodeA.linkURL("/hold"), nil, "")
+	if st := msh.status(); st.Machines["a"].LinkStreams != 0 || st.Machines["b"].OpenStreams != 0 {
 		t.Fatalf("direct stream visible at the hub: %+v", st.Machines)
 	}
 
 	// Removing the rule closes the live direct session on both agents and
 	// stops new ones.
-	m.update(func(c *hubCfg) { c.noRelayRule = true })
-	h.waitEnd(t, 5*time.Second)
+	msh.update(func(c *hubCfg) { c.noRelayRule = true })
+	hold.waitEnd(t, 5*time.Second)
 
 	eventually(t, 5*time.Second, "link refused after the rule is gone", func() bool {
-		code, _ := get(t, a.linkURL("/"), nil, "")
+		code, _ := get(t, nodeA.linkURL("/"), nil, "")
 
 		return code == http.StatusBadGateway
 	})
@@ -311,12 +338,14 @@ func TestDirectAndRevocation(t *testing.T) {
 func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	skipNoDirect(t, m)
+	msh := newMesh(t, &meshOpts{})
+	skipNoDirect(t, msh)
 	// A peer that accepts TCP and then says nothing, on b's direct port.
-	port := freePort(t, m.direct.String())
+	port := freePort(t, msh.direct.String())
 
-	ln, err := net.Listen("tcp", net.JoinHostPort(m.direct.String(), itoa(port)))
+	ln, err := new(net.ListenConfig).Listen(
+		t.Context(), "tcp", net.JoinHostPort(msh.direct.String(), itoa(port)),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +356,7 @@ func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 
 	go func() {
 		for {
-			c, err := ln.Accept()
+			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
@@ -337,28 +366,29 @@ func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 			go func() {
 				<-stop
 
-				_ = c.Close()
+				_ = conn.Close()
 			}()
 		}
 	}()
+
 	t.Cleanup(func() {
 		close(stop)
 
 		_ = ln.Close()
 	})
 
-	a, _ := m.twoNodes(
-		nodeOpts{direct: true, links: []string{"t3.b"}},
-		nodeOpts{direct: true, directPort: port},
+	nodeA, _ := msh.twoNodes(
+		&nodeOpts{direct: true, links: []string{"t3.b"}},
+		&nodeOpts{direct: true, directPort: port},
 	)
-	a.waitDirectListening()
+	nodeA.waitDirectListening()
 
 	// Until a learns b's address it uses the tunnel without trying direct, so
 	// keep asking until the stalled port saw a connection.
 	eventually(t, 15*time.Second, "a tries b's stalled direct port", func() bool {
 		start := time.Now()
 
-		code, body := get(t, a.linkURL("/"), nil, "")
+		code, body := get(t, nodeA.linkURL("/"), nil, "")
 		if code != http.StatusOK || body != "t3@b mtls=0" {
 			t.Fatalf("link during stall: %d %q, want the tunnel fallback to answer", code, body)
 		}
@@ -370,10 +400,10 @@ func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 		return accepted.Load() > 0
 	})
 
-	h := openHold(t, a.linkURL("/hold"), nil, "")
+	h := openHold(t, nodeA.linkURL("/hold"), nil, "")
 	defer h.close()
 
-	if st := m.status(); st.Machines["a"].LinkStreams < 1 {
+	if st := msh.status(); st.Machines["a"].LinkStreams < 1 {
 		t.Fatalf("stalled direct peer: stream not relayed by the hub: %+v", st.Machines["a"])
 	}
 }
@@ -383,24 +413,24 @@ func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 func TestRevocationClosesLiveSessions(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	a, _ := m.twoNodes(nodeOpts{links: []string{"t3.b"}}, nodeOpts{})
+	msh := newMesh(t, &meshOpts{})
+	nodeA, _ := msh.twoNodes(&nodeOpts{links: []string{"t3.b"}}, &nodeOpts{})
 
-	p1, p2 := m.newPhone(), m.newPhone()
+	p1, p2 := msh.newPhone(), msh.newPhone()
 
-	v1 := m.openViewerHold(p1, "b")
-	v2 := m.openViewerHold(p2, "b")
-	relay := openHold(t, a.linkURL("/hold"), nil, "")
+	v1 := msh.openViewerHold(&p1, "b")
+	v2 := msh.openViewerHold(&p2, "b")
+	relay := openHold(t, nodeA.linkURL("/hold"), nil, "")
 
 	// Block one leaf of z-phone: only that viewer stream is cut.
-	m.update(func(c *hubCfg) { c.blocked = []string{p1.fp} })
+	msh.update(func(c *hubCfg) { c.blocked = []string{p1.fp} })
 	v1.waitEnd(t, 5*time.Second)
 
-	if code, _ := m.viewerGet(p1, "b", "/"); code != http.StatusForbidden {
+	if code, _ := msh.viewerGet(&p1, "b", "/"); code != http.StatusForbidden {
 		t.Fatalf("blocked leaf: %d, want 403", code)
 	}
 
-	if code, body := m.viewerGet(p2, "b", "/"); code != http.StatusOK {
+	if code, body := msh.viewerGet(&p2, "b", "/"); code != http.StatusOK {
 		t.Fatalf("other leaf of the same identity: %d %q, want 200", code, body)
 	}
 
@@ -408,25 +438,25 @@ func TestRevocationClosesLiveSessions(t *testing.T) {
 	assertOpen(t, relay, "relayed stream")
 
 	// Removing agent-a's rule cuts the relayed stream.
-	m.update(func(c *hubCfg) { c.noRelayRule = true })
+	msh.update(func(c *hubCfg) { c.noRelayRule = true })
 	relay.waitEnd(t, 5*time.Second)
 
-	if code, _ := get(t, a.linkURL("/"), nil, ""); code != http.StatusBadGateway {
+	if code, _ := get(t, nodeA.linkURL("/"), nil, ""); code != http.StatusBadGateway {
 		t.Fatalf("link after rule removal: %d, want 502", code)
 	}
 
 	assertOpen(t, v2, "viewer stream after unrelated rule removal")
 
 	// Disabling agent-a closes its tunnel.
-	m.update(func(c *hubCfg) { c.disabled = []string{"agent-a"} })
+	msh.update(func(c *hubCfg) { c.disabled = []string{"agent-a"} })
 	eventually(
 		t,
 		5*time.Second,
 		"agent a disconnected",
-		func() bool { return !m.status().Machines["a"].Connected },
+		func() bool { return !msh.status().Machines["a"].Connected },
 	)
 
-	if !m.status().Machines["b"].Connected {
+	if !msh.status().Machines["b"].Connected {
 		t.Fatal("disabling agent-a dropped agent-b")
 	}
 }
@@ -445,22 +475,22 @@ func assertOpen(t *testing.T, h *held, what string) {
 func TestTunnelReconnect(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	a, b := m.twoNodes(nodeOpts{links: []string{"t3.b"}}, nodeOpts{})
-	p := m.newPhone()
+	msh := newMesh(t, &meshOpts{})
+	nodeA, nodeB := msh.twoNodes(&nodeOpts{links: []string{"t3.b"}}, &nodeOpts{})
+	ph := msh.newPhone()
 
-	live := m.openViewerHold(p, "b")
-	before := m.tl.count()
+	live := msh.openViewerHold(&ph, "b")
+	before := msh.tl.count()
 
-	b.dropTunnel()
+	nodeB.dropTunnel()
 	live.waitEnd(t, 5*time.Second)
 
 	// b dials again; the new session is the one new streams use.
 	eventually(t, 15*time.Second, "b reconnects with a new connection", func() bool {
-		return m.tl.count() > before && m.status().Machines["b"].Connected
+		return msh.tl.count() > before && msh.status().Machines["b"].Connected
 	})
 	eventually(t, 10*time.Second, "viewer request reaches b over the new session", func() bool {
-		code, body := m.viewerGet(p, "b", "/")
+		code, body := msh.viewerGet(&ph, "b", "/")
 
 		return code == http.StatusOK && body == "t3@b mtls=0"
 	})
@@ -469,19 +499,19 @@ func TestTunnelReconnect(t *testing.T) {
 		t,
 		5*time.Second,
 		"one session for b",
-		func() bool { return m.status().Machines["b"].Sessions == 1 },
+		func() bool { return msh.status().Machines["b"].Sessions == 1 },
 	)
 
 	// Same for a, the side that opens the relayed streams.
-	before = m.tl.count()
+	before = msh.tl.count()
 
-	a.dropTunnel()
+	nodeA.dropTunnel()
 
 	eventually(t, 15*time.Second, "a reconnects with a new connection", func() bool {
-		return m.tl.count() > before && m.status().Machines["a"].Connected
+		return msh.tl.count() > before && msh.status().Machines["a"].Connected
 	})
 	eventually(t, 10*time.Second, "a's link reaches b over the new session", func() bool {
-		code, body := get(t, a.linkURL("/"), nil, "")
+		code, body := get(t, nodeA.linkURL("/"), nil, "")
 
 		return code == http.StatusOK && body == "t3@b mtls=0"
 	})
@@ -492,32 +522,32 @@ func TestTunnelReconnect(t *testing.T) {
 func TestRenewal(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	withDirect := m.direct.IsValid()
+	msh := newMesh(t, &meshOpts{})
+	withDirect := msh.direct.IsValid()
 
 	// Valid for 120 more days: not yet inside the 90 day renewal window.
-	a, _ := m.twoNodes(
-		nodeOpts{
+	nodeA, _ := msh.twoNodes(
+		&nodeOpts{
 			direct:   withDirect,
 			cacheTTL: 90 * 24 * time.Hour,
 			links:    []string{"t3.b"},
 			notAfter: time.Now().Add(120 * 24 * time.Hour),
 		},
-		nodeOpts{direct: withDirect},
+		&nodeOpts{direct: withDirect},
 	)
-	oldFP := pki.Fingerprint(a.cert.Leaf)
+	oldFP := pki.Fingerprint(nodeA.cert.Leaf)
 
 	var direct *held
 
 	if withDirect {
-		a.waitDirectListening()
-		awaitDirect(t, m, a)
+		nodeA.waitDirectListening()
+		awaitDirect(t, msh, nodeA)
 
 		// A live direct session: it must outlive the renewal, since peers pin no leaf.
-		direct = openHold(t, a.linkURL("/hold"), nil, "")
+		direct = openHold(t, nodeA.linkURL("/hold"), nil, "")
 	}
 
-	st := m.status().Machines["a"]
+	st := msh.status().Machines["a"]
 	if st.CertNotAfter == nil {
 		t.Fatal("hub reports no certificate expiry for a")
 	}
@@ -526,17 +556,17 @@ func TestRenewal(t *testing.T) {
 
 	// 40 days later the certificate is inside the window. The renewal check
 	// runs on every new session, so cut the tunnel to trigger it.
-	a.clock.Store(int64(40 * 24 * time.Hour))
-	a.dropTunnel()
+	nodeA.clock.Store(int64(40 * 24 * time.Hour))
+	nodeA.dropTunnel()
 
 	eventually(t, 20*time.Second, "a renews its certificate", func() bool {
-		s := m.status().Machines["a"]
+		s := msh.status().Machines["a"]
 
 		return s.Connected && s.CertNotAfter != nil &&
 			s.CertNotAfter.After(oldNotAfter.Add(100*24*time.Hour))
 	})
 
-	store := pki.Store{Dir: a.cfg.Identity.Dir}
+	store := pki.Store{Dir: nodeA.cfg.Identity.Dir}
 
 	eventually(t, 10*time.Second, "renewed identity promoted on disk", func() bool {
 		_, leaf, err := store.Load()
@@ -545,7 +575,7 @@ func TestRenewal(t *testing.T) {
 	})
 
 	// The hub admits only the newest leaf per identity.
-	msg := m.tryTunnel(a.cert)
+	msg := msh.tryTunnel(&nodeA.cert)
 
 	rej, ok := msg.(proto.Reject)
 	if !ok || rej.Reason != proto.RejectLeafNotNewest {
@@ -554,7 +584,7 @@ func TestRenewal(t *testing.T) {
 
 	if code, body := get(
 		t,
-		a.linkURL("/"),
+		nodeA.linkURL("/"),
 		nil,
 		"",
 	); code != http.StatusOK ||
@@ -566,7 +596,7 @@ func TestRenewal(t *testing.T) {
 		assertOpen(t, direct, "direct session across the renewal")
 
 		// New direct connections work with the new certificate.
-		awaitDirect(t, m, a)
+		awaitDirect(t, msh, nodeA)
 	}
 }
 
@@ -575,63 +605,67 @@ func TestRenewal(t *testing.T) {
 func TestEnrollmentEndToEnd(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	b := m.newNode("b", nodeOpts{noIdentity: true, noStart: true})
+	msh := newMesh(t, &meshOpts{})
+	nodeB := msh.newNode("b", &nodeOpts{noIdentity: true, noStart: true})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 
 	// A token is bound to one identity.
-	wrong, _, err := m.tokens.Create("agent-a")
+	wrong, _, err := msh.tokens.Create("agent-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = agent.Enroll(ctx, b.cfg, wrong, m.hubTLS()); err == nil {
+	err = agent.Enroll(ctx, nodeB.cfg, wrong, msh.hubTLS())
+	if err == nil {
 		t.Fatal("enrolled agent-b with a token bound to agent-a")
 	}
 
-	token, _, err := m.tokens.Create("agent-b")
+	token, _, err := msh.tokens.Create("agent-b")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = agent.Enroll(ctx, b.cfg, token, m.hubTLS()); err != nil {
+	err = agent.Enroll(ctx, nodeB.cfg, token, msh.hubTLS())
+	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
 
 	// Single use.
-	other := m.newNode("b", nodeOpts{noIdentity: true, noStart: true})
-	if err = agent.Enroll(ctx, other.cfg, token, m.hubTLS()); err == nil {
+	other := msh.newNode("b", &nodeOpts{noIdentity: true, noStart: true})
+
+	err = agent.Enroll(ctx, other.cfg, token, msh.hubTLS())
+	if err == nil {
 		t.Fatal("token enrolled twice")
 	}
 
-	b.start()
+	nodeB.start()
 
-	p := m.newPhone()
-	if code, body := m.viewerGet(p, "b", "/"); code != http.StatusOK || body != "t3@b mtls=0" {
+	p := msh.newPhone()
+	if code, body := msh.viewerGet(&p, "b", "/"); code != http.StatusOK || body != "t3@b mtls=0" {
 		t.Fatalf("viewer -> enrolled b: %d %q", code, body)
 	}
 
 	// The hub records the issued leaf as newest.
-	_, leaf, err := pki.Store{Dir: b.cfg.Identity.Dir}.Load()
+	_, leaf, err := pki.Store{Dir: nodeB.cfg.Identity.Dir}.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got, _ := m.fake.Newest(ctx, "agent-b"); got != pki.Fingerprint(leaf) {
+	if got, _ := msh.fake.Newest(ctx, "agent-b"); got != pki.Fingerprint(leaf) {
 		t.Fatalf("newest leaf for agent-b = %s, enrolled leaf %s", got, pki.Fingerprint(leaf))
 	}
 
 	// With the token spent no enrollment is open any more.
-	c, err := m.rawDial(nil, proto.ALPNEnroll)
-	if err == nil && m.tokens.Outstanding() {
-		_ = c.Close()
+	conn, err := msh.rawDial(nil, proto.ALPNEnroll)
+	if err == nil && msh.tokens.Outstanding() {
+		_ = conn.Close()
 
 		t.Fatal("tokens still outstanding after enrollment")
 	}
 
-	expectRefused(t, c, err)
+	expectRefused(t, conn, err)
 }
 
 // ---- 7. release change ----
@@ -639,22 +673,22 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 func TestReleaseChangeReachesAgent(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	m.twoNodes(nodeOpts{}, nodeOpts{})
+	msh := newMesh(t, &meshOpts{})
+	msh.twoNodes(&nodeOpts{}, &nodeOpts{})
 
-	first := m.status()
+	first := msh.status()
 
 	eventually(t, 10*time.Second, "agents acknowledge the initial release", func() bool {
-		st := m.status()
+		st := msh.status()
 
 		return st.Machines["a"].Acked.Release == st.Release.Revision &&
 			st.Machines["b"].Acked.Release == st.Release.Revision
 	})
 
-	m.update(func(c *hubCfg) { c.release = "v0.4.0" })
+	msh.update(func(c *hubCfg) { c.release = "v0.4.0" })
 
 	eventually(t, 10*time.Second, "agents acknowledge the new release", func() bool {
-		st := m.status()
+		st := msh.status()
 
 		return st.Release.Version == "v0.4.0" && st.Release.Revision != first.Release.Revision &&
 			st.Machines["a"].Acked.Release == st.Release.Revision && st.Machines["b"].Acked.Release == st.Release.Revision
@@ -662,7 +696,7 @@ func TestReleaseChangeReachesAgent(t *testing.T) {
 
 	// The reload neither restarted the hub nor dropped a tunnel.
 	for _, name := range []string{"a", "b"} {
-		if ms := m.status().Machines[name]; !ms.Connected || ms.Sessions != 1 {
+		if ms := msh.status().Machines[name]; !ms.Connected || ms.Sessions != 1 {
 			t.Fatalf("machine %s after release bump: %+v", name, ms)
 		}
 	}
@@ -673,53 +707,53 @@ func TestReleaseChangeReachesAgent(t *testing.T) {
 func TestStaleConfigAlert(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	m.twoNodes(nodeOpts{}, nodeOpts{})
+	msh := newMesh(t, &meshOpts{})
+	msh.twoNodes(&nodeOpts{}, &nodeOpts{})
 
-	if code, body := m.opsGet("/alerts/stale-config"); code != http.StatusOK {
+	if code, body := msh.opsGet("/alerts/stale-config"); code != http.StatusOK {
 		t.Fatalf("stale-config at start: %d %q", code, body)
 	}
 
-	m.writeRaw("machines: [this is not: valid\n")
+	msh.writeRaw("machines: [this is not: valid\n")
 	eventually(
 		t,
 		5*time.Second,
 		"hub notices the unparsable config",
-		func() bool { return m.watcher.LastError() != nil },
+		func() bool { return msh.watcher.LastError() != nil },
 	)
 
 	// The loaded policy is kept, so the hub keeps serving.
-	if code, _ := m.opsGet("/alerts/stale-config"); code != http.StatusOK {
+	if code, _ := msh.opsGet("/alerts/stale-config"); code != http.StatusOK {
 		t.Fatalf("stale-config right after the break: %d, want 200 (10 minute grace)", code)
 	}
 
 	// The hub clock drives the stale check.
-	m.clock.Add(int64(11 * time.Minute))
+	msh.clock.Add(int64(11 * time.Minute))
 
-	if code, body := m.opsGet(
+	if code, body := msh.opsGet(
 		"/alerts/stale-config",
 	); code != http.StatusServiceUnavailable ||
 		!strings.HasPrefix(body, "firing") {
 		t.Fatalf("stale-config after 11 minutes: %d %q, want 503 firing", code, body)
 	}
 
-	if code, body := m.opsGet("/readyz"); code != http.StatusOK {
+	if code, body := msh.opsGet("/readyz"); code != http.StatusOK {
 		t.Fatalf("readyz while stale: %d %q, want 200", code, body)
 	}
 
-	if st := m.status(); !st.Stale || st.ConfigError == "" {
+	if st := msh.status(); !st.Stale || st.ConfigError == "" {
 		t.Fatalf("status while stale: stale=%v configError=%q", st.Stale, st.ConfigError)
 	}
 
-	p := m.newPhone()
-	if code, _ := m.viewerGet(p, "b", "/"); code != http.StatusOK {
+	p := msh.newPhone()
+	if code, _ := msh.viewerGet(&p, "b", "/"); code != http.StatusOK {
 		t.Fatalf("viewer request while the config is stale: %d, want 200", code)
 	}
 
 	// Fixing the file clears the alert.
-	m.writeConfig(m.cfg)
+	msh.writeConfig(&msh.cfg)
 	eventually(t, 5*time.Second, "stale-config clears", func() bool {
-		code, _ := m.opsGet("/alerts/stale-config")
+		code, _ := msh.opsGet("/alerts/stale-config")
 
 		return code == http.StatusOK
 	})
@@ -730,26 +764,26 @@ func TestStaleConfigAlert(t *testing.T) {
 func TestTrustBundleRollover(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
+	msh := newMesh(t, &meshOpts{})
 	ca2 := pkitest.NewCA(t, "clients-v2")
-	withDirect := m.direct.IsValid()
-	a := m.newNode("a", nodeOpts{direct: withDirect, links: []string{"t3.b"}})
+	withDirect := msh.direct.IsValid()
+	nodeA := msh.newNode("a", &nodeOpts{direct: withDirect, links: []string{"t3.b"}})
 
 	// Before the bundle has the new CA, an identity from it is refused.
 	cert2, _, _ := ca2.IssueIdentity(t, "agent-b", true, time.Now().Add(365*24*time.Hour))
-	c, err := m.rawDial(&cert2, proto.TunnelALPN(proto.ProtocolVersion))
+	c, err := msh.rawDial(&cert2, proto.TunnelALPN(proto.ProtocolVersion))
 	expectRefused(t, c, err)
 
-	m.writeTrust("trust-2", m.ca, ca2)
+	msh.writeTrust("trust-2", msh.ca, ca2)
 	eventually(t, 10*time.Second, "a acknowledges the new trust bundle", func() bool {
-		return m.status().Machines["a"].Acked.TrustBundle == "trust-2"
+		return msh.status().Machines["a"].Acked.TrustBundle == "trust-2"
 	})
 
-	b := m.newNode("b", nodeOpts{ca: ca2, direct: withDirect})
+	nodeB := msh.newNode("b", &nodeOpts{ca: ca2, direct: withDirect})
 
 	if code, body := get(
 		t,
-		a.linkURL("/"),
+		nodeA.linkURL("/"),
 		nil,
 		"",
 	); code != http.StatusOK ||
@@ -758,7 +792,7 @@ func TestTrustBundleRollover(t *testing.T) {
 	}
 
 	eventually(t, 10*time.Second, "b acknowledges the trust bundle", func() bool {
-		return m.status().Machines["b"].Acked.TrustBundle == "trust-2"
+		return msh.status().Machines["b"].Acked.TrustBundle == "trust-2"
 	})
 
 	if !withDirect {
@@ -767,11 +801,11 @@ func TestTrustBundleRollover(t *testing.T) {
 		return
 	}
 
-	a.waitDirectListening()
-	b.waitDirectListening()
+	nodeA.waitDirectListening()
+	nodeB.waitDirectListening()
 
 	// a (old CA) and b (new CA) verify each other against the bundle.
-	awaitDirect(t, m, a)
+	awaitDirect(t, msh, nodeA)
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
@@ -781,24 +815,27 @@ func itoa(n int) string { return strconv.Itoa(n) }
 func TestHomeLinksSurviveHubOutage(t *testing.T) {
 	t.Parallel()
 
-	m := newMesh(t, meshOpts{})
-	skipNoDirect(t, m)
-	a, b := m.twoNodes(nodeOpts{direct: true, links: []string{"t3.b"}}, nodeOpts{direct: true})
-	a.waitDirectListening()
-	b.waitDirectListening()
-	awaitDirect(t, m, a)
+	msh := newMesh(t, &meshOpts{})
+	skipNoDirect(t, msh)
+	nodeA, nodeB := msh.twoNodes(
+		&nodeOpts{direct: true, links: []string{"t3.b"}},
+		&nodeOpts{direct: true},
+	)
+	nodeA.waitDirectListening()
+	nodeB.waitDirectListening()
+	awaitDirect(t, msh, nodeA)
 
-	live := openHold(t, a.linkURL("/hold"), nil, "")
+	live := openHold(t, nodeA.linkURL("/hold"), nil, "")
 
-	m.stopHub()
+	msh.stopHub()
 
 	// Past a few direct-session sweeps, so an outage that closed sessions would
 	// have done so.
-	time.Sleep(2500 * time.Millisecond)
+	<-time.After(2500 * time.Millisecond)
 
 	if code, body := get(
 		t,
-		a.linkURL("/"),
+		nodeA.linkURL("/"),
 		nil,
 		"",
 	); code != http.StatusOK ||
@@ -809,6 +846,6 @@ func TestHomeLinksSurviveHubOutage(t *testing.T) {
 	assertOpen(t, live, "direct session while the hub is down")
 
 	// New direct streams keep opening, too.
-	second := openHold(t, a.linkURL("/hold"), nil, "")
+	second := openHold(t, nodeA.linkURL("/hold"), nil, "")
 	assertOpen(t, second, "second direct stream with the hub down")
 }

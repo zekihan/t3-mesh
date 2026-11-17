@@ -9,99 +9,145 @@ import (
 	"strings"
 )
 
+const (
+	versionParts = 3
+)
+
+var (
+	errMissingV       = errors.New("missing leading v")
+	errEmptyPre       = errors.New("empty pre-release")
+	errEmptyPreID     = errors.New("empty pre-release identifier")
+	errInvalidPreChar = errors.New("invalid pre-release character")
+	errWantSemver     = errors.New("want MAJOR.MINOR.PATCH")
+	errEmptyNumber    = errors.New("empty number")
+	errInvalidNumber  = errors.New("invalid number")
+	errLeadingZero    = errors.New("leading zero in")
+)
+
 // Version is a parsed vMAJOR.MINOR.PATCH[-pre] version.
 type Version struct {
-	Major, Minor, Patch uint64
-	Pre                 string
+	Pre   string
+	Major uint64
+	Minor uint64
+	Patch uint64
 }
 
 // ParseVersion parses "v1.2.3" or "v1.2.3-rc.1". The leading "v" is required.
-func ParseVersion(s string) (Version, error) {
-	var v Version
-	rest, ok := strings.CutPrefix(s, "v")
+func ParseVersion(str string) (Version, error) {
+	var ver Version
+
+	rest, ok := strings.CutPrefix(str, "v")
 	if !ok {
-		return v, fmt.Errorf("version %q: missing leading v", s)
+		return ver, fmt.Errorf("version %q: %w", str, errMissingV)
 	}
+
 	core, pre, hasPre := strings.Cut(rest, "-")
 	if hasPre {
 		if pre == "" {
-			return v, fmt.Errorf("version %q: empty pre-release", s)
+			return ver, fmt.Errorf("version %q: %w", str, errEmptyPre)
 		}
-		for _, id := range strings.Split(pre, ".") {
-			if id == "" {
-				return v, fmt.Errorf("version %q: empty pre-release identifier", s)
-			}
-			for _, r := range id {
-				if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-') {
-					return v, fmt.Errorf("version %q: invalid pre-release character %q", s, r)
-				}
-			}
+
+		err := checkPre(pre)
+		if err != nil {
+			return ver, fmt.Errorf("version %q: %w", str, err)
 		}
-		v.Pre = pre
+
+		ver.Pre = pre
 	}
+
 	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return v, fmt.Errorf("version %q: want MAJOR.MINOR.PATCH", s)
+	if len(parts) != versionParts {
+		return ver, fmt.Errorf("version %q: %w", str, errWantSemver)
 	}
-	nums := [3]*uint64{&v.Major, &v.Minor, &v.Patch}
+
+	nums := [3]*uint64{&ver.Major, &ver.Minor, &ver.Patch}
+
 	for i, p := range parts {
 		n, err := parseNum(p)
 		if err != nil {
-			return Version{}, fmt.Errorf("version %q: %w", s, err)
+			return Version{}, fmt.Errorf("version %q: %w", str, err)
 		}
+
 		*nums[i] = n
 	}
-	return v, nil
+
+	return ver, nil
 }
 
-func parseNum(p string) (uint64, error) {
-	if p == "" {
-		return 0, errors.New("empty number")
-	}
-	for _, r := range p {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("invalid number %q", p)
+// checkPre validates the dot-separated pre-release identifiers.
+func checkPre(pre string) error {
+	for id := range strings.SplitSeq(pre, ".") {
+		if id == "" {
+			return errEmptyPreID
+		}
+
+		for _, r := range id {
+			if !isAlnum(r) && r != '-' {
+				return fmt.Errorf("%w %q", errInvalidPreChar, r)
+			}
 		}
 	}
-	if len(p) > 1 && p[0] == '0' {
-		return 0, fmt.Errorf("leading zero in %q", p)
+
+	return nil
+}
+
+func parseNum(part string) (uint64, error) {
+	if part == "" {
+		return 0, errEmptyNumber
 	}
-	n, err := strconv.ParseUint(p, 10, 64)
+
+	for _, r := range part {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("%w %q", errInvalidNumber, part)
+		}
+	}
+
+	if len(part) > 1 && part[0] == '0' {
+		return 0, fmt.Errorf("%w %q", errLeadingZero, part)
+	}
+
+	n, err := strconv.ParseUint(part, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid number %q: %w", p, err)
+		return 0, fmt.Errorf("invalid number %q: %w", part, err)
 	}
+
 	return n, nil
 }
 
 // String returns the canonical form.
-func (v Version) String() string {
-	s := fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
-	if v.Pre != "" {
-		s += "-" + v.Pre
+func (ver Version) String() string {
+	s := fmt.Sprintf("v%d.%d.%d", ver.Major, ver.Minor, ver.Patch)
+	if ver.Pre != "" {
+		s += "-" + ver.Pre
 	}
+
 	return s
 }
 
 // Compare returns -1, 0 or 1. A pre-release sorts before its release.
-func (v Version) Compare(o Version) int {
-	if c := cmpUint(v.Major, o.Major); c != 0 {
+func (ver Version) Compare(other Version) int {
+	if c := cmpUint(ver.Major, other.Major); c != 0 {
 		return c
 	}
-	if c := cmpUint(v.Minor, o.Minor); c != 0 {
+
+	if c := cmpUint(ver.Minor, other.Minor); c != 0 {
 		return c
 	}
-	if c := cmpUint(v.Patch, o.Patch); c != 0 {
+
+	if c := cmpUint(ver.Patch, other.Patch); c != 0 {
 		return c
 	}
+
 	switch {
-	case v.Pre == o.Pre:
+	case ver.Pre == other.Pre:
 		return 0
-	case v.Pre == "":
+	case ver.Pre == "":
 		return 1
-	case o.Pre == "":
+	case other.Pre == "":
 		return -1
 	}
-	return comparePre(v.Pre, o.Pre)
+
+	return comparePre(ver.Pre, other.Pre)
 }
 
 // Compare parses and compares two version strings.
@@ -110,10 +156,12 @@ func Compare(a, b string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	vb, err := ParseVersion(b)
 	if err != nil {
 		return 0, err
 	}
+
 	return va.Compare(vb), nil
 }
 
@@ -124,6 +172,7 @@ func cmpUint(a, b uint64) int {
 	case a > b:
 		return 1
 	}
+
 	return 0
 }
 
@@ -133,6 +182,7 @@ func comparePre(a, b string) int {
 	as, bs := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(as) && i < len(bs); i++ {
 		an, aerr := strconv.ParseUint(as[i], 10, 64)
+
 		bn, berr := strconv.ParseUint(bs[i], 10, 64)
 		switch {
 		case aerr == nil && berr == nil:
@@ -149,5 +199,6 @@ func comparePre(a, b string) int {
 			}
 		}
 	}
+
 	return cmpUint(uint64(len(as)), uint64(len(bs)))
 }

@@ -27,20 +27,23 @@ func TestRunDefaultsToServeFlags(t *testing.T) {
 }
 
 func TestRunServeRejectsUnknownFlag(t *testing.T) {
-	if err := run([]string{"serve", "--no-such-flag"}); err == nil {
+	err := run([]string{"serve", "--no-such-flag"})
+	if err == nil {
 		t.Fatal("run(serve --no-such-flag) returned nil")
 	}
 }
 
 func TestRunServeRejectsPositionalArguments(t *testing.T) {
-	if err := run([]string{"serve", "extra"}); err == nil {
+	err := run([]string{"serve", "extra"})
+	if err == nil {
 		t.Fatal("run(serve extra) returned nil")
 	}
 }
 
 func TestRunHelpIsNotAnError(t *testing.T) {
 	for _, args := range [][]string{{"serve", "-h"}, {"enroll-token", "-h"}} {
-		if err := run(args); err != nil {
+		err := run(args)
+		if err != nil {
 			t.Fatalf("run(%v) = %v, want nil", args, err)
 		}
 	}
@@ -51,14 +54,16 @@ func TestRunEnrollTokenRequiresOneIdentity(t *testing.T) {
 		{"enroll-token"},
 		{"enroll-token", "a", "b"},
 	} {
-		if err := run(args); !errors.Is(err, errUsage) {
+		err := run(args)
+		if !errors.Is(err, errUsage) {
 			t.Fatalf("run(%v) = %v, want usage error", args, err)
 		}
 	}
 }
 
 func TestRunVersionRejectsArguments(t *testing.T) {
-	if err := run([]string{"version", "extra"}); !errors.Is(err, errArguments) {
+	err := run([]string{"version", "extra"})
+	if !errors.Is(err, errArguments) {
 		t.Fatalf("run(version extra) = %v, want argument error", err)
 	}
 }
@@ -99,7 +104,8 @@ func TestParseServeOverrides(t *testing.T) {
 }
 
 func TestParseServeHelp(t *testing.T) {
-	if _, err := parseServe([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
+	_, err := parseServe([]string{"-h"})
+	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("parseServe(-h) = %v, want flag.ErrHelp", err)
 	}
 }
