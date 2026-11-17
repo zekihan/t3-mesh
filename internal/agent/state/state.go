@@ -34,6 +34,7 @@ type Cache struct {
 	Release        proto.Release     `json:"release"`
 	LastHubContact time.Time         `json:"lastHubContact"`
 	HomeGatewayMAC string            `json:"homeGatewayMAC,omitempty"`
+	HomeCIDRs      []string          `json:"homeCIDRs,omitempty"`
 }
 
 // Load reads the cache in dir. A missing file yields an empty cache. A file written
@@ -169,5 +170,9 @@ func (c *Cache) Apply(u proto.Update) {
 
 	if u.TrustBundle != nil {
 		c.TrustBundle = *u.TrustBundle
+	}
+
+	if u.HomeCIDRs != nil {
+		c.HomeCIDRs = u.HomeCIDRs
 	}
 }

@@ -129,6 +129,8 @@ type HelloAck struct {
 	Peers       PeerTable   `json:"peers"`
 	Revocations Revocations `json:"revocations"`
 	TrustBundle TrustBundle `json:"trustBundle"`
+	// HomeCIDRs are the LAN prefixes; the direct listener binds only inside them.
+	HomeCIDRs []string `json:"homeCIDRs,omitempty"`
 }
 
 // Update carries changed state. Nil fields are unchanged.
@@ -138,6 +140,7 @@ type Update struct {
 	Peers       *PeerTable   `json:"peers,omitempty"`
 	Revocations *Revocations `json:"revocations,omitempty"`
 	TrustBundle *TrustBundle `json:"trustBundle,omitempty"`
+	HomeCIDRs   []string     `json:"homeCIDRs,omitempty"`
 }
 
 // Release is the desired agent version.
