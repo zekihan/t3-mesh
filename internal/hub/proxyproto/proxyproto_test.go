@@ -225,8 +225,8 @@ func TestMalformedHeadersAreRejected(t *testing.T) {
 			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Read error = %v, want %v", err, tt.wantErr)
 			}
-			if sc.RemoteAddr() != nil {
-				t.Fatalf("RemoteAddr = %v after malformed header, want nil", sc.RemoteAddr())
+			if _, ok := sc.RemoteAddr().(invalidAddr); !ok {
+				t.Fatalf("RemoteAddr = %v after malformed header, want invalidAddr", sc.RemoteAddr())
 			}
 			if _, err := sc.Source(); err == nil {
 				t.Fatal("Source succeeded on malformed header")

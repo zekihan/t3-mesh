@@ -95,10 +95,11 @@ type Conn struct {
 }
 
 // RemoteAddr returns the proxied source address, parsing the header if needed.
+// After an invalid header it returns a placeholder address, never nil.
 // It returns nil if the header is invalid.
 func (c *Conn) RemoteAddr() net.Addr {
 	if err := c.parse(); err != nil {
-		return nil
+		return invalidAddr{}
 	}
 	return c.remote
 }
@@ -246,3 +247,10 @@ func (c *Conn) parseHeader() error {
 	c.remote = net.TCPAddrFromAddrPort(c.src)
 	return nil
 }
+
+// invalidAddr is returned by RemoteAddr when the header is invalid, so callers
+// that format the address do not panic. Use Source to detect the failure.
+type invalidAddr struct{}
+
+func (invalidAddr) Network() string { return "tcp" }
+func (invalidAddr) String() string  { return "invalid-proxy-header" }
