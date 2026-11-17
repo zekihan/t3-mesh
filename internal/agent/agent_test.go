@@ -1057,10 +1057,13 @@ func TestPendingRenewalUsedOnConnect(t *testing.T) {
 		t.Fatalf("connected with %s, want pending renewed leaf %s", first.fp, pki.Fingerprint(next))
 	}
 
-	_, leaf, err := store.Load()
-	if err != nil || pki.Fingerprint(leaf) != first.fp {
-		t.Fatalf("pending identity not promoted: %v", err)
-	}
+	// The agent promotes the pending identity after its handshake completes,
+	// which can be just after the hub has seen the connection.
+	waitFor(t, "pending identity promoted", func() bool {
+		_, leaf, err := store.Load()
+
+		return err == nil && pki.Fingerprint(leaf) == first.fp
+	})
 }
 
 func TestRenewalFailureKeepsIdentity(t *testing.T) {
