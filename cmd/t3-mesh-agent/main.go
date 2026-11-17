@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -312,6 +313,11 @@ func fallbackCmd(args []string) error {
 	fs := newFlagSet("fallback")
 	installDir := fs.String("install-dir", "", "install directory holding the version links")
 	heartbeat := fs.String("heartbeat", "", "launcher heartbeat; fall back only while it is stale")
+	stateDir := fs.String(
+		"state-dir",
+		"",
+		"agent state directory for the failure record (default: \"state\" next to --install-dir)",
+	)
 	maxAge := fs.Duration(
 		"heartbeat-max-age",
 		defaultHeartbeatMaxAge,
@@ -347,12 +353,16 @@ func fallbackCmd(args []string) error {
 	layout := launcher.Layout{Dir: *installDir}
 	log := newLogger(slog.LevelInfo)
 
+	if *stateDir == "" {
+		*stateDir = filepath.Join(filepath.Dir(filepath.Clean(*installDir)), "state")
+	}
+
 	if *heartbeat == "" {
 		if maxAgeSet {
 			return fmt.Errorf("fallback: %w", errMaxAgeFlag)
 		}
 
-		err = layout.FallbackToPrevious()
+		err = launcher.FallbackAndRecord(layout, *stateDir, time.Now())
 		if err != nil {
 			return fmt.Errorf("fallback: %w", err)
 		}
@@ -369,7 +379,7 @@ func fallbackCmd(args []string) error {
 		return fmt.Errorf("fallback: %w", errMaxAge)
 	}
 
-	repointed, err := launcher.Fallback(layout, *heartbeat, *maxAge, time.Now())
+	repointed, err := launcher.Fallback(layout, *stateDir, *heartbeat, *maxAge, time.Now())
 	if err != nil {
 		return fmt.Errorf("fallback: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,6 +144,7 @@ func TestFallback(t *testing.T) {
 	_ = lay.SetCurrent("2")
 	_ = lay.Promote()
 	hb := filepath.Join(t.TempDir(), "hb")
+	stateDir := t.TempDir()
 	now := time.Now()
 
 	err := touch(hb)
@@ -153,9 +155,9 @@ func TestFallback(t *testing.T) {
 	step := func(name string, at time.Duration, want bool) {
 		t.Helper()
 
-		ok, err := Fallback(lay, hb, 5*time.Minute, now.Add(at))
-		if ok != want || err != nil {
-			t.Fatalf("%s: %v %v", name, ok, err)
+		ok, ferr := Fallback(lay, stateDir, hb, 5*time.Minute, now.Add(at))
+		if ok != want || ferr != nil {
+			t.Fatalf("%s: %v %v", name, ok, ferr)
 		}
 	}
 
@@ -170,6 +172,13 @@ func TestFallback(t *testing.T) {
 
 	if kg, _ := lay.KnownGood(); kg != "1" {
 		t.Fatalf("kg=%s", kg)
+	}
+
+	// The abandoned version is recorded as a failed release for the agent.
+	data, err := os.ReadFile(filepath.Join(stateDir, OutcomeFile))
+	if err != nil || !strings.Contains(string(data), `"version":"2"`) ||
+		!strings.Contains(string(data), `"kind":"`+KindRelease+`"`) {
+		t.Fatalf("fallback outcome = %s, %v", data, err)
 	}
 
 	step("re-suspect after fallback", time.Hour, false)
