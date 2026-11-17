@@ -53,11 +53,13 @@ type machineState struct {
 	name         string
 	sessions     []*session // ordered by hub accept time, oldest first
 	lastSeen     time.Time
+	certNotAfter time.Time
+	lastLANAddrs []string
 	version      string
 	announced    []string
-	certNotAfter time.Time
 	status       *proto.Status
 	warnings     []string
+	lastPort     int
 }
 
 func (m *machineState) newestLive() *session {
@@ -220,6 +222,8 @@ func (server *Server) register(sess *session) []*session {
 	state.lastSeen = server.now()
 	state.version = sess.hello.Version
 	state.announced = sess.hello.Services
+	state.lastLANAddrs = slices.Clone(sess.hello.LANAddrs)
+	state.lastPort = sess.hello.DirectPort
 	state.certNotAfter = sess.notAfter
 
 	var superseded []*session
@@ -666,8 +670,13 @@ func (sess *session) push() error {
 		upd.Home, dirt = &h, true
 	}
 
-	if cidrs := strings.Join(want.cidrs, ","); cidrs != sess.sent.cidrs && len(want.cidrs) > 0 {
-		upd.HomeCIDRs, dirt = want.cidrs, true
+	if cidrs := strings.Join(want.cidrs, ","); cidrs != sess.sent.cidrs {
+		list := slices.Clone(want.cidrs)
+		if list == nil {
+			list = []string{}
+		}
+
+		upd.HomeCIDRs, dirt = &list, true
 	}
 
 	if dirt {
@@ -731,6 +740,10 @@ func (server *Server) peersLocked(snap *hubconfig.Snapshot, sess *session) proto
 				peer.LANAddrs = live.hello.LANAddrs
 				peer.DirectPort = live.hello.DirectPort
 				peer.Home = live.home
+			} else {
+				// Offline: last-known addresses let agents try them during a hub outage.
+				peer.LANAddrs = ms.lastLANAddrs
+				peer.DirectPort = ms.lastPort
 			}
 		}
 

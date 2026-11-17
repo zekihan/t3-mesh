@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -37,6 +38,7 @@ type cfgOpts struct {
 	release  string
 	disabled []string
 	blocked  []string
+	noCIDRs  bool
 }
 
 func (opts cfgOpts) yaml() string {
@@ -54,11 +56,16 @@ func (opts cfgOpts) yaml() string {
 		blk = "[" + strings.Join(opts.blocked, ",") + "]"
 	}
 
+	cidrs := "[127.0.0.0/8]"
+	if opts.noCIDRs {
+		cidrs = "[]"
+	}
+
 	return fmt.Sprintf(`
 machines:
   devbox: {identity: agent-devbox, services: {t3: {kind: http}}}
   z-arch: {identity: agent-z-arch, services: {t3: {kind: http}}}
-homeCIDRs: [127.0.0.0/8]
+homeCIDRs: %s
 viewerDomain: mesh.test
 release: {version: %s}
 policy:
@@ -67,7 +74,7 @@ policy:
     mesh-t3-z-arch: {identities: [z-phone]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, rel, dis, blk)
+`, cidrs, rel, dis, blk)
 }
 
 type env struct {
@@ -1071,6 +1078,13 @@ func TestRenewal(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	eventually(t, func() bool {
+		return slices.Contains(
+			harness.fake.PruneCalls(),
+			issuertest.PruneCall{Identity: "agent-devbox", Keep: 2},
+		)
+	})
+
 	newest, _ := harness.fake.Newest(t.Context(), "agent-devbox")
 	if newest != pki.Fingerprint(certs[0]) {
 		t.Fatal("newest leaf not updated")
@@ -1296,5 +1310,58 @@ func TestVersionLagAlert(t *testing.T) {
 
 	if got := status(t, harness, "agent-devbox-update-failed"); got != 503 {
 		t.Fatalf("lagging agent = %d", got)
+	}
+}
+
+func TestEmptyHomeCIDRsPushed(t *testing.T) {
+	harness := newEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	if len(arch.ack.HomeCIDRs) != 1 {
+		t.Fatalf("ack cidrs = %v", arch.ack.HomeCIDRs)
+	}
+
+	harness.setConfig(cfgOpts{noCIDRs: true})
+
+	upd := asUpdate(t, arch.next(func(m proto.Message) bool {
+		u, ok := m.(proto.Update)
+
+		return ok && u.HomeCIDRs != nil
+	}))
+	if len(*upd.HomeCIDRs) != 0 {
+		t.Fatalf("cidrs = %v", *upd.HomeCIDRs)
+	}
+}
+
+func TestOfflinePeerKeepsLastAddrs(t *testing.T) {
+	harness := newEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+	devbox := harness.connect("agent-devbox", "devbox-body")
+
+	arch.next(func(m proto.Message) bool {
+		u, ok := m.(proto.Update)
+
+		return ok && u.Peers != nil && u.Peers.Peers[0].Home
+	})
+
+	devbox.close()
+
+	upd := asUpdate(t, arch.next(func(m proto.Message) bool {
+		u, ok := m.(proto.Update)
+
+		return ok && u.Peers != nil && !u.Peers.Peers[0].Home
+	}))
+
+	p := upd.Peers.Peers[0]
+	if p.DirectPort != 27400 || len(p.LANAddrs) != 1 || p.LANAddrs[0] != "192.168.1.5" {
+		t.Fatalf("offline peer = %+v", p)
+	}
+
+	// A reconnecting agent receives the same last-known addresses in its ack.
+	again := harness.connect("agent-z-arch", "arch-body")
+
+	q := again.ack.Peers.Peers[0]
+	if q.Home || q.DirectPort != 27400 || len(q.LANAddrs) != 1 {
+		t.Fatalf("ack peer = %+v", q)
 	}
 }

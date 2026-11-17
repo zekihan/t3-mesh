@@ -386,10 +386,7 @@ func (agent *Agent) applyAckLocked(ack *proto.HelloAck) {
 	cache.Peers = ack.Peers
 	cache.Revocations = ack.Revocations
 	cache.TrustBundle = ack.TrustBundle
-
-	if len(ack.HomeCIDRs) > 0 {
-		cache.HomeCIDRs = ack.HomeCIDRs
-	}
+	cache.HomeCIDRs = ack.HomeCIDRs
 
 	cache.LastHubContact = agent.now()
 

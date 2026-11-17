@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/proto"
@@ -186,6 +187,6 @@ func (cache *Cache) Apply(update proto.Update) {
 	}
 
 	if update.HomeCIDRs != nil {
-		cache.HomeCIDRs = update.HomeCIDRs
+		cache.HomeCIDRs = slices.Clone(*update.HomeCIDRs)
 	}
 }

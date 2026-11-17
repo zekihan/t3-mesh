@@ -17,6 +17,10 @@ import (
 const (
 	renewTimeout = 2 * time.Minute
 
+	// The newest pruneKeep CertificateRequests per identity survive pruning.
+	pruneKeep    = 2
+	pruneTimeout = 30 * time.Second
+
 	// Maximum length of error detail text sent to agents.
 	maxDetailLen = 200
 )
@@ -151,6 +155,7 @@ func (sess *session) renew(req proto.Renew) (proto.Renewed, error) {
 
 	fp := pki.Fingerprint(leaf)
 	sess.s.setNewest(identity, fp)
+	sess.s.pruneAsync(identity)
 
 	sess.s.mu.Lock()
 	if m := sess.s.machines[sess.machine]; m != nil && leaf.NotAfter.After(m.certNotAfter) {
@@ -172,4 +177,22 @@ func (sess *session) renew(req proto.Renew) (proto.Renewed, error) {
 	)
 
 	return proto.Renewed{Certificate: string(certPEM), Chain: string(chainPEM)}, nil
+}
+
+// pruneAsync deletes older CertificateRequests for identity in the background.
+// Failures are logged and never affect issuance.
+func (server *Server) pruneAsync(identity string) {
+	server.wg.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), pruneTimeout)
+		defer cancel()
+
+		err := server.issuer.Prune(ctx, identity, pruneKeep)
+		if err != nil {
+			server.log.Warn(
+				"Prune certificate requests failed",
+				slog.Any("identity", identity),
+				slog.Any("error", err),
+			)
+		}
+	})
 }

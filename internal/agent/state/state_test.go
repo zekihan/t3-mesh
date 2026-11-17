@@ -316,9 +316,9 @@ func TestWithinWindow(t *testing.T) {
 }
 
 type applyCase struct {
+	update proto.Update
 	check  func(*testing.T, *Cache)
 	name   string
-	update proto.Update
 }
 
 func TestApply(t *testing.T) {
@@ -443,5 +443,29 @@ func TestApplyLeavesContactAndMACAlone(t *testing.T) {
 		cache.Release != before.Release ||
 		cache.Machine != before.Machine {
 		t.Fatalf("Apply touched unrelated fields: %+v", cache)
+	}
+}
+
+func TestApplyHomeCIDRs(t *testing.T) {
+	cache := sampleCache(t)
+	cache.HomeCIDRs = []string{"192.168.1.0/24"}
+
+	cache.Apply(proto.Update{})
+
+	if len(cache.HomeCIDRs) != 1 {
+		t.Fatalf("nil pointer changed cidrs: %v", cache.HomeCIDRs)
+	}
+
+	next := []string{"10.0.0.0/8"}
+	cache.Apply(proto.Update{HomeCIDRs: &next})
+
+	if len(cache.HomeCIDRs) != 1 || cache.HomeCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("cidrs = %v", cache.HomeCIDRs)
+	}
+
+	cache.Apply(proto.Update{HomeCIDRs: &[]string{}})
+
+	if len(cache.HomeCIDRs) != 0 {
+		t.Fatalf("empty pointer did not clear: %v", cache.HomeCIDRs)
 	}
 }

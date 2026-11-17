@@ -128,6 +128,7 @@ func New(opts Options) (*Server, error) {
 		Allowed: server.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
 			server.setNewest(identity, fp)
+			server.pruneAsync(identity)
 			server.log.Info(
 				"Certificate issued",
 				slog.Any("identity", identity),

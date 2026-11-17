@@ -144,7 +144,8 @@ type Update struct {
 	Peers       *PeerTable   `json:"peers,omitempty"`
 	Revocations *Revocations `json:"revocations,omitempty"`
 	TrustBundle *TrustBundle `json:"trustBundle,omitempty"`
-	HomeCIDRs   []string     `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
+	// HomeCIDRs is nil when unchanged; a pointer to an empty slice clears the list.
+	HomeCIDRs *[]string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
 }
 
 // Release is the desired agent version.
