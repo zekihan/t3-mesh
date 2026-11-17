@@ -65,7 +65,12 @@ the owner's own devices.
   Android WebView needs `onReceivedClientCertRequest`, which react-native-webview
   does not handle.
 - **Certificate renewal.** Device certificates renew yearly. When the stored
-  KeyChain alias is missing, the app asks for the identity again.
+  KeyChain alias is missing, the app asks for the identity again. When the chosen
+  certificate has less than 30 days left (read with `KeyChain.getCertificateChain`),
+  the connection screen shows a warning.
+- **One identity for mesh hosts.** The alias chosen for one `*.mesh.noqer.com`
+  environment is reused for the others, so adding a machine shows no certificate
+  picker. Android still asks once per alias, including after a renewal.
 - **Separate app.** Application ID `com.noqer.t3mesh`, its own URL scheme and app
   name, so it installs next to the official app.
 - **Upstream accounts off.** Mostly build settings: `T3CODE_MOBILE_UPDATES_ENABLED=0`,
@@ -94,6 +99,11 @@ the owner's own devices.
 
 `GET /api/v1/fleet` on the same host returns agent versions, certificate expiry,
 tunnel uptime and alert state from the hub's `/status`. It is a read-only screen.
+
+Each environment's connection details show the machine's tunnel path (LAN or OCI)
+and state from the same endpoint, the phone's own path (the hub checks the viewer's
+forwarded source address against `homeCIDRs`) and a round-trip time the app
+measures itself.
 
 ### 2. Dev-server previews
 
@@ -188,10 +198,10 @@ directly.
 
 | | Scope | Done when |
 |---|---|---|
-| A0a | Fork, port of the mTLS commit, network-stack audit, app identity; local build installed with `adb` | The phone pairs with z-arch over `t3.z-arch.mesh.noqer.com` using the KeyChain identity, chats, uploads an attachment, opens a file and a PDF preview, and survives a cold start |
+| A0a | Fork, port of the mTLS commit, network-stack audit, app identity, expiry warning, one identity for mesh hosts; local build installed with `adb` | The phone pairs with z-arch over `t3.z-arch.mesh.noqer.com` using the KeyChain identity, chats, uploads an attachment, opens a file and a PDF preview, and survives a cold start; a second mesh environment is added without a picker; a short-lived test certificate shows the warning |
 | A0b | CI build, signing, GitHub Releases, Obtainium | Both devices install and update the fork through Obtainium from a CI release, and the A0a checks pass on that build |
 | A1 | Item 1: `hub.mesh.noqer.com`, `/api/v1/machines` and the Mesh screen | The Mesh screen lists all three machines with online state; a viewer missing from a machine's policy does not see that machine |
-| A2 | Item 5: fleet screen | Versions and certificate expiry match `/status` |
+| A2 | Item 5: fleet screen and connection details | Versions and certificate expiry match `/status`; connection details show LAN at home and OCI on mobile data, for the phone and for z-mac's tunnel |
 | A3 | Item 2: one declared preview service on z-arch | A Vite dev server on z-arch opens from the phone, home and away |
 | A4 | Item 3: Keystore enrollment | The phone enrolls with a token, its key is non-exportable, its identity reaches only `mesh-*` hosts, and a forced renewal works |
 | A5 | Item 4: direct connection at home | With the hub scaled to zero, the phone at home chats with z-arch directly; away it uses the viewer host; blocking its enrolled leaf closes the direct session; the KeyChain identity is refused on the direct listener |
