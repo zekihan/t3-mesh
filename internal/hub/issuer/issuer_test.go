@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -458,5 +459,161 @@ func TestNewValidation(t *testing.T) {
 
 	if iss.base != "https://[::1]:443" {
 		t.Errorf("base %q", iss.base)
+	}
+}
+
+type prunedCR struct {
+	name, ts string
+	flight   bool
+	cert     bool
+}
+
+func pruneServer(
+	t *testing.T,
+	crs []prunedCR,
+	notFound string,
+) (*httptest.Server, func() []string) {
+	t.Helper()
+
+	var (
+		mu      sync.Mutex
+		deleted []string
+	)
+
+	const crPath = "/apis/cert-manager.io/v1/namespaces/mtls-pki/certificaterequests"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == crPath:
+			sel := r.URL.Query().Get("labelSelector")
+			if sel != "app.kubernetes.io/managed-by=t3-mesh-hub,t3-mesh.noqer.com/identity=agent-a" {
+				t.Errorf("selector %q", sel)
+			}
+
+			items := make([]map[string]any, 0, len(crs))
+
+			for _, cr := range crs {
+				st := map[string]any{}
+				if cr.cert {
+					st["certificate"] = "Y2VydA=="
+				}
+
+				if !cr.flight {
+					st["conditions"] = []map[string]string{{"type": "Ready", "status": "True"}}
+				}
+
+				items = append(items, map[string]any{
+					"metadata": map[string]any{
+						"name": cr.name, "creationTimestamp": cr.ts,
+						"labels": map[string]string{"t3-mesh.noqer.com/identity": "agent-a"},
+					},
+					"status": st,
+				})
+			}
+
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, crPath+"/"):
+			name := strings.TrimPrefix(r.URL.Path, crPath+"/")
+			deleted = append(deleted, name)
+
+			if name == notFound {
+				http.Error(w, "gone", http.StatusNotFound)
+
+				return
+			}
+
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL)
+		}
+	}))
+
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+
+		out := slices.Clone(deleted)
+		slices.Sort(out)
+
+		return out
+	}
+}
+
+func TestPruneSelection(t *testing.T) {
+	crs := []prunedCR{
+		{name: "a", ts: "2026-01-05T00:00:00Z", cert: true},
+		{name: "b", ts: "2026-01-04T00:00:00Z", cert: true},
+		{name: "c", ts: "2026-01-03T00:00:00Z", cert: true},
+		{name: "d", ts: "2026-01-02T00:00:00Z", flight: true},
+		{name: "e", ts: "2026-01-01T00:00:00Z", cert: true},
+		{name: "f", ts: "2026-01-01T00:00:00Z", cert: true},
+	}
+
+	srv, deleted := pruneServer(t, crs, "")
+	defer srv.Close()
+
+	var logbuf bytes.Buffer
+
+	k := newIssuer(t, srv, tokenFile(t, "tok"), slog.New(slog.NewTextHandler(&logbuf, nil)))
+
+	err := k.Prune(t.Context(), "agent-a", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Kept: a, b (newest two), d (in flight). Deleted: c, e, f.
+	if got := deleted(); !slices.Equal(got, []string{"c", "e", "f"}) {
+		t.Fatalf("deleted = %v", got)
+	}
+
+	for _, want := range []string{"request=c", "identity=agent-a"} {
+		if !strings.Contains(logbuf.String(), want) {
+			t.Errorf("log missing %q: %s", want, logbuf.String())
+		}
+	}
+}
+
+func TestPruneKeepsNewestIssued(t *testing.T) {
+	// The two newest are in flight; the newest issued one must survive keep=1.
+	crs := []prunedCR{
+		{name: "a", ts: "2026-01-05T00:00:00Z", flight: true},
+		{name: "b", ts: "2026-01-04T00:00:00Z", cert: true},
+		{name: "c", ts: "2026-01-03T00:00:00Z", cert: true},
+	}
+
+	srv, deleted := pruneServer(t, crs, "")
+	defer srv.Close()
+
+	err := newIssuer(t, srv, tokenFile(t, "tok"), nil).Prune(t.Context(), "agent-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := deleted(); !slices.Equal(got, []string{"c"}) {
+		t.Fatalf("deleted = %v", got)
+	}
+}
+
+func TestPruneNotFoundIsSuccess(t *testing.T) {
+	crs := []prunedCR{
+		{name: "a", ts: "2026-01-05T00:00:00Z", cert: true},
+		{name: "b", ts: "2026-01-04T00:00:00Z", cert: true},
+		{name: "c", ts: "2026-01-03T00:00:00Z", cert: true},
+		{name: "d", ts: "2026-01-02T00:00:00Z", cert: true},
+	}
+
+	srv, deleted := pruneServer(t, crs, "c")
+	defer srv.Close()
+
+	err := newIssuer(t, srv, tokenFile(t, "tok"), nil).Prune(t.Context(), "agent-a", 2)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+
+	if got := deleted(); !slices.Equal(got, []string{"c", "d"}) {
+		t.Fatalf("deleted = %v", got)
 	}
 }

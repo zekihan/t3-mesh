@@ -375,6 +375,12 @@ with its own design.
 
 - `create`, `get`, `list`, `watch` CertificateRequests in `mtls-pki`, bound to the
   approver policy above (`list` finds the newest issued leaf per agent).
+- `delete` CertificateRequests in `mtls-pki`, used only to prune its own older
+  requests: those with its `managed-by` and identity labels, keeping the newest two
+  per identity (never the newest issued one or one still in flight). RBAC cannot
+  restrict `delete` by label, so this widens the hub's power to deleting other
+  CertificateRequests in `mtls-pki`; cert-manager recreates them for live
+  Certificates.
 - Read its own ConfigMaps (configuration and `clients-ca-bundle`). Nothing else.
 
 ## Agent
@@ -757,6 +763,7 @@ Traefik middleware lists a kind `agent` identity.
 | CSR containment | approver-policy; per-issuer policies mirroring today usable only by cert-manager; hub policy with exact agent URIs usable only by the hub |
 | First certificate | single-use token + locally generated key |
 | Home detection | hub, from the tunnel's source address; IPv4 and IPv6 LAN prefixes |
+| CertificateRequest cleanup | hub prunes its own, keeps newest two; RBAC delete in mtls-pki |
 | Agent CA trust | versioned `clients-ca-bundle` ConfigMap pushed by the hub, overlapping CAs during rollover, operator re-enrollment for agents that miss it |
 | Hub outage | direct to cached LAN addresses for up to 1 week |
 | Revocation | enforced by hub and agents on new and live sessions |

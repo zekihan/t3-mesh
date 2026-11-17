@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -59,6 +60,21 @@ var (
 	errUnexpectedStatus = errors.New("unexpected status")
 )
 
+const (
+	condReady  = "Ready"
+	condDenied = "Denied"
+	condTrue   = "True"
+)
+
+// statusError is a non-2xx API response; it unwraps to errUnexpectedStatus.
+type statusError struct {
+	err  error
+	code int
+}
+
+func (e *statusError) Error() string { return e.err.Error() }
+func (e *statusError) Unwrap() error { return e.err }
+
 var identityRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // IssuerRef names the cert-manager issuer that signs requests.
@@ -86,6 +102,9 @@ type Issuer interface {
 	// Newest returns the lowercase hex SHA-256 of the DER of the newest issued
 	// leaf for identity, or "" if none.
 	Newest(ctx context.Context, identity string) (string, error)
+	// Prune deletes this hub's older CertificateRequests for identity, keeping
+	// the keep newest, the one Newest reports, and any still in flight.
+	Prune(ctx context.Context, identity string, keep int) error
 }
 
 // K8s is the Issuer backed by the Kubernetes API.
@@ -354,14 +373,9 @@ func (k8s *K8s) Newest(ctx context.Context, identity string) (string, error) {
 		return "", err
 	}
 
-	q := url.Values{}
-	q.Set("labelSelector", LabelManagedBy+"="+ManagedByValue+","+LabelIdentity+"="+identity)
-
-	var list certificateRequestList
-
-	err = k8s.do(ctx, http.MethodGet, k8s.collectionURL()+"?"+q.Encode(), nil, &list)
+	items, err := k8s.listOwn(ctx, identity)
 	if err != nil {
-		return "", fmt.Errorf("list certificate requests: %w", err)
+		return "", err
 	}
 
 	var (
@@ -369,8 +383,8 @@ func (k8s *K8s) Newest(ctx context.Context, identity string) (string, error) {
 		bestTime time.Time
 	)
 
-	for i := range list.Items {
-		it := &list.Items[i]
+	for i := range items {
+		it := &items[i]
 		if it.Metadata.Labels[LabelIdentity] != identity || len(it.Status.Certificate) == 0 {
 			continue
 		}
@@ -396,6 +410,125 @@ func (k8s *K8s) Newest(ctx context.Context, identity string) (string, error) {
 	}
 
 	return fp, nil
+}
+
+// settled reports whether cr reached Ready, Denied or Failed.
+func settled(cr *certificateRequest) bool {
+	for _, cond := range cr.Status.Conditions {
+		switch {
+		case cond.Type == condReady && cond.Status == condTrue,
+			cond.Type == condDenied && cond.Status == condTrue,
+			cond.Type == condReady && cond.Status == "False" &&
+				(cond.Reason == "Failed" || cond.Reason == "Denied"):
+			return true
+		}
+	}
+
+	return false
+}
+
+// Prune implements Issuer. Requests are ranked newest first by
+// creationTimestamp, ties by name descending, as Newest does.
+func (k8s *K8s) Prune(ctx context.Context, identity string, keep int) error {
+	err := validIdentity(identity)
+	if err != nil {
+		return err
+	}
+
+	items, err := k8s.listOwn(ctx, identity)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+
+	for _, name := range pruneCandidates(items, identity, keep) {
+		delErr := k8s.do(
+			ctx, http.MethodDelete, k8s.collectionURL()+"/"+url.PathEscape(name), nil, nil,
+		)
+		if delErr != nil && !isNotFound(delErr) {
+			errs = append(errs, fmt.Errorf("delete certificate request %s: %w", name, delErr))
+
+			continue
+		}
+
+		k8s.log.InfoContext(
+			ctx,
+			"Pruned certificate request",
+			slog.Any("request", name),
+			slog.Any("identity", identity),
+		)
+	}
+
+	return errors.Join(errs...)
+}
+
+// pruneCandidates returns the names to delete: everything past the keep newest,
+// except the newest issued request and any not yet settled.
+func pruneCandidates(items []certificateRequest, identity string, keep int) []string {
+	type ranked struct {
+		ts time.Time
+		cr *certificateRequest
+	}
+
+	all := make([]ranked, 0, len(items))
+
+	for i := range items {
+		item := &items[i]
+		if item.Metadata.Labels[LabelIdentity] != identity || item.Metadata.Name == "" {
+			continue
+		}
+
+		ts, err := time.Parse(time.RFC3339, item.Metadata.CreationTimestamp)
+		if err != nil {
+			// Unknown age: never delete.
+			continue
+		}
+
+		all = append(all, ranked{ts: ts, cr: item})
+	}
+
+	slices.SortFunc(all, func(a, b ranked) int {
+		if c := b.ts.Compare(a.ts); c != 0 {
+			return c
+		}
+
+		return strings.Compare(b.cr.Metadata.Name, a.cr.Metadata.Name)
+	})
+
+	// The first request with a certificate is the one Newest returns.
+	newest := slices.IndexFunc(all, func(r ranked) bool { return len(r.cr.Status.Certificate) > 0 })
+
+	var names []string
+
+	for i, r := range all {
+		if i >= keep && i != newest && settled(r.cr) {
+			names = append(names, r.cr.Metadata.Name)
+		}
+	}
+
+	return names
+}
+
+func isNotFound(err error) bool {
+	var se *statusError
+
+	return errors.As(err, &se) && se.code == http.StatusNotFound
+}
+
+// listOwn returns this hub's CertificateRequests for identity.
+func (k8s *K8s) listOwn(ctx context.Context, identity string) ([]certificateRequest, error) {
+	q := url.Values{}
+	q.Set("labelSelector", LabelManagedBy+"="+ManagedByValue+","+LabelIdentity+"="+identity)
+
+	var list certificateRequestList
+
+	err := k8s.do(ctx, http.MethodGet, k8s.collectionURL()+"?"+q.Encode(), nil, &list)
+	if err != nil {
+		return nil, fmt.Errorf("list certificate requests: %w", err)
+	}
+
+	return list.Items, nil
 }
 
 func (k8s *K8s) evaluate(
@@ -491,14 +624,12 @@ func (k8s *K8s) do(ctx context.Context, method, rawURL string, body, out any) er
 			msg = msg[:maxErrorBodySize]
 		}
 
-		return fmt.Errorf(
-			"%s %s: %w %d: %s",
-			method,
-			req.URL.Path,
-			errUnexpectedStatus,
-			resp.StatusCode,
-			msg,
-		)
+		return &statusError{
+			err: fmt.Errorf(
+				"%s %s: %w %d: %s", method, req.URL.Path, errUnexpectedStatus, resp.StatusCode, msg,
+			),
+			code: resp.StatusCode,
+		}
 	}
 
 	if out != nil {

@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -19,9 +20,12 @@ var (
 
 // Fake is a thread-safe in-memory issuer.Issuer.
 type Fake struct {
-	Sign   func(csrPEM []byte) (certPEM, chainPEM []byte, err error)
-	newest map[string]string
-	mu     sync.Mutex
+	// PruneErr, if set, is returned by Prune.
+	PruneErr error
+	Sign     func(csrPEM []byte) (certPEM, chainPEM []byte, err error)
+	newest   map[string]string
+	pruned   []PruneCall
+	mu       sync.Mutex
 }
 
 // Issue signs via Sign and records the leaf fingerprint as newest for identity.
@@ -71,6 +75,30 @@ func (fake *Fake) Newest(ctx context.Context, identity string) (string, error) {
 	defer fake.mu.Unlock()
 
 	return fake.newest[identity], nil
+}
+
+// PruneCall records one Prune invocation.
+type PruneCall struct {
+	Identity string
+	Keep     int
+}
+
+// Prune records the call and returns PruneErr.
+func (fake *Fake) Prune(ctx context.Context, identity string, keep int) error {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	fake.pruned = append(fake.pruned, PruneCall{Identity: identity, Keep: keep})
+
+	return fake.PruneErr
+}
+
+// PruneCalls returns the recorded Prune invocations.
+func (fake *Fake) PruneCalls() []PruneCall {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	return slices.Clone(fake.pruned)
 }
 
 // SetNewest overrides the newest fingerprint for identity.
