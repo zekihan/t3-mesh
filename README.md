@@ -93,20 +93,15 @@ Reruns are safe: a published release is left alone if its manifest is identical.
 ## Signing key
 
 Agents trust the minisign public keys compiled into
-`internal/release/keys.go` (current and next; replace the placeholders before the
-first release).
+`internal/release/keys.go` (current and next). Both secret keys are stored in the
+secrets repo; homelab `terraform/git` publishes only the current one to the
+`release` environment as `MINISIGN_SECRET_KEY`. To rotate, publish the next key
+as `MINISIGN_SECRET_KEY_NEXT` so manifests are dual-signed, then follow the
+rotation steps in `docs/design.md`.
 
-```sh
-go install aead.dev/minisign/cmd/minisign@v0.3.0
-minisign -G -s current.key -p current.pub      # repeat for next.key / next.pub
-```
-
-Store the key files in the `release` environment of this repository (Settings,
-Environments) as secrets `MINISIGN_SECRET_KEY` and, during a rotation,
-`MINISIGN_SECRET_KEY_NEXT`; add `MINISIGN_PASSWORD` / `MINISIGN_PASSWORD_NEXT` if the
-keys are encrypted. With both keys set, `manifest.json.minisig` carries both
-signatures. Rotation steps are in the design ("Self-update", "Signing key").
-Registry publication also needs the repository secrets `DOCKER_USERNAME` and
-`DOCKER_PASSWORD`.
+The keys are passwordless (the secrets store encrypts them at rest); the
+workflow also accepts `MINISIGN_PASSWORD` / `MINISIGN_PASSWORD_NEXT` for encrypted
+keys. Registry publication uses the repository secrets `DOCKER_USERNAME` and
+`DOCKER_PASSWORD`, also managed by homelab `terraform/git`.
 
 `scripts/sign-manifest.sh` does the same locally with the same environment variables.

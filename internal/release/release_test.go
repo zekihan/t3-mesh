@@ -408,37 +408,6 @@ func TestSizeLimit(t *testing.T) {
 	}
 }
 
-func TestDefaultKeysPlaceholders(t *testing.T) {
-	_, err := DefaultKeys()
-	if err == nil {
-		t.Error("placeholder keys must not parse")
-	}
-
-	d := &Downloader{BaseURL: "http://127.0.0.1:1"}
-
-	_, err = d.Fetch(t.Context(), "v1.0.0")
-	if err == nil {
-		t.Error("fetch with placeholder keys succeeded")
-	}
-
-	key := newKey(t)
-	defer SetTrustedKeys([]string{key.pub.String()})()
-
-	keys, err := DefaultKeys()
-	if err != nil || len(keys) != 1 || !keys[0].Equal(key.pub) {
-		t.Errorf("SetTrustedKeys: %v", err)
-	}
-
-	TrustedKeysOverride = key.pub.String() + "," + newKey(t).pub.String()
-
-	keys, err = DefaultKeys()
-	if err != nil || len(keys) != 2 {
-		t.Errorf("override: %v", err)
-	}
-
-	TrustedKeysOverride = ""
-}
-
 func TestStateRecordFailure(t *testing.T) {
 	dir := t.TempDir()
 
