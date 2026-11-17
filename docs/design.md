@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design; implementation in progress (M0 rolled out 2026-11-17). Date: 2026-11-16.
+Status: accepted design; implementation in progress (M0 and M1 rolled out 2026-11-17; M1's phone checks pending). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -673,6 +673,18 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 | M2 | devbox and z-arch on the mesh, link ports | the M2 gate below passes; then the hard switch below |
 | M3 | direct bypass, outage mode, live direct-session revocation | home links stay up with the hub scaled to zero; revoking a peer closes its open direct session; z-mac on a foreign `192.168.x` network with the hub blocked does not listen |
 | M4 | CSR renewal, trust bundle, self-update with rollback and launcher fallback, integration test, Gatus alert endpoints | a forced renewal and a deliberately broken release (agent and launcher) both recover on z-mac; the macOS checks pass again after the update |
+
+**M1 rollout (2026-11-17):** hub v0.1.6 and the z-mac agent v0.1.1 are live, with
+z-mac's T3 local-only. Proven so far: the viewer path on LAN and public routes with
+z-arch's device certificate; forged PROXY headers through the public path and the LAN
+VIP never reach the hub as a source, and a non-frpc pod is refused on `websecure-frp`;
+z-mac is marked home over IPv4 and IPv6; every `/api/` route answers an unpaired
+request through the agent as it answers a remote unpaired client; the LaunchDaemon dials
+the LAN VIP despite Local Network privacy (the application firewall is off, and only
+matters for M3's direct listener); a live T3 WebSocket through the hub closes 0.8 s
+after the hub applies a blocked fingerprint. Revocation latency is bounded by the
+kubelet's ConfigMap refresh (about 70 s here). Still open: the phone itself from mobile
+data, home and away, and blocking its leaf through `libs/mtls-policy`.
 
 **M2 gate (before the cutover), on real machines with real T3 through the full
 frp/Traefik path:** z-arch moves first: its T3 is bound to `127.0.0.1` with LAN mode
