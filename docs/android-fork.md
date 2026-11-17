@@ -46,9 +46,19 @@ the owner's own devices.
 
 ## Fork
 
-- **Repository.** A public GitHub fork, `zekihan/t3code`. GitHub does not allow a
-  private fork of a public repository, and the mesh hostnames are already public in
-  the t3-mesh docs.
+- **Repository.** `zekihan/t3code`, a public standalone repository holding a copy
+  of upstream's history, not a GitHub fork. In a fork `gh pr create` targets the
+  parent by default, so the weekly agent could open a PR on upstream; a fork also
+  starts with Actions and schedules disabled and is not something homelab
+  `terraform/git` creates. It is managed in `terraform/git` (GitHub only, no Forgejo
+  or GitLab mirror): rebase-merge only, read-only default workflow token, a
+  ruleset on `main`, and the `release` environment limited to the branch `main`.
+  The mesh hostnames are already public in the t3-mesh docs.
+- **Clones.** devbox, z-arch and z-mac each have the same clone at
+  `~/repos/github.com/zekihan/t3code`: `origin` is `zekihan/t3code`, `upstream` is
+  `pingdotgg/t3code` with pushing disabled (`pushurl = no-push`), and local `main`,
+  `mesh` and `candidate` track `origin`. Upstream tags come from `upstream`; the
+  fork pushes no upstream tags.
 - **Branches.** `main`, the default branch, holds only the fork's workflows and is
   protected. `candidate` receives each rebased stack; `mesh` is moved to a
   candidate only when its release publishes. The app's commits stay a small stack
