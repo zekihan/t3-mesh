@@ -1021,6 +1021,38 @@ func TestRenewal(t *testing.T) {
 	}
 }
 
+// A renew-now file renews a certificate far from its renewal window, then is removed.
+func TestForcedRenewal(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
+
+	req := filepath.Join(rig.cfg.StateDir, RenewNowFile)
+
+	err := os.MkdirAll(rig.cfg.StateDir, 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(req, nil, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rig.start()
+
+	first := rig.hub.waitConn(t, 1)
+	second := rig.hub.waitConn(t, 2)
+
+	if first.fp == second.fp {
+		t.Fatal("forced renewal used the old certificate")
+	}
+
+	waitFor(t, "renew-now removed", func() bool {
+		_, err := os.Stat(req)
+
+		return errors.Is(err, os.ErrNotExist)
+	})
+}
+
 // A renewal whose first tunnel failed leaves next-* on disk. The hub already
 // admits only that leaf, so the next connect must use and promote it.
 func TestPendingRenewalUsedOnConnect(t *testing.T) {

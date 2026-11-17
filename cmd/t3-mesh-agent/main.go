@@ -23,6 +23,17 @@ import (
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
+// fault is set only for deliberately broken test releases (scripts/build-release.sh
+// reads a FAULT file at the repository root), to prove rollback and the launcher
+// fallback on real machines. Empty in every normal build.
+var fault string
+
+// Injected faults.
+const (
+	faultAgentCrash    = "agent-crash"    // the agent exits at once: the launcher rolls back
+	faultLauncherCrash = "launcher-crash" // a promoted launcher exits at once: the fallback repoints
+)
+
 const (
 	// Enrollment, including the wait for the hub, ends after this time.
 	enrollTimeout = 60 * time.Second
@@ -50,6 +61,7 @@ var (
 	errNotSetUp   = errors.New("install dir is not set up, run the installer first")
 	errMaxAgeFlag = errors.New("--heartbeat-max-age needs --heartbeat")
 	errMaxAge     = errors.New("--heartbeat-max-age must be positive")
+	errFault      = errors.New("injected fault")
 )
 
 func main() {
@@ -100,6 +112,10 @@ func run(args []string) error {
 }
 
 func runAgent(args []string) error {
+	if fault == faultAgentCrash {
+		return fmt.Errorf("run: %w: %s", errFault, fault)
+	}
+
 	fs := newFlagSet("run")
 	configPath := fs.String("config", "", "agent configuration file")
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
@@ -192,6 +208,12 @@ func launcherCmd(args []string) error {
 		}
 
 		return selfTestCmd(ctx)
+	}
+
+	// The self-test above still passes, so a release with this fault is promoted
+	// and only then fails, as a launcher bug that the self-test misses would.
+	if fault == faultLauncherCrash {
+		return fmt.Errorf("launcher: %w: %s", errFault, fault)
 	}
 
 	err = requireFlag("config", *configPath)

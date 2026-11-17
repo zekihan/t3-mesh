@@ -87,6 +87,15 @@ filesystem; mount an `emptyDir` on `/run/t3-mesh` (admin socket) and set
    publishes the hub image. Roll the agents out by bumping `release.version` in the
    homelab chart.
 
+To prove rollback on real machines, a release can be built deliberately broken:
+commit a `FAULT` file containing `agent-crash` (the agent exits at start, so the
+launcher rolls back) or `launcher-crash` (a promoted launcher exits, so the fallback
+repoints and records the version), tag it, then remove the file and release a fixed
+version. Mark such releases as pre-releases.
+
+To force a certificate renewal on a machine, create `renew-now` in the agent's state
+directory (owned by the service user) and restart the agent.
+
 Reruns are safe: a published release is left alone if its manifest is identical.
 `main` also publishes the `edge` hub image nightly and on manual dispatch.
 

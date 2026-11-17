@@ -31,6 +31,18 @@ if [[ -n ${T3_MESH_TRUSTED_KEYS:-} ]]; then
   ldflags+=" -X github.com/zekihan/t3-mesh/internal/release.TrustedKeysOverride=${T3_MESH_TRUSTED_KEYS}"
 fi
 
+# A FAULT file at the repository root builds a deliberately broken test release
+# (agent-crash or launcher-crash, see cmd/t3-mesh-agent). Never present otherwise.
+if [[ -f FAULT ]]; then
+  fault=$(tr -d '[:space:]' <FAULT)
+  case $fault in
+    agent-crash | launcher-crash) ;;
+    *) echo "invalid FAULT: $fault" >&2; exit 2 ;;
+  esac
+  echo "WARNING: building a deliberately broken release (fault: $fault)" >&2
+  ldflags+=" -X main.fault=${fault}"
+fi
+
 export CGO_ENABLED=0
 for platform in linux-amd64 darwin-arm64; do
   goos=${platform%-*}

@@ -3,8 +3,11 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/pki"
@@ -44,8 +47,13 @@ func (agent *Agent) renewOnce(ctx context.Context) {
 	agent.mu.Unlock()
 
 	now := agent.now()
+	forced := agent.renewRequested()
 
-	if leaf == nil || leaf.NotAfter.Sub(now) >= agent.renewWindow || now.Before(notBefore) {
+	if leaf == nil {
+		return
+	}
+
+	if !forced && (leaf.NotAfter.Sub(now) >= agent.renewWindow || now.Before(notBefore)) {
 		return
 	}
 
@@ -68,9 +76,14 @@ func (agent *Agent) renewOnce(ctx context.Context) {
 		ctx,
 		"Renewal starting",
 		slog.String("notAfter", leaf.NotAfter.Format(time.RFC3339)),
+		slog.Bool("forced", forced),
 	)
 
 	err := agent.renew(ctx, cur)
+	if err == nil && forced {
+		agent.clearRenewRequest(ctx)
+	}
+
 	if err != nil {
 		agent.log.WarnContext(ctx, "Renewal failed", slog.Any("err", err))
 		agent.warn("certificate renewal failed")
@@ -78,6 +91,28 @@ func (agent *Agent) renewOnce(ctx context.Context) {
 		agent.mu.Lock()
 		agent.renewAfter = agent.now().Add(agent.renewRetry)
 		agent.mu.Unlock()
+	}
+}
+
+// RenewNowFile in the state directory asks for a renewal regardless of the
+// renewal window. The agent checks for it hourly and on every new session, and
+// deletes it after a successful renewal.
+const RenewNowFile = "renew-now"
+
+func (agent *Agent) renewRequested() bool {
+	if agent.cfg.StateDir == "" {
+		return false
+	}
+
+	_, err := os.Stat(filepath.Join(agent.cfg.StateDir, RenewNowFile))
+
+	return err == nil
+}
+
+func (agent *Agent) clearRenewRequest(ctx context.Context) {
+	err := os.Remove(filepath.Join(agent.cfg.StateDir, RenewNowFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		agent.log.WarnContext(ctx, "Clear renewal request", slog.Any("err", err))
 	}
 }
 

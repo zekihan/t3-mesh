@@ -205,7 +205,9 @@ the old CA is gone must be re-enrolled by the operator with a new token.
 
 When less than 90 days remain, the agent generates a new key and sends a CSR over
 its tunnel. Starting early (device certificates use 30 days) lets an agent that is
-offline for weeks still renew without re-enrollment. It keeps the old key and certificate until
+offline for weeks still renew without re-enrollment. An operator forces a renewal
+by creating `renew-now` in the agent's state directory; the agent renews on its next
+check (hourly, or at once after a restart) and deletes the file. It keeps the old key and certificate until
 a new tunnel handshake with the new certificate succeeds, then deletes the old key.
 Peers need no update, because direct connections do not pin leaf fingerprints. A
 renewal that fails is retried hourly. An alert fires at 14 days left.
@@ -545,7 +547,9 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   launcher still fails, a fallback repoints `known-good` to `previous-good`: on
   Linux an `OnFailure=` unit triggered when systemd's start limit is hit, on macOS a
   second LaunchDaemon that runs the `previous-good` binary every 5 minutes and
-  repoints when the main daemon's heartbeat file is older than 5 minutes.
+  repoints when the main daemon's heartbeat file is older than 5 minutes. Either way
+  the fallback records the abandoned version as a failed release, so the agent does
+  not install it again.
 - **Local startup check:** within 30 s of starting, independent of the hub, the new
   binary must load its cached state, bind every configured link port and the direct
   listener when cached state calls for it, and answer the launcher on a health pipe
