@@ -1,0 +1,112 @@
+# t3-mesh
+
+A private mesh between machines running T3. A hub in the homelab
+cluster relays mTLS tunnels between per-machine agents, with a direct path while the
+machines share a LAN. Agents update themselves from signed GitHub releases. The
+design, threat model and rollout are in [docs/design.md](docs/design.md).
+
+- `cmd/t3-mesh-hub`: the hub, shipped as a distroless container image.
+- `cmd/t3-mesh-agent`: the agent (`launcher`, `run`, `enroll`, `fallback`, `version`),
+  shipped as static binaries for linux/amd64 and darwin/arm64.
+
+## Build and test
+
+```sh
+go vet ./...
+golangci-lint run
+./scripts/go_test.sh -race ./...     # includes the hub + agents integration test
+scripts/build-release.sh v0.1.0      # agent binaries into dist/
+scripts/make-manifest.sh v0.1.0      # dist/manifest.json
+docker build -t t3-mesh-hub .
+```
+
+## Install an agent
+
+Download the binary and check it against the manifest (the agent verifies the
+signature itself on every later update):
+
+```sh
+v=v0.1.0; os=linux-amd64   # or darwin-arm64
+curl -fLO https://github.com/zekihan/t3-mesh/releases/download/$v/t3-mesh-agent-$os
+curl -fLO https://github.com/zekihan/t3-mesh/releases/download/$v/manifest.json
+curl -fLO https://github.com/zekihan/t3-mesh/releases/download/$v/manifest.json.minisig
+minisign -Vm manifest.json -P <public key>        # optional but recommended
+grep -o "\"name\":\"t3-mesh-agent-$os\",\"sha256\":\"[0-9a-f]*\"" manifest.json   # compare with:
+sha256sum t3-mesh-agent-$os                       # macOS: shasum -a 256
+chmod +x t3-mesh-agent-$os
+```
+
+Then, from a checkout of this repository:
+
+```sh
+# Linux (systemd): user t3mesh, state in /var/lib/t3-mesh, config /etc/t3-mesh/agent.yaml
+sudo packaging/linux/install.sh --binary ./t3-mesh-agent-linux-amd64 --version $v --name agent-z-arch
+
+# macOS (LaunchDaemons): user _t3mesh, state in /Library/Application Support/t3-mesh
+sudo packaging/darwin/install.sh --binary ./t3-mesh-agent-darwin-arm64 --version $v --name agent-z-mac
+```
+
+Edit the generated config (`links`, `direct`; see the design for the fields). The
+installer enables the service but starts it only once the machine is enrolled.
+
+## Enroll an agent
+
+1. On the cluster, get a single-use token (valid 15 minutes):
+
+   ```sh
+   kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub enroll-token agent-<machine>
+   ```
+
+2. On the machine, as the service user (Linux; on macOS use `_t3mesh` and the
+   `/Library/Application Support/t3-mesh` paths):
+
+   ```sh
+   sudo -u t3mesh /var/lib/t3-mesh/install/known-good/t3-mesh-agent \
+     enroll --config /etc/t3-mesh/agent.yaml --token <token>
+   sudo systemctl start t3-mesh-agent          # macOS: sudo launchctl bootstrap system /Library/LaunchDaemons/com.noqer.t3-mesh-agent.plist
+   ```
+
+## Hub image
+
+`ghcr.io/zekihan/t3-mesh-hub` (also on Docker Hub): `edge` from `main`, `X.Y.Z` and
+`latest` for releases. The image runs as uid 65532 with a read-only root
+filesystem; mount an `emptyDir` on `/run/t3-mesh` (admin socket) and set
+`fsGroup: 65532`. Ports: 8443 (agents), 8080 (viewers), 9090 (probes). The homelab pins
+`edge@sha256:...`.
+
+## Release process
+
+1. Bump `VERSION` (`0.2.0`, no `v`) and, if the on-disk state format changed in a
+   way older releases cannot read, `MIN_STATE_VERSION` (`v0.1.0`). Merge to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+   The tag must equal `v` + `VERSION` and be an ancestor of `main`; limit who can
+   push `v*` tags with a tag ruleset.
+3. The `Publish` workflow runs the full tests (including the integration test),
+   builds the agent binaries, writes and signs `manifest.json`, attaches binaries,
+   `manifest.json` and `manifest.json.minisig` to a new GitHub release, and
+   publishes the hub image. Roll the agents out by bumping `release.version` in the
+   homelab chart.
+
+Reruns are safe: a published release is left alone if its manifest is identical.
+`main` also publishes the `edge` hub image nightly and on manual dispatch.
+
+## Signing key
+
+Agents trust the minisign public keys compiled into
+`internal/release/keys.go` (current and next; replace the placeholders before the
+first release).
+
+```sh
+go install aead.dev/minisign/cmd/minisign@v0.3.0
+minisign -G -s current.key -p current.pub      # repeat for next.key / next.pub
+```
+
+Store the key files in the `release` environment of this repository (Settings,
+Environments) as secrets `MINISIGN_SECRET_KEY` and, during a rotation,
+`MINISIGN_SECRET_KEY_NEXT`; add `MINISIGN_PASSWORD` / `MINISIGN_PASSWORD_NEXT` if the
+keys are encrypted. With both keys set, `manifest.json.minisig` carries both
+signatures. Rotation steps are in the design ("Self-update", "Signing key").
+Registry publication also needs the repository secrets `DOCKER_USERNAME` and
+`DOCKER_PASSWORD`.
+
+`scripts/sign-manifest.sh` does the same locally with the same environment variables.
