@@ -93,6 +93,9 @@ if [[ ! -e "$base/agent.yaml" ]]; then
   echo "wrote $base/agent.yaml (edit links/direct for this machine)"
 fi
 
+# Create versions/ explicitly: install -d sets the owner of the last component only,
+# and the agent stages updates there.
+install -d -m 0755 -o "$user" -g "$user" "$install_dir/versions"
 install -d -m 0755 -o "$user" -g "$user" "$install_dir/versions/$version"
 install -m 0755 -o "$user" -g "$user" "$binary" "$install_dir/versions/$version/t3-mesh-agent"
 if [[ -e $install_dir/known-good ]]; then
@@ -100,7 +103,9 @@ if [[ -e $install_dir/known-good ]]; then
 else
   ln -sfn "versions/$version" "$install_dir/current"
   ln -sfn "versions/$version" "$install_dir/known-good"
-  chown -h "$user:$user" "$install_dir/current" "$install_dir/known-good"
+  # previous-good equal to known-good makes the fallback a no-op until the first update.
+  ln -sfn "versions/$version" "$install_dir/previous-good"
+  chown -h "$user:$user" "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
 fi
 
 for label in "$main_label" "$fallback_label"; do
