@@ -1004,9 +1004,10 @@ func TestRenewal(t *testing.T) {
 		}
 	}
 
-	if fp := pki.Fingerprint(rig.agent.identity().Leaf); fp != second.fp {
-		t.Errorf("in-memory identity fingerprint = %s", fp)
-	}
+	// promote writes the store before swapping the in-memory identity.
+	waitFor(t, "in-memory identity promoted", func() bool {
+		return pki.Fingerprint(rig.agent.identity().Leaf) == second.fp
+	})
 
 	// The old session is closed once it has no streams.
 	waitFor(t, "old session retired", func() bool { return first.ymx.IsClosed() })
