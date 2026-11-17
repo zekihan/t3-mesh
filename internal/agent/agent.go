@@ -634,11 +634,22 @@ func (agent *Agent) startupOK() {
 	})
 }
 
+// lastHelloAckTime is the updater's "hub is healthy" signal: the later of the
+// last HelloAck and the last ping reply on the current session. A HelloAck
+// alone arrives only when a session starts, so a long-lived healthy session
+// would otherwise look stale and defer every update.
 func (agent *Agent) lastHelloAckTime() time.Time {
 	agent.mu.Lock()
-	defer agent.mu.Unlock()
+	last, cur := agent.lastHelloAck, agent.cur
+	agent.mu.Unlock()
 
-	return agent.lastHelloAck
+	if cur != nil && !last.IsZero() {
+		if pong := cur.ctrl.LastPong(); pong.After(last) {
+			last = pong
+		}
+	}
+
+	return last
 }
 
 func (agent *Agent) networkUp() bool {

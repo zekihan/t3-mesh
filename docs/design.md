@@ -521,8 +521,8 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   rollback, and always refuses a version older than the `minStateVersion` recorded
   in its state directory, whatever the hub says.
 - **Preconditions:** the agent installs only while every local `serve` target
-  accepts TCP and the running binary has received a `HelloAck` within the last
-  minute. Otherwise it defers and checks again every 10 minutes, so a stopped T3 or
+  accepts TCP and the running binary has received a `HelloAck` or a ping reply on
+  its hub session within the last minute. Otherwise it defers and checks again every 10 minutes, so a stopped T3 or
   an unhealthy hub never puts a release on probation.
 - **Downloads:** `zekihan/t3-mesh` is a public repository, so agents fetch release
   assets anonymously; the signature, not the source, provides integrity. The agent

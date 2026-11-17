@@ -44,7 +44,8 @@ type HealthSink interface {
 
 // Hooks are supplied by the agent core.
 type Hooks struct {
-	// LastHelloAck is when the running binary last received a HelloAck.
+	// LastHelloAck is when the running binary last heard from the hub: a HelloAck
+	// or a ping reply on its current session.
 	LastHelloAck func() time.Time
 	// HubHandshakeOK reports whether a TLS handshake to the hub succeeds now.
 	HubHandshakeOK func(ctx context.Context) bool

@@ -1289,3 +1289,20 @@ func TestHelloAckClearsEmptiedHomeCIDRs(t *testing.T) {
 		t.Fatalf("HomeCIDRs = %v, want cleared", got)
 	}
 }
+
+// A long-lived healthy session counts as recent hub contact for the updater,
+// although its HelloAck is old.
+func TestHubContactFollowsPongs(t *testing.T) {
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
+
+	waitFor(t, "session adopted", func() bool { return !rig.agent.lastHelloAckTime().IsZero() })
+
+	rig.agent.mu.Lock()
+	rig.agent.lastHelloAck = time.Now().Add(-10 * time.Minute)
+	rig.agent.mu.Unlock()
+
+	if age := time.Since(rig.agent.lastHelloAckTime()); age > time.Minute {
+		t.Fatalf("hub contact is %s old despite a live session", age)
+	}
+}
