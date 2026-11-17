@@ -92,6 +92,26 @@ hub: mesh.noqer.com:8443
 	}
 }
 
+func TestLinkOrigins(t *testing.T) {
+	cfg, err := Parse([]byte(validDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if strings.Join(cfg.LinkOrigins, ",") != "t3code://app" {
+		t.Fatalf("default LinkOrigins = %q", cfg.LinkOrigins)
+	}
+
+	cfg, err = Parse([]byte(validDoc + "linkOrigins: [\"https://t3.example:8443\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if strings.Join(cfg.LinkOrigins, ",") != "t3code://app,https://t3.example:8443" {
+		t.Fatalf("LinkOrigins = %q", cfg.LinkOrigins)
+	}
+}
+
 func TestDefaultCacheTTLWhenOmitted(t *testing.T) {
 	doc := validDoc
 	doc = strings.Replace(doc, "  cacheTTL: 168h\n", "", 1)
@@ -148,6 +168,18 @@ func TestParseInvalid(t *testing.T) {
 		doc  string
 	}{
 		{"empty", ``},
+		{
+			"link origin with path",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinkOrigins: [\"https://a.example/x\"]\n",
+		},
+		{
+			"link origin without scheme",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinkOrigins: [a.example]\n",
+		},
+		{
+			"link origin with trailing slash",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinkOrigins: [\"https://a.example/\"]\n",
+		},
 		{"no identity name", "identity:\n  dir: /a/identity\nhub: h\n"},
 		{"name without prefix", "identity:\n  name: z-arch\n  dir: /a/identity\nhub: h\n"},
 		{"name only prefix", "identity:\n  name: agent-\n  dir: /a/identity\nhub: h\n"},

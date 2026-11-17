@@ -78,7 +78,12 @@ func (agent *Agent) bindLinks(ctx context.Context) ([]*linkServer, error) {
 
 		srv := &linkServer{a: agent, key: key, svc: svc, machine: machine, port: port, ln: ln}
 		srv.srv = &http.Server{
-			Handler:           linkguard.Middleware(port, srv.proxy()),
+			Handler: linkguard.Middleware(
+				port,
+				agent.cfg.LinkOrigins,
+				agent.log,
+				srv.proxy(),
+			),
 			ReadHeaderTimeout: linkHeaderTimeout,
 		}
 

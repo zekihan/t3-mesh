@@ -2,12 +2,15 @@ package linkguard
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 const port = 27301
+
+var trusted = []string{DesktopOrigin}
 
 func newRequest(t *testing.T, host string, headers map[string]string) *http.Request {
 	t.Helper()
@@ -162,11 +165,41 @@ func TestCheck(t *testing.T) {
 			name: "valid host with bad origin and good sec-fetch-site", host: "localhost:27301",
 			headers: map[string]string{"Origin": "null", "Sec-Fetch-Site": "none"}, pass: false,
 		},
+		{
+			name: "desktop app cross-site fetch",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin":         DesktopOrigin,
+				"Sec-Fetch-Site": "cross-site",
+			},
+			pass: true,
+		},
+		{
+			name:    "desktop origin with rebinding host",
+			host:    "evil.example:27301",
+			headers: map[string]string{"Origin": DesktopOrigin},
+			pass:    false,
+		},
+		{
+			name: "desktop-like origin is not trusted",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin":         "t3code://app.evil.example",
+				"Sec-Fetch-Site": "cross-site",
+			},
+			pass: false,
+		},
+		{
+			name:    "web page with cross-site fetch and no origin",
+			host:    "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "cross-site"},
+			pass:    false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := Check(newRequest(t, tt.host, tt.headers), port)
+			err := Check(newRequest(t, tt.host, tt.headers), port, trusted)
 			if tt.pass && err != nil {
 				t.Fatalf("Check rejected: %v", err)
 			}
@@ -197,22 +230,22 @@ func TestCheckWebSocketUpgrade(t *testing.T) {
 		return r
 	}
 
-	err := Check(upgrade("127.0.0.1:27301", ""), port)
+	err := Check(upgrade("127.0.0.1:27301", ""), port, trusted)
 	if err != nil {
 		t.Fatalf("native websocket rejected: %v", err)
 	}
 
-	err = Check(upgrade("localhost:27301", "http://localhost:27301"), port)
+	err = Check(upgrade("localhost:27301", "http://localhost:27301"), port, trusted)
 	if err != nil {
 		t.Fatalf("local websocket rejected: %v", err)
 	}
 
-	err = Check(upgrade("127.0.0.1:27301", "http://evil.example"), port)
+	err = Check(upgrade("127.0.0.1:27301", "http://evil.example"), port, trusted)
 	if err == nil {
 		t.Fatal("foreign-origin websocket accepted")
 	}
 
-	err = Check(upgrade("127.0.0.1:27301", "null"), port)
+	err = Check(upgrade("127.0.0.1:27301", "null"), port, trusted)
 	if err == nil {
 		t.Fatal("null-origin websocket accepted")
 	}
@@ -221,12 +254,12 @@ func TestCheckWebSocketUpgrade(t *testing.T) {
 func TestCheckPortIsPartOfHost(t *testing.T) {
 	r := newRequest(t, "127.0.0.1:27302", nil)
 
-	err := Check(r, 27302)
+	err := Check(r, 27302, trusted)
 	if err != nil {
 		t.Fatalf("port 27302 rejected: %v", err)
 	}
 
-	err = Check(r, 27301)
+	err = Check(r, 27301, trusted)
 	if err == nil {
 		t.Fatal("request for port 27302 accepted on port 27301")
 	}
@@ -240,7 +273,7 @@ func TestMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	})
 
-	handler := Middleware(port, next)
+	handler := Middleware(port, trusted, slog.New(slog.DiscardHandler), next)
 
 	tests := []struct {
 		headers    map[string]string

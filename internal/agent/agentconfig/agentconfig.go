@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zekihan/t3-mesh/internal/agent/linkguard"
 )
 
 const (
@@ -46,6 +49,7 @@ var (
 	errHubFormat           = errors.New("must be host or host:port")
 	errHubIPv6Brackets     = errors.New("IPv6 literals must be bracketed")
 	errHubNoHost           = errors.New("has no host")
+	errOriginFormat        = errors.New("must be scheme://host[:port] with nothing after it")
 )
 
 // Config is a validated agent configuration.
@@ -56,7 +60,10 @@ type Config struct {
 	StateDir   string
 	InstallDir string
 	Hub        string
-	Direct     Direct
+	// LinkOrigins are the browser origins a link port accepts besides its own:
+	// the T3 desktop app's renderer plus any configured linkOrigins.
+	LinkOrigins []string
+	Direct      Direct
 }
 
 // Identity names the agent and locates its key material.
@@ -73,13 +80,14 @@ type Direct struct {
 }
 
 type file struct {
-	Serve      map[string]string `yaml:"serve"`
-	Links      map[string]string `yaml:"links"`
-	Direct     *direct           `yaml:"direct"`
-	Identity   identity          `yaml:"identity"`
-	StateDir   string            `yaml:"stateDir"`
-	InstallDir string            `yaml:"installDir"`
-	Hub        string            `yaml:"hub"`
+	Serve       map[string]string `yaml:"serve"`
+	Links       map[string]string `yaml:"links"`
+	Direct      *direct           `yaml:"direct"`
+	Identity    identity          `yaml:"identity"`
+	StateDir    string            `yaml:"stateDir"`
+	InstallDir  string            `yaml:"installDir"`
+	Hub         string            `yaml:"hub"`
+	LinkOrigins []string          `yaml:"linkOrigins"`
 }
 
 type identity struct {
@@ -179,17 +187,23 @@ func (doc *file) build() (*Config, error) {
 		return nil, err
 	}
 
+	origins, err := doc.validateLinkOrigins()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		Identity: Identity{
 			Name: doc.Identity.Name,
 			Dir:  filepath.Clean(doc.Identity.Dir),
 		},
-		StateDir:   stateDir,
-		InstallDir: installDir,
-		Hub:        doc.Hub,
-		Serve:      doc.Serve,
-		Links:      doc.Links,
-		Direct:     direct,
+		StateDir:    stateDir,
+		InstallDir:  installDir,
+		Hub:         doc.Hub,
+		Serve:       doc.Serve,
+		Links:       doc.Links,
+		LinkOrigins: origins,
+		Direct:      direct,
 	}, nil
 }
 
@@ -216,6 +230,24 @@ func absOrDefault(field, value, def string) (string, error) {
 	}
 
 	return filepath.Clean(value), nil
+}
+
+// validateLinkOrigins returns the trusted link origins: the desktop app's plus the
+// configured ones, each a bare scheme://host[:port] with no path.
+func (doc *file) validateLinkOrigins() ([]string, error) {
+	out := []string{linkguard.DesktopOrigin}
+
+	for _, origin := range doc.LinkOrigins {
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" ||
+			u.Fragment != "" || u.User != nil || origin != u.Scheme+"://"+u.Host {
+			return nil, fmt.Errorf("agentconfig: linkOrigins %q: %w", origin, errOriginFormat)
+		}
+
+		out = append(out, origin)
+	}
+
+	return out, nil
 }
 
 // validateLinks checks link keys and values and returns the set of link ports.

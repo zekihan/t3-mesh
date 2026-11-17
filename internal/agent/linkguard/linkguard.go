@@ -5,6 +5,7 @@ package linkguard
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,23 +14,41 @@ import (
 // ErrForbidden is returned by Check when a request must not pass a link port.
 var ErrForbidden = errors.New("linkguard: forbidden")
 
-// Check returns nil if r may pass through link port port. It rejects a request whose
-// Host is not 127.0.0.1:<port> or localhost:<port>, whose Origin is present and not
-// http://127.0.0.1:<port> or http://localhost:<port>, or whose Sec-Fetch-Site is
-// present and not same-origin or none. Requests with neither Origin nor
-// Sec-Fetch-Site (native clients) pass when Host is valid. WebSocket upgrades are
-// checked the same way.
-func Check(r *http.Request, port int) error {
-	portStr := strconv.Itoa(port)
+// DesktopOrigin is the origin of the T3 Code desktop app's renderer. The app
+// registers the t3code scheme itself, so no web page can send this origin, and
+// the renderer reaches environments with cross-site fetches from it.
+const DesktopOrigin = "t3code://app"
 
+// Check returns nil if r may pass through link port port. It rejects a request
+// whose Host is not 127.0.0.1:<port> or localhost:<port>. A request with an
+// Origin passes only if that origin is http://127.0.0.1:<port>,
+// http://localhost:<port> or one of trusted; one with Sec-Fetch-Site passes only
+// if it is same-origin or none, or the request carries a trusted Origin.
+// Requests with neither header (native clients) pass when Host is valid.
+// WebSocket upgrades are checked the same way.
+func Check(r *http.Request, port int, trusted []string) error {
+	portStr := strconv.Itoa(port)
 	if !matchesAny(r.Host, "127.0.0.1:"+portStr, "localhost:"+portStr) {
 		return fmt.Errorf("%w: host %q", ErrForbidden, r.Host)
 	}
 
-	for _, origin := range r.Header.Values("Origin") {
+	origins := r.Header.Values("Origin")
+	trustedOrigin := len(origins) > 0
+
+	for _, origin := range origins {
+		if matchesAny(origin, trusted...) {
+			continue
+		}
+
+		trustedOrigin = false
+
 		if !matchesAny(origin, "http://127.0.0.1:"+portStr, "http://localhost:"+portStr) {
 			return fmt.Errorf("%w: origin %q", ErrForbidden, origin)
 		}
+	}
+
+	if trustedOrigin {
+		return nil
 	}
 
 	for _, site := range r.Header.Values("Sec-Fetch-Site") {
@@ -41,11 +60,19 @@ func Check(r *http.Request, port int) error {
 	return nil
 }
 
-// Middleware wraps h, answering 403 without calling h when Check fails for port.
-func Middleware(port int, handler http.Handler) http.Handler {
+// Middleware wraps h, answering 403 without calling h when Check fails for port,
+// and logging why.
+func Middleware(port int, trusted []string, log *slog.Logger, handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := Check(r, port)
+		err := Check(r, port, trusted)
 		if err != nil {
+			log.InfoContext(
+				r.Context(),
+				"Link request refused",
+				slog.Int("port", port),
+				slog.String("method", r.Method),
+				slog.String("reason", err.Error()),
+			)
 			http.Error(w, "forbidden", http.StatusForbidden)
 
 			return

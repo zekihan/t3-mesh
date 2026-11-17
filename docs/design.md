@@ -427,7 +427,11 @@ rebinding and cross-site requests from browsers, a link port rejects any request
 plain HTTP or WebSocket upgrade, whose `Host` is not `127.0.0.1:<port>` or
 `localhost:<port>`, whose `Origin` is present and not one of those, or whose
 `Sec-Fetch-Site` is present and not `same-origin` or `none` (which catches no-cors
-GETs that carry no `Origin`). Native T3 clients send neither header and pass.
+GETs that carry no `Origin`). Native T3 clients send neither header and pass. The T3
+desktop app's window fetches environments cross-site from its own `t3code://app`
+origin, which the app registers and no web page can send; requests from that origin,
+and from any origin listed in the agent's optional `linkOrigins`, pass whatever their
+`Sec-Fetch-Site`. Refused requests are logged with the reason.
 
 ### Tunnel management
 
