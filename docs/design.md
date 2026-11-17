@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design, not implemented. Date: 2026-11-16.
+Status: accepted design; implementation in progress (M0 rolled out 2026-11-17). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -664,7 +664,7 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
 | Milestone | Scope | Done when |
 |---|---|---|
-| M0 | approver-policy and per-issuer policies, plus the `t3-mesh` namespace, hub ServiceAccount and hub policy (no workload) | the render test passes and every existing certificate renews; a forced renewal of one Let's Encrypt and one clients certificate succeeds; CertificateRequests from the hub ServiceAccount for `urn:noqer:mtls:clients:z-phone`, and for `agent-z-mac` with an added DNS SAN, stay unapproved |
+| M0 | approver-policy and per-issuer policies, plus the `t3-mesh` namespace, hub ServiceAccount and hub policy (no workload) | the render test passes and every existing certificate renews; a forced renewal of one Let's Encrypt and one clients certificate succeeds; CertificateRequests from the hub ServiceAccount for `urn:noqer:mtls:clients:z-phone`, and for `agent-z-mac` with an added DNS SAN, are denied by the hub policy and get no certificate |
 | M1 | `traefik-mtls-authz` extension released and deployed first; then hub, agent, tunnel, token enrollment, live viewer revocation, Gatus canaries and `/status`; z-mac only, with its T3 bound to `127.0.0.1` and LAN mode off before the checks | the phone opens `t3.z-mac.mesh.noqer.com` from mobile data, home and away; a forged PROXY header through the public path, or from a non-frpc pod, does not change the source the hub sees; z-mac at home resolves `mesh.noqer.com` to the LAN VIP and is marked home over both IPv4 and IPv6; an unpaired request through the agent gets nothing a remote unpaired client would not; the macOS risks in [Platform notes](#platform-notes) are checked; blocking the phone's leaf closes its open WebSocket |
 | M2 | devbox and z-arch on the mesh, link ports | the M2 gate below passes; then the hard switch below |
 | M3 | direct bypass, outage mode, live direct-session revocation | home links stay up with the hub scaled to zero; revoking a peer closes its open direct session; z-mac on a foreign `192.168.x` network with the hub blocked does not listen |
