@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design; implementation in progress (M0, M1 and M2 done 2026-11-17). Date: 2026-11-16.
+Status: accepted design; implementation in progress (M0 to M3 done 2026-11-17). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -722,6 +722,16 @@ all three machines as a viewer, home and away. The devbox cutover removed
 the old host policy; the retired Argo CD Application, namespace and AppProject were
 deleted by hand because the ApplicationSet does not delete. T3 Connect stays on for
 now.
+
+**M3 rollout (2026-11-17):** direct is enabled on all three agents (port 27400), each
+binding only its LAN IPv4 and ULA addresses. With the hub scaled to zero, every link
+between home machines kept working over direct sessions. Blocking devbox's agent leaf
+made z-mac close both of its direct sessions with devbox within 0.1 s of the hub's
+update and refuse new ones, while the hub cut devbox's tunnel. On a phone hotspot with
+the hub's public addresses blackholed, z-mac opened no direct listener and dialed no
+peer; the hotspot's `10.167.57.0/24` is outside `homeCIDRs`, so the gateway-MAC check
+for a foreign `192.168.x` network was covered by the integration test rather than on
+z-mac. Since v0.1.8 the agent logs each change of its direct decision with the reason.
 
 After each machine moves, turn T3 Connect off on it (`t3 up`), bind T3 to
 `127.0.0.1`, turn LAN mode off, and remove any other proxy or listener that reaches
