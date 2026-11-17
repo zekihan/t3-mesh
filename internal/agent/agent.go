@@ -61,6 +61,10 @@ type Options struct {
 	HubTLS *tls.Config
 	// Health is the launcher health pipe; nil opens it from the environment.
 	Health updater.HealthSink
+	// LocalAddrs and GatewayMAC override host network lookups in tests, which
+	// need loopback addresses that the real lookup excludes.
+	LocalAddrs func() ([]netip.Addr, error)
+	GatewayMAC func() (string, error)
 }
 
 // Agent is the running agent.
@@ -153,6 +157,14 @@ func New(opts Options) (*Agent, error) {
 		renewKick:   make(chan struct{}, 1),
 	}
 	a.lookupHost = a.defaultLookup
+
+	if opts.LocalAddrs != nil {
+		a.localAddrs = opts.LocalAddrs
+	}
+
+	if opts.GatewayMAC != nil {
+		a.gatewayMAC = opts.GatewayMAC
+	}
 
 	return a, nil
 }
