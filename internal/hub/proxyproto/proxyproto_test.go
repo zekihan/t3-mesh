@@ -21,7 +21,10 @@ func v2Header(verCmd, fam byte, block []byte) []byte {
 	h := make([]byte, 0, fixedHeaderSize+len(block))
 	h = append(h, signature[:]...)
 	h = append(h, verCmd, fam)
-	h = binary.BigEndian.AppendUint16(h, uint16(len(block))) //nolint:gosec // bounded by the check above
+	h = binary.BigEndian.AppendUint16(
+		h,
+		uint16(len(block)),
+	) //nolint:gosec // bounded by the check above
 	return append(h, block...)
 }
 
@@ -100,9 +103,21 @@ func TestProxiedSource(t *testing.T) {
 		src  netip.AddrPort
 		want netip.AddrPort
 	}{
-		{"ipv4", netip.MustParseAddrPort("203.0.113.7:4321"), netip.MustParseAddrPort("203.0.113.7:4321")},
-		{"ipv6", netip.MustParseAddrPort("[2001:db8::7]:4321"), netip.MustParseAddrPort("[2001:db8::7]:4321")},
-		{"ipv4-mapped ipv6 unmapped", netip.MustParseAddrPort("[::ffff:198.51.100.9]:777"), netip.MustParseAddrPort("198.51.100.9:777")},
+		{
+			"ipv4",
+			netip.MustParseAddrPort("203.0.113.7:4321"),
+			netip.MustParseAddrPort("203.0.113.7:4321"),
+		},
+		{
+			"ipv6",
+			netip.MustParseAddrPort("[2001:db8::7]:4321"),
+			netip.MustParseAddrPort("[2001:db8::7]:4321"),
+		},
+		{
+			"ipv4-mapped ipv6 unmapped",
+			netip.MustParseAddrPort("[::ffff:198.51.100.9]:777"),
+			netip.MustParseAddrPort("198.51.100.9:777"),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -132,7 +147,9 @@ func TestProxiedSource(t *testing.T) {
 func TestRemoteAddrBeforeRead(t *testing.T) {
 	ln := newListener(t, time.Second)
 	client := dial(t, ln)
-	if _, err := client.Write(proxyHeader(netip.MustParseAddrPort("10.0.0.5:1"), netip.MustParseAddrPort("10.0.0.6:2"))); err != nil {
+	if _, err := client.Write(
+		proxyHeader(netip.MustParseAddrPort("10.0.0.5:1"), netip.MustParseAddrPort("10.0.0.6:2")),
+	); err != nil {
 		t.Fatal(err)
 	}
 	sc := acceptConn(t, ln)
@@ -147,7 +164,10 @@ func TestLocalCommandUsesPeer(t *testing.T) {
 		block []byte
 	}{
 		{"unspec no address", nil},
-		{"inet block ignored", inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2)},
+		{
+			"inet block ignored",
+			inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,7 +211,12 @@ func TestMalformedHeadersAreRejected(t *testing.T) {
 			h[0] ^= 0xFF
 			return h
 		}(), false, ErrInvalidSignature},
-		{"v1 text header", []byte("PROXY TCP4 203.0.113.7 10.0.0.1 1 2\r\n"), false, ErrInvalidSignature},
+		{
+			"v1 text header",
+			[]byte("PROXY TCP4 203.0.113.7 10.0.0.1 1 2\r\n"),
+			false,
+			ErrInvalidSignature,
+		},
 		{"no header at all", []byte("GET / HTTP/1.1\r\n\r\n"), false, ErrInvalidSignature},
 		{"wrong version", v2Header(0x11, 0x11, good), false, ErrUnsupportedVersion},
 		{"unknown command", v2Header(0x22, 0x11, good), false, ErrUnsupportedCommand},
@@ -201,8 +226,18 @@ func TestMalformedHeadersAreRejected(t *testing.T) {
 		{"unspec proxy", v2Header(0x21, 0x00, nil), false, ErrUnsupportedFamily},
 		{"inet block too short", v2Header(0x21, 0x11, good[:4]), false, ErrShortAddress},
 		{"inet6 block too short", v2Header(0x21, 0x21, make([]byte, 35)), false, ErrShortAddress},
-		{"header too large", append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xFF), false, ErrHeaderTooLarge},
-		{"header one byte over 64 KiB", append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xF1), false, ErrHeaderTooLarge},
+		{
+			"header too large",
+			append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xFF),
+			false,
+			ErrHeaderTooLarge,
+		},
+		{
+			"header one byte over 64 KiB",
+			append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xF1),
+			false,
+			ErrHeaderTooLarge,
+		},
 		{"truncated fixed header", v2Header(0x21, 0x11, good)[:10], true, io.ErrUnexpectedEOF},
 		{"truncated address block", v2Header(0x21, 0x11, good)[:20], true, io.ErrUnexpectedEOF},
 	}
@@ -226,7 +261,10 @@ func TestMalformedHeadersAreRejected(t *testing.T) {
 				t.Fatalf("Read error = %v, want %v", err, tt.wantErr)
 			}
 			if _, ok := sc.RemoteAddr().(invalidAddr); !ok {
-				t.Fatalf("RemoteAddr = %v after malformed header, want invalidAddr", sc.RemoteAddr())
+				t.Fatalf(
+					"RemoteAddr = %v after malformed header, want invalidAddr",
+					sc.RemoteAddr(),
+				)
 			}
 			if _, err := sc.Source(); err == nil {
 				t.Fatal("Source succeeded on malformed header")
@@ -265,7 +303,9 @@ func closeWrite(t *testing.T, c net.Conn) {
 func TestTruncatedHeaderFromClientClose(t *testing.T) {
 	ln := newListener(t, time.Second)
 	client := dial(t, ln)
-	if _, err := client.Write(v2Header(0x21, 0x11, inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2))[:12]); err != nil {
+	if _, err := client.Write(
+		v2Header(0x21, 0x11, inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2))[:12],
+	); err != nil {
 		t.Fatal(err)
 	}
 	closeWrite(t, client)
@@ -341,8 +381,41 @@ func TestDataAfterHeaderPreserved(t *testing.T) {
 		writes [][]byte
 		want   []byte
 	}{
-		{"same write as header", [][]byte{append(v2Header(0x21, 0x11, inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2)), clientHello...)}, clientHello},
-		{"separate writes", [][]byte{v2Header(0x21, 0x11, inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2)), clientHello}, clientHello},
+		{
+			"same write as header",
+			[][]byte{
+				append(
+					v2Header(
+						0x21,
+						0x11,
+						inetBlock(
+							netip.MustParseAddr("203.0.113.7"),
+							netip.MustParseAddr("10.0.0.1"),
+							1,
+							2,
+						),
+					),
+					clientHello...),
+			},
+			clientHello,
+		},
+		{
+			"separate writes",
+			[][]byte{
+				v2Header(
+					0x21,
+					0x11,
+					inetBlock(
+						netip.MustParseAddr("203.0.113.7"),
+						netip.MustParseAddr("10.0.0.1"),
+						1,
+						2,
+					),
+				),
+				clientHello,
+			},
+			clientHello,
+		},
 		{"large body", [][]byte{v2Header(0x21, 0x21, make([]byte, 36)), large}, large},
 	}
 	for _, tt := range tests {
@@ -374,7 +447,12 @@ func TestSlowClientDoesNotBlockAccept(t *testing.T) {
 	_ = dial(t, ln) // connects and sends nothing
 
 	fast := dial(t, ln)
-	if _, err := fast.Write(proxyHeader(netip.MustParseAddrPort("203.0.113.8:5555"), netip.MustParseAddrPort("10.0.0.1:443"))); err != nil {
+	if _, err := fast.Write(
+		proxyHeader(
+			netip.MustParseAddrPort("203.0.113.8:5555"),
+			netip.MustParseAddrPort("10.0.0.1:443"),
+		),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fast.Write([]byte("hi")); err != nil {

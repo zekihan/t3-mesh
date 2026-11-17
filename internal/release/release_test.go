@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"aead.dev/minisign"
+
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
@@ -34,7 +35,21 @@ func TestVersion(t *testing.T) {
 			t.Errorf("ParseVersion(%q) succeeded", bad)
 		}
 	}
-	order := []string{"v0.9.9", "v1.0.0-alpha", "v1.0.0-alpha.1", "v1.0.0-alpha.beta", "v1.0.0-beta", "v1.0.0-beta.2", "v1.0.0-beta.11", "v1.0.0-rc.1", "v1.0.0", "v1.0.1", "v1.2.0", "v2.0.0", "v10.0.0"}
+	order := []string{
+		"v0.9.9",
+		"v1.0.0-alpha",
+		"v1.0.0-alpha.1",
+		"v1.0.0-alpha.beta",
+		"v1.0.0-beta",
+		"v1.0.0-beta.2",
+		"v1.0.0-beta.11",
+		"v1.0.0-rc.1",
+		"v1.0.0",
+		"v1.0.1",
+		"v1.2.0",
+		"v2.0.0",
+		"v10.0.0",
+	}
 	for i, a := range order {
 		if mustV(t, a).String() != a {
 			t.Errorf("round trip %s", a)
@@ -80,8 +95,16 @@ func manifestJSON(t *testing.T, version string, bin []byte) []byte {
 		Version:         version,
 		MinStateVersion: "v1.0.0",
 		Assets: []Asset{
-			{Platform: PlatformLinuxAMD64, Name: "t3-mesh-agent-linux-amd64", SHA256: hex.EncodeToString(sum[:])},
-			{Platform: PlatformDarwinARM64, Name: "t3-mesh-agent-darwin-arm64", SHA256: hex.EncodeToString(sum[:])},
+			{
+				Platform: PlatformLinuxAMD64,
+				Name:     "t3-mesh-agent-linux-amd64",
+				SHA256:   hex.EncodeToString(sum[:]),
+			},
+			{
+				Platform: PlatformDarwinARM64,
+				Name:     "t3-mesh-agent-darwin-arm64",
+				SHA256:   hex.EncodeToString(sum[:]),
+			},
 		},
 	})
 	if err != nil {
@@ -183,7 +206,11 @@ func setup(t *testing.T) (*Downloader, *fakeRelease, testKey) {
 	f := &fakeRelease{manifest: mj, sig: minisign.Sign(k.priv, mj), bin: bin}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return &Downloader{BaseURL: srv.URL + "/dl", Client: srv.Client(), Keys: []minisign.PublicKey{k.pub}}, f, k
+	return &Downloader{
+		BaseURL: srv.URL + "/dl",
+		Client:  srv.Client(),
+		Keys:    []minisign.PublicKey{k.pub},
+	}, f, k
 }
 
 func TestFetchAndDownload(t *testing.T) {
@@ -238,7 +265,11 @@ func TestFetchRejects(t *testing.T) {
 	mj := manifestJSON(t, "v1.0.0", f.bin)
 	f.manifest, f.sig = mj, minisign.Sign(k.priv, mj)
 	d.Keys = []minisign.PublicKey{k.pub}
-	if _, err := d.Fetch(ctx, "v1.2.3"); err == nil || !strings.Contains(err.Error(), "manifest is for") {
+	if _, err := d.Fetch(
+		ctx,
+		"v1.2.3",
+	); err == nil ||
+		!strings.Contains(err.Error(), "manifest is for") {
 		t.Errorf("replay accepted: %v", err)
 	}
 }
@@ -252,7 +283,13 @@ func TestDownloadRejects(t *testing.T) {
 	}
 	dest := filepath.Join(t.TempDir(), "bin")
 	f.bin = []byte("tampered")
-	if err := d.Download(ctx, m, PlatformLinuxAMD64, dest); err == nil || !strings.Contains(err.Error(), "sha256") {
+	if err := d.Download(
+		ctx,
+		m,
+		PlatformLinuxAMD64,
+		dest,
+	); err == nil ||
+		!strings.Contains(err.Error(), "sha256") {
 		t.Errorf("tampered binary accepted: %v", err)
 	}
 	if _, err := os.Stat(dest); err == nil {
@@ -281,7 +318,11 @@ func TestSizeLimit(t *testing.T) {
 	pad := make([]byte, MaxManifestSize+1)
 	f.manifest = pad
 	f.sig = minisign.Sign(k.priv, pad)
-	if _, err := d.Fetch(context.Background(), "v1.2.3"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := d.Fetch(
+		context.Background(),
+		"v1.2.3",
+	); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
 		t.Errorf("oversize manifest: %v", err)
 	}
 }
@@ -314,7 +355,13 @@ func TestStateRecordFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if err := RecordFailure(dir, "v1.0.2", "no helloack", KindDependency, t0.Add(time.Duration(i)*time.Hour)); err != nil {
+		if err := RecordFailure(
+			dir,
+			"v1.0.2",
+			"no helloack",
+			KindDependency,
+			t0.Add(time.Duration(i)*time.Hour),
+		); err != nil {
 			t.Fatal(err)
 		}
 		st, _ := LoadState(dir)
@@ -331,7 +378,8 @@ func TestStateRecordFailure(t *testing.T) {
 		t.Errorf("release failure: %+v", f)
 	}
 	fu := st.FailedUpdates()
-	if len(fu) != 2 || fu[0].Version != "v1.0.1" || !fu[1].Final || fu[1].Attempts != 3 || fu[1].Reason != "no helloack" {
+	if len(fu) != 2 || fu[0].Version != "v1.0.1" || !fu[1].Final || fu[1].Attempts != 3 ||
+		fu[1].Reason != "no helloack" {
 		t.Errorf("FailedUpdates: %+v", fu)
 	}
 	if err := RecordFailure(dir, "v1.0.3", "x", "bogus", t0); err == nil {
@@ -377,7 +425,13 @@ func TestIngestLauncherOutcome(t *testing.T) {
 	}
 	path := filepath.Join(dir, LauncherOutcomeFile)
 	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	os.WriteFile(path, []byte(`{"version":"v1.2.3","reason":"probation:no hello","kind":"dependency","at":"2026-03-04T05:06:07Z"}`), 0o600)
+	os.WriteFile(
+		path,
+		[]byte(
+			`{"version":"v1.2.3","reason":"probation:no hello","kind":"dependency","at":"2026-03-04T05:06:07Z"}`,
+		),
+		0o600,
+	)
 	if err := IngestLauncherOutcome(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +443,13 @@ func TestIngestLauncherOutcome(t *testing.T) {
 	if f.Final || f.Attempts != 1 || f.Reason != "probation:no hello" || !f.LastAttempt.Equal(at) {
 		t.Errorf("%+v", f)
 	}
-	os.WriteFile(path, []byte(`{"version":"v1.2.4","reason":"crash","kind":"release","at":"2026-03-04T05:06:07Z"}`), 0o600)
+	os.WriteFile(
+		path,
+		[]byte(
+			`{"version":"v1.2.4","reason":"crash","kind":"release","at":"2026-03-04T05:06:07Z"}`,
+		),
+		0o600,
+	)
 	if err := IngestLauncherOutcome(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +508,12 @@ func TestDecide(t *testing.T) {
 		}
 	}
 	// Exactly at the retry boundary the window has elapsed.
-	if d, _ := Decide(run, proto.Release{Version: "v1.4.0"}, st, now.Add(30*time.Minute)); d != Install {
+	if d, _ := Decide(
+		run,
+		proto.Release{Version: "v1.4.0"},
+		st,
+		now.Add(30*time.Minute),
+	); d != Install {
 		t.Error("boundary")
 	}
 	// Floor applies even if the version is not lower than running.
@@ -478,7 +543,12 @@ func TestPreconditions(t *testing.T) {
 	}()
 	now := time.Now()
 	ctx := context.Background()
-	if err := Preconditions(ctx, []string{ln.Addr().String()}, now.Add(-30*time.Second), now); err != nil {
+	if err := Preconditions(
+		ctx,
+		[]string{ln.Addr().String()},
+		now.Add(-30*time.Second),
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := Preconditions(ctx, nil, now.Add(-30*time.Second), now); err != nil {

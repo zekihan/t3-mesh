@@ -208,7 +208,10 @@ func TestDisabledIdentity(t *testing.T) {
 func TestOversized(t *testing.T) {
 	e := newEnv(t)
 	token, _, _ := e.tokens.Create("agent-a")
-	wantReject(t, e.run(t, proto.Enroll{Token: token, CSR: strings.Repeat("x", proto.MaxEnrollSize)}))
+	wantReject(
+		t,
+		e.run(t, proto.Enroll{Token: token, CSR: strings.Repeat("x", proto.MaxEnrollSize)}),
+	)
 }
 
 func TestWrongMessageType(t *testing.T) {

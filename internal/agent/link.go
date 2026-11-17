@@ -147,7 +147,15 @@ func (a *Agent) dialLink(ctx context.Context, machine, svc string) (net.Conn, er
 			return c, nil
 		}
 
-		a.log.Debug("direct dial unavailable, using tunnel", "machine", machine, "svc", svc, "err", err)
+		a.log.Debug(
+			"direct dial unavailable, using tunnel",
+			"machine",
+			machine,
+			"svc",
+			svc,
+			"err",
+			err,
+		)
 	}
 
 	return a.dialTunnel(ctx, machine, svc)

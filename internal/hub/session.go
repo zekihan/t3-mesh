@@ -106,7 +106,17 @@ func (c *session) close(reason error) {
 func (c *session) reject(rej proto.Reject) {
 	c.rejectOnce.Do(func() {
 		c.closing.Store(true)
-		c.s.log.Info("reject", "machine", c.machine, "identity", c.identity, "reason", rej.Reason, "detail", rej.Detail)
+		c.s.log.Info(
+			"reject",
+			"machine",
+			c.machine,
+			"identity",
+			c.identity,
+			"reason",
+			rej.Reason,
+			"detail",
+			rej.Detail,
+		)
 		_ = c.ctrl.Send(rej)
 		c.s.closeTrackedFor(c)
 		_ = c.conn.CloseWrite()
@@ -215,7 +225,12 @@ func (s *Server) unregister(c *session) {
 	s.kickAll()
 }
 
-func (s *Server) serveSession(ctx context.Context, conn *tls.Conn, source netip.Addr, state tls.ConnectionState) {
+func (s *Server) serveSession(
+	ctx context.Context,
+	conn *tls.Conn,
+	source netip.Addr,
+	state tls.ConnectionState,
+) {
 	snap := s.cfg.Current()
 
 	adm, err := s.admit(snap, state.PeerCertificates, s.now())
@@ -225,7 +240,16 @@ func (s *Server) serveSession(ctx context.Context, conn *tls.Conn, source netip.
 		return
 	}
 
-	log := s.log.With("machine", adm.machine, "identity", adm.identity, "fingerprint", adm.fingerprint, "source", source.String())
+	log := s.log.With(
+		"machine",
+		adm.machine,
+		"identity",
+		adm.identity,
+		"fingerprint",
+		adm.fingerprint,
+		"source",
+		source.String(),
+	)
 
 	ymx, err := yamux.Server(conn, tunnel.YamuxConfig())
 	if err != nil {
@@ -262,17 +286,28 @@ func (s *Server) serveSession(ctx context.Context, conn *tls.Conn, source netip.
 	switch {
 	case err != nil:
 		log.Warn("reject", "reason", "newest-leaf lookup failed", "error", err.Error())
-		_ = ctrl.Send(proto.Reject{Reason: proto.RejectOther, Detail: "certificate check unavailable"})
+		_ = ctrl.Send(
+			proto.Reject{Reason: proto.RejectOther, Detail: "certificate check unavailable"},
+		)
 
 		return
 	case !ok:
 		log.Info("reject", "reason", proto.RejectLeafNotNewest)
 		s.warn(adm.machine, "tunnel refused: leaf "+adm.fingerprint+" is not the newest issued")
-		_ = ctrl.Send(proto.Reject{Reason: proto.RejectLeafNotNewest, Detail: "a newer certificate was issued for this identity"})
+		_ = ctrl.Send(
+			proto.Reject{
+				Reason: proto.RejectLeafNotNewest,
+				Detail: "a newer certificate was issued for this identity",
+			},
+		)
 
 		return
 	case noRecord:
-		log.Warn("no issuance record for leaf; admitting", "reason", "issuer has no record for identity")
+		log.Warn(
+			"no issuance record for leaf; admitting",
+			"reason",
+			"issuer has no record for identity",
+		)
 		s.warn(adm.machine, "no issuance record for "+adm.identity+"; leaf admitted unchecked")
 	}
 
@@ -296,7 +331,9 @@ func (s *Server) serveSession(ctx context.Context, conn *tls.Conn, source netip.
 	s.mu.Unlock()
 
 	for _, old := range s.register(sess) {
-		old.reject(proto.Reject{Reason: proto.RejectOther, Detail: "too many sessions for this machine"})
+		old.reject(
+			proto.Reject{Reason: proto.RejectOther, Detail: "too many sessions for this machine"},
+		)
 	}
 
 	defer sess.close(errors.New("session ended"))
@@ -324,7 +361,13 @@ func (s *Server) serveSession(ctx context.Context, conn *tls.Conn, source netip.
 	sess.close(context.Cause(sctx))
 	wg.Wait()
 
-	log.Info("disconnect", "duration", s.now().Sub(sess.accepted).String(), "reason", fmt.Sprint(sess.closeErr))
+	log.Info(
+		"disconnect",
+		"duration",
+		s.now().Sub(sess.accepted).String(),
+		"reason",
+		fmt.Sprint(sess.closeErr),
+	)
 }
 
 func readHello(ctx context.Context, ctrl *tunnel.Control) (proto.Hello, error) {
@@ -412,12 +455,31 @@ func serviceDiff(announced, configured []string) (missing, unexpected []string) 
 
 func (c *session) logConnect(snap *hubconfig.Snapshot) {
 	path := pathName(c.home)
-	c.log.Info("connect", "path", path, "version", c.hello.Version, "services", c.hello.Services, "notAfter", c.notAfter.UTC().Format(time.RFC3339))
+	c.log.Info(
+		"connect",
+		"path",
+		path,
+		"version",
+		c.hello.Version,
+		"services",
+		c.hello.Services,
+		"notAfter",
+		c.notAfter.UTC().Format(time.RFC3339),
+	)
 
 	missing, unexpected := serviceDiff(c.hello.Services, snap.Services(c.machine))
 	if len(missing) > 0 || len(unexpected) > 0 {
-		c.log.Warn("announced services differ from configuration", "missing", missing, "unexpected", unexpected)
-		c.s.warn(c.machine, fmt.Sprintf("announced services differ: missing=%v unexpected=%v", missing, unexpected))
+		c.log.Warn(
+			"announced services differ from configuration",
+			"missing",
+			missing,
+			"unexpected",
+			unexpected,
+		)
+		c.s.warn(
+			c.machine,
+			fmt.Sprintf("announced services differ: missing=%v unexpected=%v", missing, unexpected),
+		)
 	}
 }
 
@@ -617,7 +679,12 @@ func (c *session) controlLoop() {
 			c.s.recordStatus(c, m)
 		case proto.Renew:
 			if !c.renewing.CompareAndSwap(false, true) {
-				_ = c.ctrl.Send(proto.Reject{Reason: proto.RejectRenewFailed, Detail: "renewal already in progress"})
+				_ = c.ctrl.Send(
+					proto.Reject{
+						Reason: proto.RejectRenewFailed,
+						Detail: "renewal already in progress",
+					},
+				)
 
 				continue
 			}

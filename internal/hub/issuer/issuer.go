@@ -113,7 +113,9 @@ func New(cfg Config) (*K8s, error) {
 	if base == "" {
 		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
 		if host == "" || port == "" {
-			return nil, errors.New("issuer: no APIServer configured and KUBERNETES_SERVICE_HOST/PORT unset")
+			return nil, errors.New(
+				"issuer: no APIServer configured and KUBERNETES_SERVICE_HOST/PORT unset",
+			)
 		}
 		base = "https://" + net.JoinHostPort(host, port)
 	}
@@ -183,10 +185,12 @@ type certificateRequestList struct {
 }
 
 func (k *K8s) collectionURL() string {
-	return k.base + "/apis/cert-manager.io/v1/namespaces/" + url.PathEscape(k.cfg.Namespace) + "/certificaterequests"
+	return k.base + "/apis/cert-manager.io/v1/namespaces/" + url.PathEscape(
+		k.cfg.Namespace,
+	) + "/certificaterequests"
 }
 
-func (k *K8s) do(ctx context.Context, method, u string, body any, out any) error {
+func (k *K8s) do(ctx context.Context, method, u string, body, out any) error {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -222,7 +226,13 @@ func (k *K8s) do(ctx context.Context, method, u string, body any, out any) error
 		if len(msg) > 512 {
 			msg = msg[:512]
 		}
-		return fmt.Errorf("%s %s: unexpected status %d: %s", method, req.URL.Path, resp.StatusCode, msg)
+		return fmt.Errorf(
+			"%s %s: unexpected status %d: %s",
+			method,
+			req.URL.Path,
+			resp.StatusCode,
+			msg,
+		)
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -290,18 +300,33 @@ func (k *K8s) Issue(ctx context.Context, identity string, csrPEM []byte) ([]byte
 		case <-t.C:
 		}
 		cur = certificateRequest{}
-		if err := k.do(ctx, http.MethodGet, k.collectionURL()+"/"+url.PathEscape(name), nil, &cur); err != nil {
+		if err := k.do(
+			ctx,
+			http.MethodGet,
+			k.collectionURL()+"/"+url.PathEscape(name),
+			nil,
+			&cur,
+		); err != nil {
 			return nil, nil, fmt.Errorf("get certificate request %s: %w", name, err)
 		}
 	}
 }
 
-func (k *K8s) evaluate(identity, name string, cr *certificateRequest) (bool, []byte, []byte, error) {
+func (k *K8s) evaluate(
+	identity, name string,
+	cr *certificateRequest,
+) (bool, []byte, []byte, error) {
 	for _, c := range cr.Status.Conditions {
 		denied := c.Type == "Denied" && c.Status == "True"
-		failed := c.Type == "Ready" && c.Status == "False" && (c.Reason == "Failed" || c.Reason == "Denied")
+		failed := c.Type == "Ready" && c.Status == "False" &&
+			(c.Reason == "Failed" || c.Reason == "Denied")
 		if denied || failed {
-			return false, nil, nil, fmt.Errorf("certificate request %s %s: %s", name, strings.ToLower(firstNonEmpty(c.Reason, c.Type)), c.Message)
+			return false, nil, nil, fmt.Errorf(
+				"certificate request %s %s: %s",
+				name,
+				strings.ToLower(firstNonEmpty(c.Reason, c.Type)),
+				c.Message,
+			)
 		}
 	}
 	for _, c := range cr.Status.Conditions {
@@ -313,7 +338,15 @@ func (k *K8s) evaluate(identity, name string, cr *certificateRequest) (bool, []b
 			if err != nil {
 				return false, nil, nil, fmt.Errorf("certificate request %s: %w", name, err)
 			}
-			k.log.Info("certificate issued", "identity", identity, "fingerprint", fp, "request", name)
+			k.log.Info(
+				"certificate issued",
+				"identity",
+				identity,
+				"fingerprint",
+				fp,
+				"request",
+				name,
+			)
 			return true, cr.Status.Certificate, cr.Status.CA, nil
 		}
 	}
@@ -374,7 +407,8 @@ func (k *K8s) Newest(ctx context.Context, identity string) (string, error) {
 		if err != nil {
 			continue
 		}
-		if best == nil || ts.After(bestTime) || (ts.Equal(bestTime) && it.Metadata.Name > best.Metadata.Name) {
+		if best == nil || ts.After(bestTime) ||
+			(ts.Equal(bestTime) && it.Metadata.Name > best.Metadata.Name) {
 			best, bestTime = it, ts
 		}
 	}

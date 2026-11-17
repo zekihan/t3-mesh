@@ -27,7 +27,9 @@ func (c *session) handleRenew(req proto.Renew) {
 			detail = "issuance failed"
 		}
 
-		_ = c.ctrl.Send(proto.Reject{Reason: proto.RejectRenewFailed, Detail: truncate(detail, 200)})
+		_ = c.ctrl.Send(
+			proto.Reject{Reason: proto.RejectRenewFailed, Detail: truncate(detail, 200)},
+		)
 
 		return
 	}
@@ -53,7 +55,10 @@ func (c *session) renew(req proto.Renew) (proto.Renewed, error) {
 	}
 
 	if identity != c.identity {
-		return proto.Renewed{}, pubErr("CSR identity %q does not match the session identity", identity)
+		return proto.Renewed{}, pubErr(
+			"CSR identity %q does not match the session identity",
+			identity,
+		)
 	}
 
 	csrKey, ok := csr.PublicKey.(*ecdsa.PublicKey)
@@ -106,7 +111,17 @@ func (c *session) renew(req proto.Renew) (proto.Renewed, error) {
 	}
 	c.s.mu.Unlock()
 
-	c.log.Info("certificate issued", "identity", identity, "fingerprint", fp, "via", "renewal", "notAfter", leaf.NotAfter.UTC().Format(time.RFC3339))
+	c.log.Info(
+		"certificate issued",
+		"identity",
+		identity,
+		"fingerprint",
+		fp,
+		"via",
+		"renewal",
+		"notAfter",
+		leaf.NotAfter.UTC().Format(time.RFC3339),
+	)
 	c.log.Info("renewal", "newFingerprint", fp, "oldFingerprint", c.fingerprint)
 
 	return proto.Renewed{Certificate: string(certPEM), Chain: string(chainPEM)}, nil

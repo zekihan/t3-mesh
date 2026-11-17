@@ -31,7 +31,8 @@ var ErrNoLink = errors.New("launcher: link does not exist")
 type Layout struct{ Dir string }
 
 func validVersion(v string) error {
-	if v == "" || v == "." || v == ".." || strings.ContainsAny(v, "/\\\x00") || strings.HasPrefix(v, ".") {
+	if v == "" || v == "." || v == ".." || strings.ContainsAny(v, "/\\\x00") ||
+		strings.HasPrefix(v, ".") {
 		return fmt.Errorf("launcher: invalid version %q", v)
 	}
 	return nil

@@ -34,18 +34,34 @@ func TestParseProcRoute(t *testing.T) {
 }
 
 func TestParseProcARP(t *testing.T) {
-	mac, err := parseProcARP(strings.NewReader(arpSample), netip.MustParseAddr("192.168.0.2"), "eth0")
+	mac, err := parseProcARP(
+		strings.NewReader(arpSample),
+		netip.MustParseAddr("192.168.0.2"),
+		"eth0",
+	)
 	if err != nil || mac.String() != "aa:bb:cc:dd:ee:02" {
 		t.Fatalf("mac=%v err=%v", mac, err)
 	}
-	mac, err = parseProcARP(strings.NewReader(arpSample), netip.MustParseAddr("192.168.0.1"), "eth0")
+	mac, err = parseProcARP(
+		strings.NewReader(arpSample),
+		netip.MustParseAddr("192.168.0.1"),
+		"eth0",
+	)
 	if err != nil || mac.String() != "aa:bb:cc:dd:ee:01" {
 		t.Fatalf("fallback mac=%v err=%v", mac, err)
 	}
-	if _, err = parseProcARP(strings.NewReader(arpSample), netip.MustParseAddr("192.168.0.3"), ""); err != ErrNoMAC {
+	if _, err = parseProcARP(
+		strings.NewReader(arpSample),
+		netip.MustParseAddr("192.168.0.3"),
+		"",
+	); err != ErrNoMAC {
 		t.Fatalf("incomplete entry err = %v", err)
 	}
-	if _, err = parseProcARP(strings.NewReader(arpSample), netip.MustParseAddr("10.0.0.1"), ""); err != ErrNoMAC {
+	if _, err = parseProcARP(
+		strings.NewReader(arpSample),
+		netip.MustParseAddr("10.0.0.1"),
+		"",
+	); err != ErrNoMAC {
 		t.Fatalf("missing entry err = %v", err)
 	}
 }
@@ -58,7 +74,10 @@ func TestAddrsIn(t *testing.T) {
 		netip.MustParseAddr("::ffff:192.168.2.9"),
 		netip.MustParseAddr("2001:db8::1"),
 	}
-	pfx := []netip.Prefix{netip.MustParsePrefix("192.168.0.0/22"), netip.MustParsePrefix("fd12:3456:789a:1::/64")}
+	pfx := []netip.Prefix{
+		netip.MustParsePrefix("192.168.0.0/22"),
+		netip.MustParsePrefix("fd12:3456:789a:1::/64"),
+	}
 	got := AddrsIn(addrs, pfx)
 	want := []string{"192.168.1.5", "fd12:3456:789a:1::7", "192.168.2.9"}
 	if len(got) != len(want) {
@@ -144,7 +163,11 @@ func TestWakeDetectionFakeClock(t *testing.T) {
 	fc := &fakeClock{}
 	fc.set(reading{Wall: base})
 	tick := make(chan time.Time)
-	out := watch(ctx, nil, config{clock: fc, tick: tick, slack: 5 * time.Second, debounce: time.Millisecond})
+	out := watch(
+		ctx,
+		nil,
+		config{clock: fc, tick: tick, slack: 5 * time.Second, debounce: time.Millisecond},
+	)
 
 	step := func(wall, mono time.Duration) {
 		fc.set(reading{Wall: base.Add(wall), Mono: mono})

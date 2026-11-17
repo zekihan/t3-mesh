@@ -75,7 +75,11 @@ func NewCA(t testing.TB, name string) *CA {
 		t.Fatalf("parse CA: %v", err)
 	}
 
-	return &CA{Cert: cert, Key: key, CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
+	return &CA{
+		Cert:    cert,
+		Key:     key,
+		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+	}
 }
 
 func (ca *CA) issue(t testing.TB, tmpl *x509.Certificate, pub *ecdsa.PublicKey) []byte {
@@ -110,7 +114,12 @@ func leafPair(t testing.TB, der []byte, key *ecdsa.PrivateKey) (tls.Certificate,
 
 // IssueIdentity issues a leaf with one URI SAN for identity, valid from an
 // hour ago until notAfter.
-func (ca *CA) IssueIdentity(t testing.TB, identity string, server bool, notAfter time.Time) (tls.Certificate, []byte, []byte) {
+func (ca *CA) IssueIdentity(
+	t testing.TB,
+	identity string,
+	server bool,
+	notAfter time.Time,
+) (tls.Certificate, []byte, []byte) {
 	t.Helper()
 
 	uri, err := url.Parse(policy.IdentityURI(identity))

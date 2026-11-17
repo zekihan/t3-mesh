@@ -129,7 +129,9 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 
-	e.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) { return e.ca.SignCSR(csr, 24*time.Hour) }}
+	e.fake = &issuertest.Fake{
+		Sign: func(csr []byte) ([]byte, []byte, error) { return e.ca.SignCSR(csr, 24*time.Hour) },
+	}
 	e.pool = x509.NewCertPool()
 	e.pool.AddCert(e.ca.Cert)
 
@@ -223,7 +225,14 @@ func backendHandler(body string) http.Handler {
 			}
 		}
 
-		_, _ = fmt.Fprintf(w, "%s host=%s origin=%s mtls=%d", body, r.Host, r.Header.Get("Origin"), len(mt))
+		_, _ = fmt.Fprintf(
+			w,
+			"%s host=%s origin=%s mtls=%d",
+			body,
+			r.Host,
+			r.Header.Get("Origin"),
+			len(mt),
+		)
 	})
 	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "first\n")
@@ -242,7 +251,10 @@ func backendHandler(body string) http.Handler {
 
 		defer func() { _ = conn.Close() }()
 
-		_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+		_, _ = io.WriteString(
+			conn,
+			"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+		)
 		_, _ = io.Copy(conn, conn)
 	})
 
@@ -251,7 +263,12 @@ func backendHandler(body string) http.Handler {
 
 // dial connects without completing the tunnel protocol.
 func (e *env) dial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
-	cfg := &tls.Config{RootCAs: e.pool, ServerName: "localhost", MinVersion: tls.VersionTLS13, NextProtos: []string{alpn}}
+	cfg := &tls.Config{
+		RootCAs:    e.pool,
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{alpn},
+	}
 	if cert != nil {
 		cfg.Certificates = []tls.Certificate{*cert}
 	}
@@ -310,9 +327,15 @@ func (e *env) connectWith(identity string, cert tls.Certificate, body string) (*
 	}
 
 	a := &agent{
-		t: e.t, identity: identity, cert: cert, fp: pki.Fingerprint(cert.Leaf), conn: conn, ymx: ymx,
-		ctrl: tunnel.NewControl(st), msgs: make(chan proto.Message, 64),
-		backend: httptest.NewServer(backendHandler(body)),
+		t:        e.t,
+		identity: identity,
+		cert:     cert,
+		fp:       pki.Fingerprint(cert.Leaf),
+		conn:     conn,
+		ymx:      ymx,
+		ctrl:     tunnel.NewControl(st),
+		msgs:     make(chan proto.Message, 64),
+		backend:  httptest.NewServer(backendHandler(body)),
 	}
 	e.t.Cleanup(func() { a.close() })
 
@@ -424,7 +447,11 @@ func (a *agent) waitClosed() {
 	}
 }
 
-func (e *env) get(host, viewer, fp string, notAfter time.Time, path string) (*http.Response, string) {
+func (e *env) get(
+	host, viewer, fp string,
+	notAfter time.Time,
+	path string,
+) (*http.Response, string) {
 	e.t.Helper()
 
 	req, _ := http.NewRequest(http.MethodGet, e.viewer.URL+path, nil)
@@ -501,7 +528,9 @@ func TestViewerUpgrade(t *testing.T) {
 	setViewerHeaders(hdr, "z-phone", viewerFP, farFuture)
 
 	var sb strings.Builder
-	sb.WriteString("GET /ws HTTP/1.1\r\nHost: t3.devbox.mesh.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n")
+	sb.WriteString(
+		"GET /ws HTTP/1.1\r\nHost: t3.devbox.mesh.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n",
+	)
 	_ = hdr.Write(&sb)
 	sb.WriteString("\r\n")
 
@@ -667,7 +696,8 @@ func TestNewestSessionWins(t *testing.T) {
 	var st statusDoc
 	getJSON(t, e.ops.URL+"/status", &st)
 
-	if st.Machines["devbox"].Sessions != 2 || !st.Machines["devbox"].Connected || st.Machines["devbox"].Path != "LAN" {
+	if st.Machines["devbox"].Sessions != 2 || !st.Machines["devbox"].Connected ||
+		st.Machines["devbox"].Path != "LAN" {
 		t.Fatalf("status = %+v", st.Machines["devbox"])
 	}
 }
@@ -734,7 +764,13 @@ func TestRevocationBlockedViewerLeaf(t *testing.T) {
 	e.setConfig(cfgOpts{blocked: []string{viewerFP}})
 	expectStreamClosed(t, r)
 
-	if resp, _ := e.get("t3.devbox.mesh.test", "z-phone", viewerFP, farFuture, "/hdr"); resp.StatusCode != 403 {
+	if resp, _ := e.get(
+		"t3.devbox.mesh.test",
+		"z-phone",
+		viewerFP,
+		farFuture,
+		"/hdr",
+	); resp.StatusCode != 403 {
 		t.Fatalf("blocked viewer got %d", resp.StatusCode)
 	}
 }
@@ -837,7 +873,8 @@ func TestRenewal(t *testing.T) {
 	a := e.connect("agent-devbox", "devbox-body")
 
 	// Same key, wrong identity: rejected, session stays up.
-	if rj, ok := a.renew(a.cert.PrivateKey.(*ecdsa.PrivateKey), "agent-devbox").(proto.Reject); !ok || rj.Reason != proto.RejectRenewFailed {
+	if rj, ok := a.renew(a.cert.PrivateKey.(*ecdsa.PrivateKey), "agent-devbox").(proto.Reject); !ok ||
+		rj.Reason != proto.RejectRenewFailed {
 		t.Fatalf("same-key renewal = %+v", rj)
 	}
 
@@ -846,7 +883,8 @@ func TestRenewal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rj, ok := a.renew(key, "agent-z-arch").(proto.Reject); !ok || rj.Reason != proto.RejectRenewFailed {
+	if rj, ok := a.renew(key, "agent-z-arch").(proto.Reject); !ok ||
+		rj.Reason != proto.RejectRenewFailed {
 		t.Fatalf("foreign-identity renewal = %+v", rj)
 	}
 
@@ -866,7 +904,16 @@ func TestRenewal(t *testing.T) {
 	}
 
 	// Session still works; the new leaf is admitted, the old one is not.
-	if _, body := e.get("t3.devbox.mesh.test", "z-phone", viewerFP, farFuture, "/hdr"); !strings.HasPrefix(body, "devbox-body") {
+	if _, body := e.get(
+		"t3.devbox.mesh.test",
+		"z-phone",
+		viewerFP,
+		farFuture,
+		"/hdr",
+	); !strings.HasPrefix(
+		body,
+		"devbox-body",
+	) {
 		t.Fatalf("session broken after renewal: %q", body)
 	}
 
@@ -887,17 +934,21 @@ func TestUpdatesPeersAndRelease(t *testing.T) {
 	e := newEnv(t)
 	arch := e.connect("agent-z-arch", "arch-body")
 
-	if len(arch.ack.Peers.Peers) != 1 || arch.ack.Peers.Peers[0].Machine != "devbox" || arch.ack.Peers.Peers[0].Home {
+	if len(arch.ack.Peers.Peers) != 1 || arch.ack.Peers.Peers[0].Machine != "devbox" ||
+		arch.ack.Peers.Peers[0].Home {
 		t.Fatalf("initial peers = %+v", arch.ack.Peers)
 	}
 
-	if !arch.ack.Home || len(arch.ack.HomeCIDRs) != 1 || arch.ack.Release.Version != "v0.3.0" || arch.ack.Machine != "z-arch" {
+	if !arch.ack.Home || len(arch.ack.HomeCIDRs) != 1 || arch.ack.Release.Version != "v0.3.0" ||
+		arch.ack.Machine != "z-arch" {
 		t.Fatalf("ack = %+v", arch.ack)
 	}
 
 	e.connect("agent-devbox", "devbox-body")
 
-	m := arch.next(func(m proto.Message) bool { u, ok := m.(proto.Update); return ok && u.Peers != nil })
+	m := arch.next(
+		func(m proto.Message) bool { u, ok := m.(proto.Update); return ok && u.Peers != nil },
+	)
 
 	p := m.(proto.Update).Peers.Peers[0]
 	if !p.Home || p.DirectPort != 27400 || len(p.LANAddrs) != 1 || p.LANAddrs[0] != "192.168.1.5" {
@@ -912,7 +963,9 @@ func TestUpdatesPeersAndRelease(t *testing.T) {
 	}
 
 	e.setConfig(cfgOpts{release: "v0.4.0", disabled: []string{"z-old"}})
-	arch.next(func(m proto.Message) bool { u, ok := m.(proto.Update); return ok && u.Revocations != nil })
+	arch.next(
+		func(m proto.Message) bool { u, ok := m.(proto.Update); return ok && u.Revocations != nil },
+	)
 }
 
 func status(t *testing.T, e *env, name string) int {

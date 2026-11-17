@@ -113,7 +113,10 @@ func (h *Handler) writeReject(conn net.Conn, detail string) {
 	_ = proto.WriteMessage(conn, proto.Reject{Reason: proto.RejectEnrollFailed, Detail: detail})
 }
 
-func (h *Handler) exchange(ctx context.Context, conn net.Conn) (identity, fp string, resp proto.Enrolled, err error) {
+func (h *Handler) exchange(
+	ctx context.Context,
+	conn net.Conn,
+) (identity, fp string, resp proto.Enrolled, err error) {
 	msg, err := proto.ReadMessage(conn, proto.MaxEnrollSize)
 	if err != nil {
 		return "", "", resp, reject("bad request", err)
@@ -135,7 +138,10 @@ func (h *Handler) exchange(ctx context.Context, conn net.Conn) (identity, fp str
 	}
 
 	if tokenIdentity != csrIdentity {
-		return csrIdentity, "", resp, reject("identity mismatch", fmt.Errorf("token bound to %q", tokenIdentity))
+		return csrIdentity, "", resp, reject(
+			"identity mismatch",
+			fmt.Errorf("token bound to %q", tokenIdentity),
+		)
 	}
 
 	identity = csrIdentity
@@ -165,7 +171,11 @@ func (h *Handler) exchange(ctx context.Context, conn net.Conn) (identity, fp str
 	return identity, fp, proto.Enrolled{Certificate: string(certPEM), Chain: string(chainPEM)}, nil
 }
 
-func verifyLeaf(certPEM []byte, identity string, csr *x509.CertificateRequest) (*x509.Certificate, error) {
+func verifyLeaf(
+	certPEM []byte,
+	identity string,
+	csr *x509.CertificateRequest,
+) (*x509.Certificate, error) {
 	certs, err := pki.ParseCertsPEM(certPEM)
 	if err != nil {
 		return nil, fmt.Errorf("parse issued certificate: %w", err)

@@ -128,13 +128,22 @@ func (s *Server) serveStatus(w http.ResponseWriter, _ *http.Request) {
 	_ = enc.Encode(doc)
 }
 
-func (s *Server) machineStatusLocked(snap *hubconfig.Snapshot, name string, mc hubconfig.Machine, now time.Time) machineStatus {
+func (s *Server) machineStatusLocked(
+	snap *hubconfig.Snapshot,
+	name string,
+	mc hubconfig.Machine,
+	now time.Time,
+) machineStatus {
 	ms := s.machines[name]
 	if ms == nil {
 		ms = &machineState{name: name}
 	}
 
-	out := machineStatus{Identity: mc.Identity, Warnings: slices.Clone(ms.warnings), FailedUpdates: []proto.FailedUpdate{}}
+	out := machineStatus{
+		Identity:      mc.Identity,
+		Warnings:      slices.Clone(ms.warnings),
+		FailedUpdates: []proto.FailedUpdate{},
+	}
 	if out.Warnings == nil {
 		out.Warnings = []string{}
 	}
@@ -232,13 +241,21 @@ func normVersion(v string) string { return strings.TrimPrefix(strings.TrimSpace(
 // currently desired release version, or when the connected agent has run a
 // version other than the desired one for over an hour (counted from the later
 // of its connection and the desired version becoming desired).
-func (s *Server) updateFailedLocked(snap *hubconfig.Snapshot, ms *machineState, now time.Time) (bool, string) {
+func (s *Server) updateFailedLocked(
+	snap *hubconfig.Snapshot,
+	ms *machineState,
+	now time.Time,
+) (bool, string) {
 	desired := snap.Release.Version
 
 	if st := ms.status; st != nil {
 		for _, fu := range st.FailedUpdates {
 			if normVersion(fu.Version) == normVersion(desired) {
-				return true, fmt.Sprintf("agent reports failed update to %s: %s", fu.Version, fu.Reason)
+				return true, fmt.Sprintf(
+					"agent reports failed update to %s: %s",
+					fu.Version,
+					fu.Reason,
+				)
 			}
 		}
 	}
@@ -254,7 +271,12 @@ func (s *Server) updateFailedLocked(snap *hubconfig.Snapshot, ms *machineState, 
 	}
 
 	if now.Sub(since) > versionLagAfter {
-		return true, fmt.Sprintf("agent runs %s, desired %s for over %s", ms.version, desired, versionLagAfter)
+		return true, fmt.Sprintf(
+			"agent runs %s, desired %s for over %s",
+			ms.version,
+			desired,
+			versionLagAfter,
+		)
 	}
 
 	return false, ""

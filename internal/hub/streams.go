@@ -125,7 +125,13 @@ func (s *Server) handleAgentStream(src *session, st *yamux.Stream) {
 		return
 	}
 
-	pol := policy.Session{Identity: src.identity, Fingerprint: src.fingerprint, NotAfter: src.notAfter, Svc: svc, Machine: machine}
+	pol := policy.Session{
+		Identity:    src.identity,
+		Fingerprint: src.fingerprint,
+		NotAfter:    src.notAfter,
+		Svc:         svc,
+		Machine:     machine,
+	}
 	log := src.log.With("target", hdr.To)
 
 	if err := s.checkNow(pol); err != nil {

@@ -158,7 +158,12 @@ func newEnv(t *testing.T, behaviours map[string]string, cur, kg string) *env {
 	if err := l.SetCurrent(cur); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{l: l, state: t.TempDir(), events: make(chan string, 256), reexec: make(chan []string, 1)}
+	e := &env{
+		l:      l,
+		state:  t.TempDir(),
+		events: make(chan string, 256),
+		reexec: make(chan []string, 1),
+	}
 	e.cfg = Config{
 		Layout:            l,
 		StateDir:          e.state,
@@ -172,7 +177,7 @@ func newEnv(t *testing.T, behaviours map[string]string, cur, kg string) *env {
 		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Command:           nil,
 		ReexecArgs:        []string{"launcher", "--x"},
-		Exec: func(p string, argv []string, _ []string) error {
+		Exec: func(p string, argv, _ []string) error {
 			e.reexec <- append([]string{p}, argv...)
 			return nil
 		},
@@ -245,14 +250,37 @@ func TestRollbackScenarios(t *testing.T) {
 		tweak                         func(*Config)
 	}{
 		{"crash", BehaviourCrash, "crash", KindRelease, nil},
-		{"startup", BehaviourSilent, "startup-check", KindRelease, func(c *Config) { c.StartupTimeout = 200 * time.Millisecond }},
-		{"liveness", BehaviourHang, "liveness", KindRelease, func(c *Config) { c.AliveTimeout = 200 * time.Millisecond }},
-		{"liveness-stubborn", BehaviourStubborn, "liveness", KindRelease, func(c *Config) { c.AliveTimeout = 200 * time.Millisecond }},
+		{
+			"startup",
+			BehaviourSilent,
+			"startup-check",
+			KindRelease,
+			func(c *Config) { c.StartupTimeout = 200 * time.Millisecond },
+		},
+		{
+			"liveness",
+			BehaviourHang,
+			"liveness",
+			KindRelease,
+			func(c *Config) { c.AliveTimeout = 200 * time.Millisecond },
+		},
+		{
+			"liveness-stubborn",
+			BehaviourStubborn,
+			"liveness",
+			KindRelease,
+			func(c *Config) { c.AliveTimeout = 200 * time.Millisecond },
+		},
 		{"fail", BehaviourFail, "selftest failure", KindDependency, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, map[string]string{"good": BehaviourOK, "bad": tc.behaviour}, "bad", "good")
+			e := newEnv(
+				t,
+				map[string]string{"good": BehaviourOK, "bad": tc.behaviour},
+				"bad",
+				"good",
+			)
 			if tc.tweak != nil {
 				tc.tweak(&e.cfg)
 			}
@@ -294,7 +322,12 @@ func TestPromoteReexec(t *testing.T) {
 }
 
 func TestHandoverToStagedVersion(t *testing.T) {
-	e := newEnv(t, map[string]string{"good": BehaviourHandover, "new": BehaviourPromote}, "good", "good")
+	e := newEnv(
+		t,
+		map[string]string{"good": BehaviourHandover, "new": BehaviourPromote},
+		"good",
+		"good",
+	)
 	_, done := e.start(t)
 	e.waitEvent(t, "ready")
 	if err := e.l.SetCurrent("new"); err != nil {
@@ -353,7 +386,8 @@ func TestHealthNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Ready() != nil || h.Alive() != nil || h.Promote() != nil || h.Fail("x", KindRelease) != nil {
+	if h.Ready() != nil || h.Alive() != nil || h.Promote() != nil ||
+		h.Fail("x", KindRelease) != nil {
 		t.Fatal("noop health errored")
 	}
 	t.Setenv(HealthFDEnv, "abc")

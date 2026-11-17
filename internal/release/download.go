@@ -120,7 +120,11 @@ func (d *Downloader) open(ctx context.Context, version, name string) (io.ReadClo
 // Download fetches the binary for platform listed in m (which must come from
 // Fetch or VerifyManifest), checks its SHA-256 and atomically writes it to
 // destPath with mode 0755.
-func (d *Downloader) Download(ctx context.Context, m Manifest, platform, destPath string) (err error) {
+func (d *Downloader) Download(
+	ctx context.Context,
+	m Manifest,
+	platform, destPath string,
+) (err error) {
 	a, ok := m.Asset(platform)
 	if !ok {
 		return fmt.Errorf("release %s has no asset for %s", m.Version, platform)

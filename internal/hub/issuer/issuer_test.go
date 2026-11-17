@@ -31,13 +31,22 @@ func testCert(t *testing.T, cn string) (pemBytes []byte, fp string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn}, NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour)}
+	tpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(der)
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), hex.EncodeToString(sum[:])
+	return pem.EncodeToMemory(
+			&pem.Block{Type: "CERTIFICATE", Bytes: der},
+		), hex.EncodeToString(
+			sum[:],
+		)
 }
 
 func newIssuer(t *testing.T, srv *httptest.Server, tokenPath string, logger *slog.Logger) *K8s {
@@ -98,7 +107,11 @@ func TestIssuePollsToReady(t *testing.T) {
 					"conditions": []map[string]string{{"type": "Ready", "status": "True"}},
 				}
 			} else {
-				resp["status"] = map[string]any{"conditions": []map[string]string{{"type": "Ready", "status": "False", "reason": "Pending"}}}
+				resp["status"] = map[string]any{
+					"conditions": []map[string]string{
+						{"type": "Ready", "status": "False", "reason": "Pending"},
+					},
+				}
 			}
 			_ = json.NewEncoder(w).Encode(resp)
 		default:
@@ -135,7 +148,8 @@ func TestIssuePollsToReady(t *testing.T) {
 		t.Errorf("generateName %v", meta["generateName"])
 	}
 	labels := meta["labels"].(map[string]any)
-	if labels["t3-mesh.noqer.com/identity"] != "agent-z-mac" || labels["app.kubernetes.io/managed-by"] != "t3-mesh-hub" {
+	if labels["t3-mesh.noqer.com/identity"] != "agent-z-mac" ||
+		labels["app.kubernetes.io/managed-by"] != "t3-mesh-hub" {
 		t.Errorf("labels %v", labels)
 	}
 	spec := posted["spec"].(map[string]any)
@@ -150,7 +164,8 @@ func TestIssuePollsToReady(t *testing.T) {
 		t.Errorf("issuerRef %v", ref)
 	}
 	usages := spec["usages"].([]any)
-	if len(usages) != 3 || usages[0] != "client auth" || usages[1] != "server auth" || usages[2] != "digital signature" {
+	if len(usages) != 3 || usages[0] != "client auth" || usages[1] != "server auth" ||
+		usages[2] != "digital signature" {
 		t.Errorf("usages %v", usages)
 	}
 }
@@ -162,14 +177,17 @@ func TestIssueDenied(t *testing.T) {
 		"ready-denied": {"type": "Ready", "status": "False", "reason": "Denied", "message": "no policy allows it"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost {
-					w.WriteHeader(http.StatusCreated)
-					_, _ = w.Write([]byte(`{"metadata":{"name":"x"}}`))
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "x"}, "status": map[string]any{"conditions": []any{cond}}})
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodPost {
+						w.WriteHeader(http.StatusCreated)
+						_, _ = w.Write([]byte(`{"metadata":{"name":"x"}}`))
+						return
+					}
+					_ = json.NewEncoder(w).
+						Encode(map[string]any{"metadata": map[string]any{"name": "x"}, "status": map[string]any{"conditions": []any{cond}}})
+				}),
+			)
 			defer srv.Close()
 			k := newIssuer(t, srv, tokenFile(t, "tok"), nil)
 			_, _, err := k.Issue(context.Background(), "agent-a", []byte("csr"))
@@ -228,7 +246,13 @@ func TestNewestOrdering(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.Query().Get("labelSelector")
 		item := func(name, ts string, cert []byte) map[string]any {
-			m := map[string]any{"metadata": map[string]any{"name": name, "creationTimestamp": ts, "labels": map[string]string{LabelIdentity: "agent-a"}}}
+			m := map[string]any{
+				"metadata": map[string]any{
+					"name":              name,
+					"creationTimestamp": ts,
+					"labels":            map[string]string{LabelIdentity: "agent-a"},
+				},
+			}
 			if cert != nil {
 				m["status"] = map[string]any{"certificate": cert}
 			}
@@ -299,13 +323,25 @@ func TestNewValidation(t *testing.T) {
 	}
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")
-	_, err := New(Config{Namespace: "n", Issuer: IssuerRef{"a", "Issuer", "cert-manager.io"}, HTTPClient: http.DefaultClient})
+	_, err := New(
+		Config{
+			Namespace:  "n",
+			Issuer:     IssuerRef{"a", "Issuer", "cert-manager.io"},
+			HTTPClient: http.DefaultClient,
+		},
+	)
 	if err == nil {
 		t.Error("missing API server accepted")
 	}
 	t.Setenv("KUBERNETES_SERVICE_HOST", "::1")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-	k, err := New(Config{Namespace: "n", Issuer: IssuerRef{"a", "Issuer", "cert-manager.io"}, HTTPClient: http.DefaultClient})
+	k, err := New(
+		Config{
+			Namespace:  "n",
+			Issuer:     IssuerRef{"a", "Issuer", "cert-manager.io"},
+			HTTPClient: http.DefaultClient,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -79,7 +79,8 @@ func Revoked(revs proto.Revocations, identity, fingerprint string) error {
 		return fmt.Errorf("%w: %s", ErrDisabled, identity)
 	}
 
-	if fingerprint != "" && slices.Contains(revs.BlockedFingerprints, strings.ToLower(fingerprint)) {
+	if fingerprint != "" &&
+		slices.Contains(revs.BlockedFingerprints, strings.ToLower(fingerprint)) {
 		return fmt.Errorf("%w: %s", ErrBlocked, fingerprint)
 	}
 

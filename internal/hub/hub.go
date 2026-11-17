@@ -126,7 +126,15 @@ func New(opts Options) (*Server, error) {
 		Allowed: s.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
 			s.setNewest(identity, fp)
-			s.log.Info("certificate issued", "identity", identity, "fingerprint", fp, "via", "enrollment")
+			s.log.Info(
+				"certificate issued",
+				"identity",
+				identity,
+				"fingerprint",
+				fp,
+				"via",
+				"enrollment",
+			)
 		},
 		Limiter: enroll.NewLimiter(s.now),
 		Log:     s.log,
@@ -271,7 +279,15 @@ func (s *Server) tlsConfig(source netip.Addr) *tls.Config {
 		},
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if err := s.verifyPeer(cs); err != nil {
-				s.log.Info("rejected peer", "source", source.String(), "alpn", cs.NegotiatedProtocol, "reason", err.Error())
+				s.log.Info(
+					"rejected peer",
+					"source",
+					source.String(),
+					"alpn",
+					cs.NegotiatedProtocol,
+					"reason",
+					err.Error(),
+				)
 
 				return err
 			}
@@ -307,7 +323,11 @@ type admitted struct {
 
 // admit verifies a tunnel client certificate chain against the trust bundle
 // and the configured agents. It does not check the newest-leaf rule.
-func (s *Server) admit(snap *hubconfig.Snapshot, certs []*x509.Certificate, now time.Time) (admitted, error) {
+func (s *Server) admit(
+	snap *hubconfig.Snapshot,
+	certs []*x509.Certificate,
+	now time.Time,
+) (admitted, error) {
 	if len(certs) == 0 {
 		return admitted{}, errors.New("hub: tunnel needs a client certificate")
 	}
@@ -342,7 +362,10 @@ func (s *Server) admit(snap *hubconfig.Snapshot, certs []*x509.Certificate, now 
 
 // checkNewest reports whether fp is the newest issued leaf for identity. noRecord
 // is true when the issuer has no record at all (the leaf is then admitted).
-func (s *Server) checkNewest(ctx context.Context, identity, fp string) (ok, noRecord bool, err error) {
+func (s *Server) checkNewest(
+	ctx context.Context,
+	identity, fp string,
+) (ok, noRecord bool, err error) {
 	s.nmu.Lock()
 	cached := s.newest[identity]
 	s.nmu.Unlock()
@@ -414,7 +437,15 @@ func (s *Server) enforce() {
 
 	for _, sess := range s.allSessions() {
 		if rej, bad := s.sessionViolation(snap, sess, now); bad {
-			s.log.Info("revoke session", "machine", sess.machine, "identity", sess.identity, "reason", rej.Detail)
+			s.log.Info(
+				"revoke session",
+				"machine",
+				sess.machine,
+				"identity",
+				sess.identity,
+				"reason",
+				rej.Detail,
+			)
 			go sess.reject(rej)
 		}
 	}
@@ -437,7 +468,11 @@ func (s *Server) enforce() {
 	}
 }
 
-func (s *Server) sessionViolation(snap *hubconfig.Snapshot, sess *session, now time.Time) (proto.Reject, bool) {
+func (s *Server) sessionViolation(
+	snap *hubconfig.Snapshot,
+	sess *session,
+	now time.Time,
+) (proto.Reject, bool) {
 	if m, ok := snap.MachineForIdentity(sess.identity); !ok || m != sess.machine {
 		return proto.Reject{Reason: proto.RejectOther, Detail: "machine no longer configured"}, true
 	}

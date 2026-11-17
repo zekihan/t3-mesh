@@ -57,7 +57,7 @@ type Config struct {
 	ReexecArgs []string
 	// Exec replaces the process image; default syscall.Exec. If it returns,
 	// Run returns its error (nil when a test hook returns nil).
-	Exec func(path string, argv []string, env []string) error
+	Exec func(path string, argv, env []string) error
 
 	events func(ev string)
 }
@@ -203,7 +203,12 @@ func rollback(cfg *Config, failed string, res result) error {
 	}
 	cfg.event("rollback")
 	if cfg.StateDir != "" {
-		out := Outcome{Version: failed, Reason: reason, Kind: kind, At: time.Now().UTC().Format(time.RFC3339)}
+		out := Outcome{
+			Version: failed,
+			Reason:  reason,
+			Kind:    kind,
+			At:      time.Now().UTC().Format(time.RFC3339),
+		}
 		if err := writeJSONAtomic(filepath.Join(cfg.StateDir, OutcomeFile), out); err != nil {
 			cfg.Log.Error("write launcher outcome", "err", err)
 		}
@@ -363,10 +368,20 @@ func superviseOnce(ctx context.Context, cfg *Config, version string, probation b
 			reason := "crash"
 			if m, ok := drainFail(msgs); ok {
 				cfg.Log.Warn("child reported failure before exiting", "reason", m.Reason)
-				return result{kind: resFailed, reason: m.Reason, failure: normKind(m.Kind), ran: time.Since(start)}
+				return result{
+					kind:    resFailed,
+					reason:  m.Reason,
+					failure: normKind(m.Kind),
+					ran:     time.Since(start),
+				}
 			}
 			cfg.Log.Warn("child exited", "version", version, "err", err)
-			return result{kind: resExited, reason: reason, failure: KindRelease, ran: time.Since(start)}
+			return result{
+				kind:    resExited,
+				reason:  reason,
+				failure: KindRelease,
+				ran:     time.Since(start),
+			}
 		case m, ok := <-msgs:
 			if !ok {
 				msgs = nil
@@ -394,13 +409,26 @@ func superviseOnce(ctx context.Context, cfg *Config, version string, probation b
 				stop()
 				return result{kind: resRestart, ran: time.Since(start)}
 			case "fail":
-				cfg.Log.Error("child requested rollback", "version", version, "reason", m.Reason, "kind", m.Kind)
+				cfg.Log.Error(
+					"child requested rollback",
+					"version",
+					version,
+					"reason",
+					m.Reason,
+					"kind",
+					m.Kind,
+				)
 				stop()
 				reason := m.Reason
 				if reason == "" {
 					reason = "fail"
 				}
-				return result{kind: resFailed, reason: reason, failure: normKind(m.Kind), ran: time.Since(start)}
+				return result{
+					kind:    resFailed,
+					reason:  reason,
+					failure: normKind(m.Kind),
+					ran:     time.Since(start),
+				}
 			}
 		case <-deadline:
 			reason := "liveness"
@@ -409,7 +437,12 @@ func superviseOnce(ctx context.Context, cfg *Config, version string, probation b
 			}
 			cfg.Log.Error("child health deadline missed", "version", version, "reason", reason)
 			stop()
-			return result{kind: resFailed, reason: reason, failure: KindRelease, ran: time.Since(start)}
+			return result{
+				kind:    resFailed,
+				reason:  reason,
+				failure: KindRelease,
+				ran:     time.Since(start),
+			}
 		case <-hb.C:
 			if ready {
 				heartbeat()

@@ -54,7 +54,9 @@ func eventually(t *testing.T, d time.Duration, what string, cond func() bool) {
 
 func logger() *slog.Logger {
 	if os.Getenv("T3_TEST_LOG") != "" {
-		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		return slog.New(
+			slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		)
 	}
 
 	return slog.New(slog.DiscardHandler)
@@ -254,7 +256,13 @@ func writeAtomic(t *testing.T, tmpDir, path, content string) {
 func newMesh(t *testing.T, o meshOpts) *mesh {
 	t.Helper()
 
-	m := &mesh{t: t, ca: pkitest.NewCA(t, "clients"), dir: t.TempDir(), cfg: o.cfg, direct: directAddr()}
+	m := &mesh{
+		t:      t,
+		ca:     pkitest.NewCA(t, "clients"),
+		dir:    t.TempDir(),
+		cfg:    o.cfg,
+		direct: directAddr(),
+	}
 	m.pool = x509.NewCertPool()
 	m.pool.AddCert(m.ca.Cert)
 	m.paths = hubconfig.Paths{
@@ -365,7 +373,12 @@ func (m *mesh) writeConfig(c hubCfg) {
 
 func (m *mesh) writeRaw(content string) {
 	m.t.Helper()
-	writeAtomic(m.t, filepath.Join(m.dir, "tmp"), filepath.Join(m.paths.ConfigDir, hubconfig.ConfigFile), content)
+	writeAtomic(
+		m.t,
+		filepath.Join(m.dir, "tmp"),
+		filepath.Join(m.paths.ConfigDir, hubconfig.ConfigFile),
+		content,
+	)
 }
 
 func (m *mesh) writeTrust(rev string, cas ...*pkitest.CA) {
@@ -391,7 +404,12 @@ func (m *mesh) update(f func(c *hubCfg)) {
 	f(&c)
 	m.writeConfig(c)
 
-	eventually(m.t, 5*time.Second, "hub reloads config", func() bool { return m.watcher.Current().Fingerprint != old })
+	eventually(
+		m.t,
+		5*time.Second,
+		"hub reloads config",
+		func() bool { return m.watcher.Current().Fingerprint != old },
+	)
 }
 
 // ---- status ----
@@ -452,12 +470,22 @@ func (m *mesh) opsGet(path string) (int, string) {
 
 func (m *mesh) waitConnected(machine string) {
 	m.t.Helper()
-	eventually(m.t, 10*time.Second, machine+" connected to hub", func() bool { return m.status().Machines[machine].Connected })
+	eventually(
+		m.t,
+		10*time.Second,
+		machine+" connected to hub",
+		func() bool { return m.status().Machines[machine].Connected },
+	)
 }
 
 // rawDial opens a TLS connection to the hub without any protocol on top.
 func (m *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
-	cfg := &tls.Config{RootCAs: m.pool, ServerName: "localhost", MinVersion: tls.VersionTLS13, NextProtos: []string{alpn}}
+	cfg := &tls.Config{
+		RootCAs:    m.pool,
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{alpn},
+	}
 	if cert != nil {
 		cfg.Certificates = []tls.Certificate{*cert}
 	}
@@ -531,7 +559,13 @@ func (m *mesh) newNode(name string, o nodeOpts) *node {
 	m.t.Helper()
 
 	t := m.t
-	n := &node{m: m, name: name, identity: "agent-" + name, t3stop: make(chan struct{}), done: make(chan struct{})}
+	n := &node{
+		m:        m,
+		name:     name,
+		identity: "agent-" + name,
+		t3stop:   make(chan struct{}),
+		done:     make(chan struct{}),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -578,10 +612,14 @@ func (m *mesh) newNode(name string, o nodeOpts) *node {
 	}
 
 	n.cfg = &agentconfig.Config{
-		Serve:      map[string]string{"t3": n.t3.Listener.Addr().String()},
-		Links:      links,
-		Identity:   agentconfig.Identity{Name: n.identity, Dir: filepath.Join(dir, "identity")},
-		Direct:     agentconfig.Direct{Enabled: o.direct, Port: n.directPort, CacheTTL: cmpTTL(o.cacheTTL)},
+		Serve:    map[string]string{"t3": n.t3.Listener.Addr().String()},
+		Links:    links,
+		Identity: agentconfig.Identity{Name: n.identity, Dir: filepath.Join(dir, "identity")},
+		Direct: agentconfig.Direct{
+			Enabled:  o.direct,
+			Port:     n.directPort,
+			CacheTTL: cmpTTL(o.cacheTTL),
+		},
 		StateDir:   filepath.Join(dir, "state"),
 		InstallDir: filepath.Join(dir, "install"),
 		Hub:        m.hubAddr,
@@ -610,7 +648,9 @@ func (m *mesh) newNode(name string, o nodeOpts) *node {
 		cert, certPEM, _ := ca.IssueIdentity(t, n.identity, true, notAfter)
 		store := pki.Store{Dir: n.cfg.Identity.Dir}
 
-		if err := store.SaveKey(cert.PrivateKey.(*ecdsa.PrivateKey)); err != nil { //nolint:forcetypeassert // ECDSA from pkitest
+		if err := store.SaveKey(
+			cert.PrivateKey.(*ecdsa.PrivateKey),
+		); err != nil { //nolint:forcetypeassert // ECDSA from pkitest
 			t.Fatal(err)
 		}
 

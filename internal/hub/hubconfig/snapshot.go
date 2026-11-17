@@ -286,7 +286,12 @@ func (c *config) parseMachines(in map[string]rawMachine) error {
 		}
 
 		if m.Identity != policy.AgentIdentity(name) {
-			return invalid("machine %q identity %q must be %q", name, m.Identity, policy.AgentIdentity(name))
+			return invalid(
+				"machine %q identity %q must be %q",
+				name,
+				m.Identity,
+				policy.AgentIdentity(name),
+			)
 		}
 
 		if len(m.Services) == 0 {
@@ -312,13 +317,21 @@ func (c *config) parseMachines(in map[string]rawMachine) error {
 		if m.DisconnectAlertAfter != "" {
 			d, err := time.ParseDuration(m.DisconnectAlertAfter)
 			if err != nil || d <= 0 {
-				return invalid("machine %q disconnectAlertAfter %q is not a positive duration", name, m.DisconnectAlertAfter)
+				return invalid(
+					"machine %q disconnectAlertAfter %q is not a positive duration",
+					name,
+					m.DisconnectAlertAfter,
+				)
 			}
 
 			alertAfter = d
 		}
 
-		c.machines[name] = Machine{Identity: m.Identity, Services: svcs, DisconnectAlertAfter: alertAfter}
+		c.machines[name] = Machine{
+			Identity:             m.Identity,
+			Services:             svcs,
+			DisconnectAlertAfter: alertAfter,
+		}
 	}
 
 	return nil
@@ -349,7 +362,10 @@ func (c *config) parseGeneral(raw *rawConfig) error {
 		return invalid("release.version %q must look like vX.Y.Z", raw.Release.Version)
 	}
 
-	c.release = proto.Release{Version: raw.Release.Version, RollbackAllowed: raw.Release.RollbackAllowed}
+	c.release = proto.Release{
+		Version:         raw.Release.Version,
+		RollbackAllowed: raw.Release.RollbackAllowed,
+	}
 	c.release.Revision = jsonRevision(struct {
 		Version         string `json:"version"`
 		RollbackAllowed bool   `json:"rollbackAllowed"`
@@ -474,7 +490,12 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 		return proto.TrustBundle{}, nil, nil, invalid("trust bundle has no certificates")
 	}
 
-	return proto.TrustBundle{Revision: revision, PEM: string(pemBytes)}, pool, append(pemBytes, rev...), nil
+	return proto.TrustBundle{
+		Revision: revision,
+		PEM:      string(pemBytes),
+	}, pool, append(
+		pemBytes,
+		rev...), nil
 }
 
 func loadCert(dir string) (*tls.Certificate, []byte, error) {

@@ -408,7 +408,8 @@ func TestApplyLeavesContactAndMACAlone(t *testing.T) {
 	c.Apply(proto.Update{Home: boolPtr(false)})
 
 	if !c.LastHubContact.Equal(before.LastHubContact) || c.HomeGatewayMAC != before.HomeGatewayMAC ||
-		c.Release != before.Release || c.Machine != before.Machine {
+		c.Release != before.Release ||
+		c.Machine != before.Machine {
 		t.Fatalf("Apply touched unrelated fields: %+v", c)
 	}
 }

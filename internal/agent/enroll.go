@@ -62,7 +62,12 @@ func Enroll(ctx context.Context, cfg *agentconfig.Config, token string, hubTLS *
 	return saveEnrolled(store, key, reply, existing)
 }
 
-func saveEnrolled(store pki.Store, key *ecdsa.PrivateKey, reply proto.Enrolled, existing bool) error {
+func saveEnrolled(
+	store pki.Store,
+	key *ecdsa.PrivateKey,
+	reply proto.Enrolled,
+	existing bool,
+) error {
 	if existing {
 		if err := store.SaveNext(key, []byte(reply.Certificate), []byte(reply.Chain)); err != nil {
 			return fmt.Errorf("enroll: save certificate: %w", err)
@@ -100,7 +105,12 @@ func checkEnrolledIdentity(reply proto.Enrolled, name string) error {
 	return nil
 }
 
-func enrollExchange(ctx context.Context, cfg *agentconfig.Config, hubTLS *tls.Config, req proto.Enroll) (proto.Enrolled, error) {
+func enrollExchange(
+	ctx context.Context,
+	cfg *agentconfig.Config,
+	hubTLS *tls.Config,
+	req proto.Enroll,
+) (proto.Enrolled, error) {
 	ctx, cancel := context.WithTimeout(ctx, enrollTimeout)
 	defer cancel()
 

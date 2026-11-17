@@ -12,7 +12,10 @@ func TestMessageRoundTrip(t *testing.T) {
 	home := true
 	msgs := []Message{
 		Hello{Version: "v0.1.0", Services: []string{"t3"}, CertFingerprint: "ab"},
-		HelloAck{Machine: "z-mac", Rules: Rules{Allow: map[string][]string{"t3.devbox": {"z-phone"}}}},
+		HelloAck{
+			Machine: "z-mac",
+			Rules:   Rules{Allow: map[string][]string{"t3.devbox": {"z-phone"}}},
+		},
 		Update{Home: &home},
 		Ping{Seq: 3, SentUnixNano: 42},
 		Reject{Reason: RejectOther},

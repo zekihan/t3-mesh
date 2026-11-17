@@ -102,7 +102,8 @@ func (a *Admin) handle(conn net.Conn) {
 
 	_ = conn.SetDeadline(time.Now().Add(adminDeadline))
 
-	line, err := bufio.NewReaderSize(io.LimitReader(conn, adminMaxLineSize), adminMaxLineSize).ReadBytes('\n')
+	line, err := bufio.NewReaderSize(io.LimitReader(conn, adminMaxLineSize), adminMaxLineSize).
+		ReadBytes('\n')
 	if err != nil {
 		a.reply(conn, adminReply{Error: "bad request"})
 
@@ -110,7 +111,11 @@ func (a *Admin) handle(conn net.Conn) {
 	}
 
 	var req adminRequest
-	if err = json.Unmarshal(line, &req); err != nil || req.Op != "enroll-token" || req.Identity == "" {
+	if err = json.Unmarshal(
+		line,
+		&req,
+	); err != nil || req.Op != "enroll-token" ||
+		req.Identity == "" {
 		a.reply(conn, adminReply{Error: "bad request"})
 
 		return
@@ -169,7 +174,8 @@ func RequestToken(ctx context.Context, socketPath, identity string) (string, tim
 		return "", time.Time{}, fmt.Errorf("enroll: send request: %w", err)
 	}
 
-	line, err := bufio.NewReaderSize(io.LimitReader(conn, adminMaxLineSize), adminMaxLineSize).ReadBytes('\n')
+	line, err := bufio.NewReaderSize(io.LimitReader(conn, adminMaxLineSize), adminMaxLineSize).
+		ReadBytes('\n')
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("enroll: read reply: %w", err)
 	}

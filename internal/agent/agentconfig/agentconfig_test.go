@@ -139,34 +139,118 @@ func TestParseInvalid(t *testing.T) {
 		{"missing hub", "identity:\n  name: agent-x\n  dir: /a/identity\n"},
 		{"hub with scheme", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: https://h\n"},
 		{"hub bad port", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h:0\n"},
-		{"hub unbracketed ipv6", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: \"2001:db8::1\"\n"},
-		{"relative stateDir", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nstateDir: state\n"},
-		{"relative installDir", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ninstallDir: install\n"},
-		{"serve public address", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 0.0.0.0:3773\n"},
-		{"serve non-loopback ip", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 192.168.1.5:3773\n"},
-		{"serve no port", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 127.0.0.1\n"},
-		{"serve dotted key", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3.x: 127.0.0.1:3773\n"},
-		{"link key without dot", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3: 127.0.0.1:27301\n"},
-		{"link key empty machine", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.: 127.0.0.1:27301\n"},
-		{"link key empty svc", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  .z: 127.0.0.1:27301\n"},
-		{"link localhost value", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: localhost:27301\n"},
-		{"link other loopback", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.2:27301\n"},
-		{"link public address", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 0.0.0.0:27301\n"},
-		{"link port at ephemeral floor", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:32768\n"},
-		{"link port zero", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:0\n"},
-		{"link port too big", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:70000\n"},
-		{"link port not a number", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:abc\n"},
-		{"duplicate link port", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.a: 127.0.0.1:27301\n  t3.b: 127.0.0.1:27301\n"},
-		{"direct port at ephemeral floor", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 40000\n"},
-		{"direct enabled without port", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n"},
-		{"direct port collides with link", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: true\n  port: 27400\n"},
-		{"direct disabled port collides", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: false\n  port: 27400\n"},
-		{"direct port out of range", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 99999\n"},
-		{"cacheTTL zero", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  cacheTTL: 0s\n"},
-		{"cacheTTL negative", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  cacheTTL: -1h\n"},
-		{"unknown top-level field", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nbogus: 1\n"},
-		{"unknown identity field", "identity:\n  name: agent-x\n  dir: /a/identity\n  extra: 1\nhub: h\n"},
-		{"unknown direct field", "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  ttl: 1h\n"},
+		{
+			"hub unbracketed ipv6",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: \"2001:db8::1\"\n",
+		},
+		{
+			"relative stateDir",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nstateDir: state\n",
+		},
+		{
+			"relative installDir",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ninstallDir: install\n",
+		},
+		{
+			"serve public address",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 0.0.0.0:3773\n",
+		},
+		{
+			"serve non-loopback ip",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 192.168.1.5:3773\n",
+		},
+		{
+			"serve no port",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3: 127.0.0.1\n",
+		},
+		{
+			"serve dotted key",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nserve:\n  t3.x: 127.0.0.1:3773\n",
+		},
+		{
+			"link key without dot",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3: 127.0.0.1:27301\n",
+		},
+		{
+			"link key empty machine",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.: 127.0.0.1:27301\n",
+		},
+		{
+			"link key empty svc",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  .z: 127.0.0.1:27301\n",
+		},
+		{
+			"link localhost value",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: localhost:27301\n",
+		},
+		{
+			"link other loopback",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.2:27301\n",
+		},
+		{
+			"link public address",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 0.0.0.0:27301\n",
+		},
+		{
+			"link port at ephemeral floor",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:32768\n",
+		},
+		{
+			"link port zero",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:0\n",
+		},
+		{
+			"link port too big",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:70000\n",
+		},
+		{
+			"link port not a number",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:abc\n",
+		},
+		{
+			"duplicate link port",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.a: 127.0.0.1:27301\n  t3.b: 127.0.0.1:27301\n",
+		},
+		{
+			"direct port at ephemeral floor",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 40000\n",
+		},
+		{
+			"direct enabled without port",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n",
+		},
+		{
+			"direct port collides with link",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: true\n  port: 27400\n",
+		},
+		{
+			"direct disabled port collides",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: false\n  port: 27400\n",
+		},
+		{
+			"direct port out of range",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 99999\n",
+		},
+		{
+			"cacheTTL zero",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  cacheTTL: 0s\n",
+		},
+		{
+			"cacheTTL negative",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  cacheTTL: -1h\n",
+		},
+		{
+			"unknown top-level field",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nbogus: 1\n",
+		},
+		{
+			"unknown identity field",
+			"identity:\n  name: agent-x\n  dir: /a/identity\n  extra: 1\nhub: h\n",
+		},
+		{
+			"unknown direct field",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  ttl: 1h\n",
+		},
 		{"malformed yaml", "identity: [\n"},
 	}
 

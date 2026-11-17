@@ -76,7 +76,8 @@ func (m *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, erro
 		}
 	}
 
-	if peer == nil || len(peer.LANAddrs) == 0 || peer.DirectPort == 0 || (v.HubConnected && !peer.Home) {
+	if peer == nil || len(peer.LANAddrs) == 0 || peer.DirectPort == 0 ||
+		(v.HubConnected && !peer.Home) {
 		return nil, fmt.Errorf("%w: %s", ErrNoPeer, machine)
 	}
 
@@ -175,7 +176,13 @@ func (m *Manager) clientTLS(v View, machine string) *tls.Config {
 	}
 }
 
-func (m *Manager) dialOne(ctx context.Context, v View, peer *proto.Peer, addr, svc string, deadline time.Time) (net.Conn, error) {
+func (m *Manager) dialOne(
+	ctx context.Context,
+	v View,
+	peer *proto.Peer,
+	addr, svc string,
+	deadline time.Time,
+) (net.Conn, error) {
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 

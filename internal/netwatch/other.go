@@ -10,7 +10,9 @@ import (
 )
 
 func openSource(context.Context) (<-chan struct{}, error) {
-	return nil, errors.New("netwatch: network change notifications are not supported on this platform")
+	return nil, errors.New(
+		"netwatch: network change notifications are not supported on this platform",
+	)
 }
 
 // DefaultGatewayMAC is not supported on this platform.

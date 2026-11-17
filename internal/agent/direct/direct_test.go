@@ -88,14 +88,18 @@ type env struct {
 	a, b *node
 }
 
-func newNode(t *testing.T, e *env, name string, addr string, serve map[string]string) *node {
+func newNode(t *testing.T, e *env, name, addr string, serve map[string]string) *node {
 	t.Helper()
 
 	cert, _, _ := e.ca.IssueIdentity(t, policy.AgentIdentity(name), true, time.Now().Add(time.Hour))
 	pool := x509.NewCertPool()
 	pool.AddCert(e.ca.Cert)
 
-	n := &node{name: name, addr: netip.MustParseAddr(addr), addrs: []netip.Addr{netip.MustParseAddr(addr)}}
+	n := &node{
+		name:  name,
+		addr:  netip.MustParseAddr(addr),
+		addrs: []netip.Addr{netip.MustParseAddr(addr)},
+	}
 	n.view = View{
 		Self: name, Identity: cert, Roots: pool, HubConnected: true, SelfHome: true,
 		HomePrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
@@ -127,7 +131,16 @@ func setup(t *testing.T) *env {
 	rules := proto.Rules{Allow: map[string][]string{"t3.b": {"agent-a"}}}
 	e.a.set(func(v *View) {
 		v.Rules = rules
-		v.Peers = []proto.Peer{{Machine: "b", Identity: "agent-b", LANAddrs: []string{"127.0.0.2"}, DirectPort: e.port, Home: true, Services: []string{"t3"}}}
+		v.Peers = []proto.Peer{
+			{
+				Machine:    "b",
+				Identity:   "agent-b",
+				LANAddrs:   []string{"127.0.0.2"},
+				DirectPort: e.port,
+				Home:       true,
+				Services:   []string{"t3"},
+			},
+		}
 	})
 	e.b.set(func(v *View) {
 		v.Rules = rules
@@ -181,7 +194,11 @@ func TestDirectFlow(t *testing.T) {
 
 	roundTrip(t, c)
 
-	waitFor(t, "sessions", func() bool { return e.a.mgr.Sessions() == 1 && e.b.mgr.Sessions() == 1 })
+	waitFor(
+		t,
+		"sessions",
+		func() bool { return e.a.mgr.Sessions() == 1 && e.b.mgr.Sessions() == 1 },
+	)
 }
 
 func TestOneWayRule(t *testing.T) {
@@ -327,7 +344,14 @@ func TestStallingPeerFailsFastAndRemembered(t *testing.T) {
 	}()
 
 	e.a.set(func(v *View) {
-		v.Peers = []proto.Peer{{Machine: "b", LANAddrs: []string{"127.0.0.1"}, DirectPort: l.Addr().(*net.TCPAddr).Port, Home: true}}
+		v.Peers = []proto.Peer{
+			{
+				Machine:    "b",
+				LANAddrs:   []string{"127.0.0.1"},
+				DirectPort: l.Addr().(*net.TCPAddr).Port,
+				Home:       true,
+			},
+		}
 	})
 
 	start := time.Now()
@@ -351,7 +375,11 @@ func TestActiveModes(t *testing.T) {
 	now := time.Now()
 	gw := "aa:bb:cc:dd:ee:ff"
 	n := &node{}
-	n.view = View{HubConnected: false, LastHubContact: now.Add(-time.Minute), HomeGatewayMAC: "AA:BB:CC:DD:EE:FF"}
+	n.view = View{
+		HubConnected:   false,
+		LastHubContact: now.Add(-time.Minute),
+		HomeGatewayMAC: "AA:BB:CC:DD:EE:FF",
+	}
 	clock := now
 	m := New(Options{
 		CacheTTL: time.Hour, View: n.get, Now: func() time.Time { return clock },

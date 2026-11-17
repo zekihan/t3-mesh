@@ -108,9 +108,12 @@ func newFakeHub(t *testing.T, ca *pkitest.CA) *fakeHub {
 		t: t, ca: ca, ln: ln, addr: ln.Addr().String(), pool: pool,
 		linkTargets: map[string]string{},
 		ack: proto.HelloAck{
-			Machine:     "devbox",
-			Release:     proto.Release{Version: "v1.0.0", Revision: "rel1"},
-			Rules:       proto.Rules{Revision: "rules1", Allow: map[string][]string{"t3.z-arch": {"agent-devbox"}}},
+			Machine: "devbox",
+			Release: proto.Release{Version: "v1.0.0", Revision: "rel1"},
+			Rules: proto.Rules{
+				Revision: "rules1",
+				Allow:    map[string][]string{"t3.z-arch": {"agent-devbox"}},
+			},
 			Peers:       proto.PeerTable{Revision: "peers1"},
 			Revocations: proto.Revocations{Revision: "rev1"},
 			TrustBundle: proto.TrustBundle{Revision: "tb1", PEM: string(ca.CertPEM)},
@@ -186,13 +189,19 @@ func (h *fakeHub) enroll(tc *tls.Conn) {
 	h.mu.Unlock()
 
 	if req.Token != want {
-		_ = proto.WriteMessage(tc, proto.Reject{Reason: proto.RejectEnrollFailed, Detail: "bad token"})
+		_ = proto.WriteMessage(
+			tc,
+			proto.Reject{Reason: proto.RejectEnrollFailed, Detail: "bad token"},
+		)
 
 		return
 	}
 
 	if _, _, err = pki.ValidateCSR([]byte(req.CSR)); err != nil {
-		_ = proto.WriteMessage(tc, proto.Reject{Reason: proto.RejectEnrollFailed, Detail: err.Error()})
+		_ = proto.WriteMessage(
+			tc,
+			proto.Reject{Reason: proto.RejectEnrollFailed, Detail: err.Error()},
+		)
 
 		return
 	}
@@ -412,7 +421,8 @@ type fakeHealth struct {
 	ready, alive int
 }
 
-func (f *fakeHealth) Ready() error              { f.mu.Lock(); f.ready++; f.mu.Unlock(); return nil }
+func (f *fakeHealth) Ready() error { f.mu.Lock(); f.ready++; f.mu.Unlock(); return nil }
+
 func (f *fakeHealth) Alive() error              { f.mu.Lock(); f.alive++; f.mu.Unlock(); return nil }
 func (f *fakeHealth) Promote() error            { return nil }
 func (f *fakeHealth) Fail(string, string) error { return nil }
@@ -481,7 +491,9 @@ func newHarness(t *testing.T, mod func(*hopts)) *harness {
 
 			defer func() { _ = conn.Close() }()
 
-			_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_, _ = buf.WriteString(
+				"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+			)
 			_ = buf.Flush()
 			_, _ = io.Copy(conn, buf)
 
@@ -535,7 +547,9 @@ links:
 
 	if !o.noIdent {
 		store := pki.Store{Dir: cfg.Identity.Dir}
-		if err = store.SaveKey(tc.PrivateKey.(*ecdsa.PrivateKey)); err != nil { //nolint:forcetypeassert // ecdsa
+		if err = store.SaveKey(
+			tc.PrivateKey.(*ecdsa.PrivateKey),
+		); err != nil { //nolint:forcetypeassert // ecdsa
 			t.Fatal(err)
 		}
 
@@ -548,8 +562,12 @@ links:
 		Config:  cfg,
 		Version: "dev",
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		HubTLS:  &tls.Config{RootCAs: h.hub.pool, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS13},
-		Health:  h.health,
+		HubTLS: &tls.Config{
+			RootCAs:    h.hub.pool,
+			ServerName: "127.0.0.1",
+			MinVersion: tls.VersionTLS13,
+		},
+		Health: h.health,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -594,7 +612,10 @@ func (h *harness) linkURL(path string) string {
 func httpGet(t *testing.T, req *http.Request) (int, string) {
 	t.Helper()
 
-	cl := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 10 * time.Second}
+	cl := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   10 * time.Second,
+	}
 
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -649,7 +670,9 @@ func TestHelloAndAckCached(t *testing.T) {
 
 	c, _ := state.Load(h.cfg.StateDir)
 	if c.Rules.Revision != "rules1" || c.TrustBundle.Revision != "tb1" || c.Release.Version != "v1.0.0" ||
-		len(c.HomeCIDRs) != 1 || c.LastHubContact.IsZero() || c.Revocations.Revision != "rev1" {
+		len(c.HomeCIDRs) != 1 ||
+		c.LastHubContact.IsZero() ||
+		c.Revocations.Revision != "rev1" {
 		t.Errorf("cache = %+v", c)
 	}
 
@@ -662,7 +685,10 @@ func TestHelloAndAckCached(t *testing.T) {
 }
 
 func TestHelloLANAddrs(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.noStart = true; o.direct = true; o.directPrt = freePort(t) })
+	h := newHarness(
+		t,
+		func(o *hopts) { o.noStart = true; o.direct = true; o.directPrt = freePort(t) },
+	)
 	h.agent.localAddrs = func() ([]netip.Addr, error) {
 		return []netip.Addr{
 			netip.MustParseAddr("192.168.1.5"), netip.MustParseAddr("10.0.0.7"),
@@ -696,7 +722,10 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	st := hc.openStream(t, proto.StreamHeader{Svc: "t3", Viewer: "z-phone"})
 	defer st.Close()
 
-	_, _ = io.WriteString(st, "GET /v HTTP/1.1\r\nHost: t3.devbox.mesh.noqer.com\r\nConnection: close\r\n\r\n")
+	_, _ = io.WriteString(
+		st,
+		"GET /v HTTP/1.1\r\nHost: t3.devbox.mesh.noqer.com\r\nConnection: close\r\n\r\n",
+	)
 
 	resp, err := http.ReadResponse(bufio.NewReader(st), nil)
 	if err != nil {
@@ -765,7 +794,11 @@ func TestLinkPortWebSocketUpgrade(t *testing.T) {
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	_, _ = fmt.Fprintf(conn, "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", h.linkPort)
+	_, _ = fmt.Fprintf(
+		conn,
+		"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+		h.linkPort,
+	)
 
 	br := bufio.NewReader(conn)
 
@@ -853,7 +886,10 @@ func TestUpdateApplied(t *testing.T) {
 	hc := h.hub.waitConn(t, 1)
 
 	home := true
-	rules := proto.Rules{Revision: "rules2", Allow: map[string][]string{"t3.devbox": {"agent-z-arch"}}}
+	rules := proto.Rules{
+		Revision: "rules2",
+		Allow:    map[string][]string{"t3.devbox": {"agent-z-arch"}},
+	}
 
 	if err := hc.ctrl.Send(proto.Update{Home: &home, Rules: &rules}); err != nil {
 		t.Fatal(err)
@@ -862,10 +898,12 @@ func TestUpdateApplied(t *testing.T) {
 	waitFor(t, "update persisted", func() bool {
 		c, err := state.Load(h.cfg.StateDir)
 
-		return err == nil && c.Rules.Revision == "rules2" && c.Home && c.HomeGatewayMAC == "aa:bb:cc:dd:ee:ff"
+		return err == nil && c.Rules.Revision == "rules2" && c.Home &&
+			c.HomeGatewayMAC == "aa:bb:cc:dd:ee:ff"
 	})
 
-	if v := h.agent.view(); v.Rules.Revision != "rules2" || !v.SelfHome || v.Roots == nil || !v.HubConnected {
+	if v := h.agent.view(); v.Rules.Revision != "rules2" || !v.SelfHome || v.Roots == nil ||
+		!v.HubConnected {
 		t.Errorf("view = %+v", v)
 	}
 
@@ -894,7 +932,12 @@ func TestRenewal(t *testing.T) {
 	})
 
 	for _, f := range []string{"next-key.pem", "next-cert.pem"} {
-		if _, err := os.Stat(filepath.Join(h.cfg.Identity.Dir, f)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(
+			filepath.Join(h.cfg.Identity.Dir, f),
+		); !errors.Is(
+			err,
+			os.ErrNotExist,
+		) {
 			t.Errorf("%s left behind: %v", f, err)
 		}
 	}
@@ -920,7 +963,12 @@ func TestRenewal(t *testing.T) {
 func TestPendingRenewalUsedOnConnect(t *testing.T) {
 	h := newHarness(t, func(o *hopts) { o.noStart = true })
 
-	_, certPEM, keyPEM := h.ca.IssueIdentity(t, h.cfg.Identity.Name, true, time.Now().Add(365*24*time.Hour))
+	_, certPEM, keyPEM := h.ca.IssueIdentity(
+		t,
+		h.cfg.Identity.Name,
+		true,
+		time.Now().Add(365*24*time.Hour),
+	)
 
 	key, err := pki.ParseKeyPEM(keyPEM)
 	if err != nil {
@@ -1101,7 +1149,8 @@ func TestEnroll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, leaf2, err2 := store.Load(); err2 != nil || pki.Fingerprint(leaf2) == pki.Fingerprint(leaf) {
+	if _, leaf2, err2 := store.Load(); err2 != nil ||
+		pki.Fingerprint(leaf2) == pki.Fingerprint(leaf) {
 		t.Errorf("re-enroll did not replace identity: %v", err2)
 	}
 }

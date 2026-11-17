@@ -230,7 +230,10 @@ func awaitAck(ctx context.Context, ctrl *tunnel.Control) (proto.HelloAck, error)
 	select {
 	case msg, ok := <-ctrl.Messages():
 		if !ok {
-			return proto.HelloAck{}, fmt.Errorf("control stream closed before HelloAck: %w", ctrl.Err())
+			return proto.HelloAck{}, fmt.Errorf(
+				"control stream closed before HelloAck: %w",
+				ctrl.Err(),
+			)
 		}
 
 		switch m := msg.(type) {
@@ -251,7 +254,15 @@ func awaitAck(ctx context.Context, ctrl *tunnel.Control) (proto.HelloAck, error)
 // handleConnectErr logs a failed connect and feeds a Reject to the updater.
 func (a *Agent) handleConnectErr(err error) {
 	if rej, ok := errors.AsType[*rejectError](err); ok {
-		a.log.Warn("hub rejected session", "reason", rej.rej.Reason, "detail", rej.rej.Detail, "version", rej.rej.Version)
+		a.log.Warn(
+			"hub rejected session",
+			"reason",
+			rej.rej.Reason,
+			"detail",
+			rej.rej.Detail,
+			"version",
+			rej.rej.Version,
+		)
 		a.warn("hub rejected session: " + rej.rej.Reason)
 
 		if a.upd != nil {
@@ -454,7 +465,15 @@ func (a *Agent) sessionEnded(s *session) {
 	}
 	a.mu.Unlock()
 
-	a.log.Info("tunnel closed", "peer", s.peer.String(), "current", wasCur, "err", fmt.Sprint(s.ctrl.Err()))
+	a.log.Info(
+		"tunnel closed",
+		"peer",
+		s.peer.String(),
+		"current",
+		wasCur,
+		"err",
+		fmt.Sprint(s.ctrl.Err()),
+	)
 
 	if wasCur {
 		a.saveCache()
@@ -617,7 +636,15 @@ func (a *Agent) handleMessage(s *session, msg proto.Message) {
 			return
 		}
 
-		a.log.Warn("hub rejected session", "reason", m.Reason, "detail", m.Detail, "version", m.Version)
+		a.log.Warn(
+			"hub rejected session",
+			"reason",
+			m.Reason,
+			"detail",
+			m.Detail,
+			"version",
+			m.Version,
+		)
 		a.warn("hub rejected session: " + m.Reason)
 
 		if a.upd != nil {

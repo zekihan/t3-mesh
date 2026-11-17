@@ -84,7 +84,10 @@ func (s *State) RaiseMinStateVersion(v string) error {
 func (s State) FailedUpdates() []proto.FailedUpdate {
 	out := make([]proto.FailedUpdate, 0, len(s.Failed))
 	for v, f := range s.Failed {
-		out = append(out, proto.FailedUpdate{Version: v, Reason: f.Reason, Attempts: f.Attempts, Final: f.Final})
+		out = append(
+			out,
+			proto.FailedUpdate{Version: v, Reason: f.Reason, Attempts: f.Attempts, Final: f.Final},
+		)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out

@@ -38,7 +38,15 @@ func (s *Server) ViewerHandler() http.Handler {
 func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	viewer, fp, notAfter, ok := viewerIdentity(r)
 	if !ok {
-		s.log.Info("reject", "kind", "viewer", "reason", "missing or invalid viewer headers", "host", r.Host)
+		s.log.Info(
+			"reject",
+			"kind",
+			"viewer",
+			"reason",
+			"missing or invalid viewer headers",
+			"host",
+			r.Host,
+		)
 		http.Error(w, "forbidden", http.StatusForbidden)
 
 		return
@@ -53,9 +61,25 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pol := policy.Session{Identity: viewer, Fingerprint: fp, NotAfter: notAfter, Svc: svc, Machine: machine}
+	pol := policy.Session{
+		Identity:    viewer,
+		Fingerprint: fp,
+		NotAfter:    notAfter,
+		Svc:         svc,
+		Machine:     machine,
+	}
 	if err := s.checkNow(pol); err != nil {
-		s.log.Info("reject", "kind", "viewer", "viewer", viewer, "target", policy.Target(svc, machine), "reason", err.Error())
+		s.log.Info(
+			"reject",
+			"kind",
+			"viewer",
+			"viewer",
+			viewer,
+			"target",
+			policy.Target(svc, machine),
+			"reason",
+			err.Error(),
+		)
 		http.Error(w, "forbidden", http.StatusForbidden)
 
 		return
@@ -89,7 +113,15 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 			pr.Out.Host = pr.In.Host
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			s.log.Debug("viewer upstream error", "viewer", viewer, "target", policy.Target(svc, machine), "error", err.Error())
+			s.log.Debug(
+				"viewer upstream error",
+				"viewer",
+				viewer,
+				"target",
+				policy.Target(svc, machine),
+				"error",
+				err.Error(),
+			)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
@@ -111,7 +143,8 @@ func viewerIdentity(r *http.Request) (viewer, fp string, notAfter time.Time, ok 
 	fpRaw, ok2 := get(HeaderFingerprint)
 	naRaw, ok3 := get(HeaderNotAfter)
 
-	if !ok1 || !ok2 || !ok3 || strings.ContainsAny(viewer, " \t:/") || policy.IsAgent(viewer) || !fingerprintRe.MatchString(fpRaw) {
+	if !ok1 || !ok2 || !ok3 || strings.ContainsAny(viewer, " \t:/") || policy.IsAgent(viewer) ||
+		!fingerprintRe.MatchString(fpRaw) {
 		return "", "", time.Time{}, false
 	}
 
@@ -139,8 +172,12 @@ func (s *Server) writeOffline(w http.ResponseWriter, machine string) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadGateway)
-	_, _ = fmt.Fprintf(w, "<!doctype html><html><head><title>%[1]s is offline</title></head><body><h1>%[1]s is offline</h1><p>The machine is not connected to the mesh (%[2]s).</p></body></html>\n",
-		html.EscapeString(machine), html.EscapeString(seen))
+	_, _ = fmt.Fprintf(
+		w,
+		"<!doctype html><html><head><title>%[1]s is offline</title></head><body><h1>%[1]s is offline</h1><p>The machine is not connected to the mesh (%[2]s).</p></body></html>\n",
+		html.EscapeString(machine),
+		html.EscapeString(seen),
+	)
 }
 
 // dialViewer opens a tunnel stream for one viewer request and tracks it.
@@ -161,7 +198,10 @@ func (s *Server) dialViewer(pol policy.Session) (net.Conn, error) {
 
 	_ = st.SetWriteDeadline(time.Now().Add(headerReadTimeout))
 
-	if err := proto.WriteLine(st, proto.StreamHeader{Svc: pol.Svc, Viewer: pol.Identity}); err != nil {
+	if err := proto.WriteLine(
+		st,
+		proto.StreamHeader{Svc: pol.Svc, Viewer: pol.Identity},
+	); err != nil {
 		_ = st.Close()
 
 		return nil, fmt.Errorf("hub: write stream header: %w", err)

@@ -32,7 +32,9 @@ func skipNoDirect(t *testing.T, m *mesh) {
 	t.Helper()
 
 	if !m.direct.IsValid() {
-		t.Skip("BLOCKED: no private LAN IPv4 address and the agent does not advertise loopback direct addresses (internal/agent/tunnel.go lanAddrs drops IsLoopback)")
+		t.Skip(
+			"BLOCKED: no private LAN IPv4 address and the agent does not advertise loopback direct addresses (internal/agent/tunnel.go lanAddrs drops IsLoopback)",
+		)
 	}
 }
 
@@ -88,7 +90,13 @@ func (m *mesh) tryTunnel(cert tls.Certificate) proto.Message {
 
 	ctrl := tunnel.NewControl(st)
 
-	if err = ctrl.Send(proto.Hello{Version: "v0.0.0", Services: []string{"t3"}, CertFingerprint: pki.Fingerprint(cert.Leaf)}); err != nil {
+	if err = ctrl.Send(
+		proto.Hello{
+			Version:         "v0.0.0",
+			Services:        []string{"t3"},
+			CertFingerprint: pki.Fingerprint(cert.Leaf),
+		},
+	); err != nil {
 		m.t.Fatal(err)
 	}
 
@@ -143,14 +151,23 @@ func TestViewerAndAdmission(t *testing.T) {
 	p := m.newPhone()
 
 	if code, body := m.viewerGet(p, "b", "/"); code != http.StatusOK || body != "t3@b mtls=0" {
-		t.Fatalf("viewer -> b: %d %q, want 200 \"t3@b mtls=0\" (X-Mtls headers must be stripped)", code, body)
+		t.Fatalf(
+			"viewer -> b: %d %q, want 200 \"t3@b mtls=0\" (X-Mtls headers must be stripped)",
+			code,
+			body,
+		)
 	}
 
 	if code, body := m.viewerGet(p, "a", "/"); code != http.StatusOK || body != "t3@a mtls=0" {
 		t.Fatalf("viewer -> a: %d %q", code, body)
 	}
 
-	if code, _ := get(t, m.viewer.URL+"/", nil, "t3.b."+viewerDomain); code != http.StatusForbidden {
+	if code, _ := get(
+		t,
+		m.viewer.URL+"/",
+		nil,
+		"t3.b."+viewerDomain,
+	); code != http.StatusForbidden {
 		t.Fatalf("viewer without headers: %d, want 403", code)
 	}
 
@@ -161,7 +178,12 @@ func TestViewerAndAdmission(t *testing.T) {
 		t.Fatalf("agent identity as viewer: %d, want 403", code)
 	}
 
-	if code, _ := get(t, m.viewer.URL+"/", p.headers(), "t3.nope."+viewerDomain); code != http.StatusNotFound {
+	if code, _ := get(
+		t,
+		m.viewer.URL+"/",
+		p.headers(),
+		"t3.nope."+viewerDomain,
+	); code != http.StatusNotFound {
 		t.Fatalf("unknown machine: %d, want 404", code)
 	}
 
@@ -217,7 +239,13 @@ func TestLinkOverTunnel(t *testing.T) {
 	m := newMesh(t, meshOpts{})
 	a, b := m.twoNodes(nodeOpts{links: []string{"t3.b"}}, nodeOpts{links: []string{"t3.a"}})
 
-	if code, body := get(t, a.linkURL("/"), nil, ""); code != http.StatusOK || body != "t3@b mtls=0" {
+	if code, body := get(
+		t,
+		a.linkURL("/"),
+		nil,
+		"",
+	); code != http.StatusOK ||
+		body != "t3@b mtls=0" {
 		t.Fatalf("a link t3.b: %d %q", code, body)
 	}
 
@@ -319,7 +347,10 @@ func TestDirectStalledPeerFallsBackToTunnel(t *testing.T) {
 		_ = ln.Close()
 	})
 
-	a, _ := m.twoNodes(nodeOpts{direct: true, links: []string{"t3.b"}}, nodeOpts{direct: true, directPort: port})
+	a, _ := m.twoNodes(
+		nodeOpts{direct: true, links: []string{"t3.b"}},
+		nodeOpts{direct: true, directPort: port},
+	)
 	a.waitDirectListening()
 
 	// Until a learns b's address it uses the tunnel without trying direct, so
@@ -388,7 +419,12 @@ func TestRevocationClosesLiveSessions(t *testing.T) {
 
 	// Disabling agent-a closes its tunnel.
 	m.update(func(c *hubCfg) { c.disabled = []string{"agent-a"} })
-	eventually(t, 5*time.Second, "agent a disconnected", func() bool { return !m.status().Machines["a"].Connected })
+	eventually(
+		t,
+		5*time.Second,
+		"agent a disconnected",
+		func() bool { return !m.status().Machines["a"].Connected },
+	)
 
 	if !m.status().Machines["b"].Connected {
 		t.Fatal("disabling agent-a dropped agent-b")
@@ -429,7 +465,12 @@ func TestTunnelReconnect(t *testing.T) {
 		return code == http.StatusOK && body == "t3@b mtls=0"
 	})
 
-	eventually(t, 5*time.Second, "one session for b", func() bool { return m.status().Machines["b"].Sessions == 1 })
+	eventually(
+		t,
+		5*time.Second,
+		"one session for b",
+		func() bool { return m.status().Machines["b"].Sessions == 1 },
+	)
 
 	// Same for a, the side that opens the relayed streams.
 	before = m.tl.count()
@@ -455,7 +496,15 @@ func TestRenewal(t *testing.T) {
 	withDirect := m.direct.IsValid()
 
 	// Valid for 120 more days: not yet inside the 90 day renewal window.
-	a, _ := m.twoNodes(nodeOpts{direct: withDirect, cacheTTL: 90 * 24 * time.Hour, links: []string{"t3.b"}, notAfter: time.Now().Add(120 * 24 * time.Hour)}, nodeOpts{direct: withDirect})
+	a, _ := m.twoNodes(
+		nodeOpts{
+			direct:   withDirect,
+			cacheTTL: 90 * 24 * time.Hour,
+			links:    []string{"t3.b"},
+			notAfter: time.Now().Add(120 * 24 * time.Hour),
+		},
+		nodeOpts{direct: withDirect},
+	)
 	oldFP := pki.Fingerprint(a.cert.Leaf)
 
 	var direct *held
@@ -483,7 +532,8 @@ func TestRenewal(t *testing.T) {
 	eventually(t, 20*time.Second, "a renews its certificate", func() bool {
 		s := m.status().Machines["a"]
 
-		return s.Connected && s.CertNotAfter != nil && s.CertNotAfter.After(oldNotAfter.Add(100*24*time.Hour))
+		return s.Connected && s.CertNotAfter != nil &&
+			s.CertNotAfter.After(oldNotAfter.Add(100*24*time.Hour))
 	})
 
 	store := pki.Store{Dir: a.cfg.Identity.Dir}
@@ -502,7 +552,13 @@ func TestRenewal(t *testing.T) {
 		t.Fatalf("old leaf after renewal: got %#v, want Reject %s", msg, proto.RejectLeafNotNewest)
 	}
 
-	if code, body := get(t, a.linkURL("/"), nil, ""); code != http.StatusOK || body != "t3@b mtls=0" {
+	if code, body := get(
+		t,
+		a.linkURL("/"),
+		nil,
+		"",
+	); code != http.StatusOK ||
+		body != "t3@b mtls=0" {
 		t.Fatalf("link after renewal: %d %q", code, body)
 	}
 
@@ -591,7 +647,8 @@ func TestReleaseChangeReachesAgent(t *testing.T) {
 	eventually(t, 10*time.Second, "agents acknowledge the initial release", func() bool {
 		st := m.status()
 
-		return st.Machines["a"].Acked.Release == st.Release.Revision && st.Machines["b"].Acked.Release == st.Release.Revision
+		return st.Machines["a"].Acked.Release == st.Release.Revision &&
+			st.Machines["b"].Acked.Release == st.Release.Revision
 	})
 
 	m.update(func(c *hubCfg) { c.release = "v0.4.0" })
@@ -624,7 +681,12 @@ func TestStaleConfigAlert(t *testing.T) {
 	}
 
 	m.writeRaw("machines: [this is not: valid\n")
-	eventually(t, 5*time.Second, "hub notices the unparsable config", func() bool { return m.watcher.LastError() != nil })
+	eventually(
+		t,
+		5*time.Second,
+		"hub notices the unparsable config",
+		func() bool { return m.watcher.LastError() != nil },
+	)
 
 	// The loaded policy is kept, so the hub keeps serving.
 	if code, _ := m.opsGet("/alerts/stale-config"); code != http.StatusOK {
@@ -634,7 +696,10 @@ func TestStaleConfigAlert(t *testing.T) {
 	// The hub clock drives the stale check.
 	m.clock.Add(int64(11 * time.Minute))
 
-	if code, body := m.opsGet("/alerts/stale-config"); code != http.StatusServiceUnavailable || !strings.HasPrefix(body, "firing") {
+	if code, body := m.opsGet(
+		"/alerts/stale-config",
+	); code != http.StatusServiceUnavailable ||
+		!strings.HasPrefix(body, "firing") {
 		t.Fatalf("stale-config after 11 minutes: %d %q, want 503 firing", code, body)
 	}
 
@@ -682,7 +747,13 @@ func TestTrustBundleRollover(t *testing.T) {
 
 	b := m.newNode("b", nodeOpts{ca: ca2, direct: withDirect})
 
-	if code, body := get(t, a.linkURL("/"), nil, ""); code != http.StatusOK || body != "t3@b mtls=0" {
+	if code, body := get(
+		t,
+		a.linkURL("/"),
+		nil,
+		"",
+	); code != http.StatusOK ||
+		body != "t3@b mtls=0" {
 		t.Fatalf("a -> b across CAs: %d %q", code, body)
 	}
 
@@ -725,7 +796,13 @@ func TestHomeLinksSurviveHubOutage(t *testing.T) {
 	// have done so.
 	time.Sleep(2500 * time.Millisecond)
 
-	if code, body := get(t, a.linkURL("/"), nil, ""); code != http.StatusOK || body != "t3@b mtls=0" {
+	if code, body := get(
+		t,
+		a.linkURL("/"),
+		nil,
+		"",
+	); code != http.StatusOK ||
+		body != "t3@b mtls=0" {
 		t.Fatalf("a -> b with the hub down: %d %q, want a direct answer", code, body)
 	}
 

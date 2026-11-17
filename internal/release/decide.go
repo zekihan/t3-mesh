@@ -40,14 +40,26 @@ func Decide(running Version, rel proto.Release, st State, now time.Time) (Decisi
 	if st.MinStateVersion != "" {
 		floor, err := ParseVersion(st.MinStateVersion)
 		if err != nil {
-			return Skip, fmt.Sprintf("invalid recorded minStateVersion %q: %v", st.MinStateVersion, err)
+			return Skip, fmt.Sprintf(
+				"invalid recorded minStateVersion %q: %v",
+				st.MinStateVersion,
+				err,
+			)
 		}
 		if target.Compare(floor) < 0 {
-			return Skip, fmt.Sprintf("%s is older than minStateVersion %s", rel.Version, st.MinStateVersion)
+			return Skip, fmt.Sprintf(
+				"%s is older than minStateVersion %s",
+				rel.Version,
+				st.MinStateVersion,
+			)
 		}
 	}
 	if cmp < 0 && !rel.RollbackAllowed {
-		return Skip, fmt.Sprintf("%s is older than running %s and rollback is not allowed", rel.Version, running)
+		return Skip, fmt.Sprintf(
+			"%s is older than running %s and rollback is not allowed",
+			rel.Version,
+			running,
+		)
 	}
 	if f, ok := st.Failed[target.String()]; ok {
 		if f.Final {
@@ -55,7 +67,12 @@ func Decide(running Version, rel proto.Release, st State, now time.Time) (Decisi
 		}
 		if f.Kind == KindDependency {
 			if next := f.LastAttempt.Add(DependencyRetryDelay); now.Before(next) {
-				return Skip, fmt.Sprintf("%s failed on a dependency (attempt %d); retry after %s", rel.Version, f.Attempts, next.UTC().Format(time.RFC3339))
+				return Skip, fmt.Sprintf(
+					"%s failed on a dependency (attempt %d); retry after %s",
+					rel.Version,
+					f.Attempts,
+					next.UTC().Format(time.RFC3339),
+				)
 			}
 		}
 	}

@@ -199,7 +199,12 @@ func PoolFromPEM(data []byte) (*x509.CertPool, error) {
 
 // VerifyPeer verifies a TLS peer chain (leaf first) against roots for usage at
 // now and returns the leaf.
-func VerifyPeer(rawCerts [][]byte, roots *x509.CertPool, usage x509.ExtKeyUsage, now time.Time) (*x509.Certificate, error) {
+func VerifyPeer(
+	rawCerts [][]byte,
+	roots *x509.CertPool,
+	usage x509.ExtKeyUsage,
+	now time.Time,
+) (*x509.Certificate, error) {
 	if len(rawCerts) == 0 {
 		return nil, errors.New("pki: no peer certificate")
 	}

@@ -172,7 +172,12 @@ func TestRevisionStable(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	a, _ := Load(f.p)
 	// Reordered identities, same content.
-	reordered := strings.Replace(goodConfig, "[z-tablet, z-phone, agent-z-mac, z-phone]", "[agent-z-mac, z-phone, z-tablet]", 1)
+	reordered := strings.Replace(
+		goodConfig,
+		"[z-tablet, z-phone, agent-z-mac, z-phone]",
+		"[agent-z-mac, z-phone, z-tablet]",
+		1,
+	)
 	write(t, f.p.ConfigDir, ConfigFile, reordered)
 
 	b, err := Load(f.p)
@@ -184,7 +189,12 @@ func TestRevisionStable(t *testing.T) {
 		t.Error("revision should be order independent")
 	}
 
-	write(t, f.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1))
+	write(
+		t,
+		f.p.ConfigDir,
+		ConfigFile,
+		strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1),
+	)
 
 	c, _ := Load(f.p)
 	if c.PolicyRevision == a.PolicyRevision || c.Release.Revision != a.Release.Revision {
@@ -247,10 +257,20 @@ func TestValidation(t *testing.T) {
 		"bad version":   func(c string) string { return strings.Replace(c, "v0.3.0", "0.3", 1) },
 		"unknown entry": func(c string) string { return strings.Replace(c, "mesh-t3-z-mac", "mesh-t3-ghost", 1) },
 		"empty identities": func(c string) string {
-			return strings.Replace(c, "mesh-t3-z-mac:  {identities: [z-phone]}", "mesh-t3-z-mac:  {identities: []}", 1)
+			return strings.Replace(
+				c,
+				"mesh-t3-z-mac:  {identities: [z-phone]}",
+				"mesh-t3-z-mac:  {identities: []}",
+				1,
+			)
 		},
 		"bad fingerprint": func(c string) string {
-			return strings.Replace(c, "AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12", "zz", 1)
+			return strings.Replace(
+				c,
+				"AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12",
+				"zz",
+				1,
+			)
 		},
 		"no domain":     func(c string) string { return strings.Replace(c, "viewerDomain: Mesh.Noqer.com", "", 1) },
 		"unknown field": func(c string) string { return c + "\nbogus: 1\n" },
@@ -356,7 +376,12 @@ func TestStalePolicy(t *testing.T) {
 
 	// Valid change that fails to load because the trust bundle is broken: the
 	// mounted policy revision still differs.
-	write(t, f.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1))
+	write(
+		t,
+		f.p.ConfigDir,
+		ConfigFile,
+		strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1),
+	)
 	write(t, f.p.TrustDir, TrustFile, "broken")
 	w.Reload(nil)
 
@@ -567,7 +592,10 @@ func TestWatcherKubernetesSymlinkSwap(t *testing.T) {
 	w.debounce = 20 * time.Millisecond
 	rec := startRun(t, w)
 
-	cfg.publish(t, map[string]string{ConfigFile: strings.Replace(goodConfig, "z-old", "z-older", 1)})
+	cfg.publish(
+		t,
+		map[string]string{ConfigFile: strings.Replace(goodConfig, "z-old", "z-older", 1)},
+	)
 	rec.wait(t, func(s *Snapshot) bool { return s.Revocations.DisabledIdentities[0] == "z-older" })
 
 	trust.publish(t, map[string]string{TrustFile: string(ca), RevFile: "r2"})
@@ -576,7 +604,10 @@ func TestWatcherKubernetesSymlinkSwap(t *testing.T) {
 	crt2, key2 := mkCert(t, false, time.Now().Add(80*24*time.Hour))
 	cert.publish(t, map[string]string{CertFile: string(crt2), KeyFile: string(key2)})
 
-	got := rec.wait(t, func(s *Snapshot) bool { return s.CertNotAfter.After(time.Now().Add(60 * 24 * time.Hour)) })
+	got := rec.wait(
+		t,
+		func(s *Snapshot) bool { return s.CertNotAfter.After(time.Now().Add(60 * 24 * time.Hour)) },
+	)
 	if got.ServingCert == nil {
 		t.Error("no cert")
 	}

@@ -11,8 +11,17 @@ import (
 func TestCheck(t *testing.T) {
 	now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
 	rules := proto.Rules{Allow: map[string][]string{"t3.devbox": {"z-phone", "agent-z-arch"}}}
-	revs := proto.Revocations{DisabledIdentities: []string{"z-tablet"}, BlockedFingerprints: []string{"aa"}}
-	ok := Session{Identity: "z-phone", Fingerprint: "bb", NotAfter: now.Add(time.Hour), Svc: "t3", Machine: "devbox"}
+	revs := proto.Revocations{
+		DisabledIdentities:  []string{"z-tablet"},
+		BlockedFingerprints: []string{"aa"},
+	}
+	ok := Session{
+		Identity:    "z-phone",
+		Fingerprint: "bb",
+		NotAfter:    now.Add(time.Hour),
+		Svc:         "t3",
+		Machine:     "devbox",
+	}
 
 	cases := []struct {
 		name string
@@ -38,7 +47,10 @@ func TestCheck(t *testing.T) {
 }
 
 func TestIdentityFromURI(t *testing.T) {
-	if n, err := IdentityFromURI("urn:noqer:mtls:clients:agent-z-mac"); err != nil || n != "agent-z-mac" {
+	if n, err := IdentityFromURI(
+		"urn:noqer:mtls:clients:agent-z-mac",
+	); err != nil ||
+		n != "agent-z-mac" {
 		t.Fatalf("got %q, %v", n, err)
 	}
 	for _, bad := range []string{"urn:noqer:mtls:clients:", "urn:other:x", "urn:noqer:mtls:clients:a:b"} {

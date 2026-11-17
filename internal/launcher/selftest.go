@@ -247,7 +247,12 @@ func SelfTest(ctx context.Context, binary string) error {
 		return err
 	}
 	if kg, err := l.KnownGood(); err != nil || kg != "v2" || !reexec {
-		return fmt.Errorf("launcher selftest promote: known-good %q (%v), reexec %v", kg, err, reexec)
+		return fmt.Errorf(
+			"launcher selftest promote: known-good %q (%v), reexec %v",
+			kg,
+			err,
+			reexec,
+		)
 	}
 	return nil
 }

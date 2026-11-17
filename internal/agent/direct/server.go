@@ -38,7 +38,12 @@ func (m *Manager) serverTLS() *tls.Config {
 				return errors.New("direct: no trust bundle")
 			}
 
-			if _, err := pki.VerifyPeer(raw, v.Roots, x509.ExtKeyUsageClientAuth, m.now()); err != nil {
+			if _, err := pki.VerifyPeer(
+				raw,
+				v.Roots,
+				x509.ExtKeyUsageClientAuth,
+				m.now(),
+			); err != nil {
 				return fmt.Errorf("verify caller: %w", err)
 			}
 

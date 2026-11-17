@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"aead.dev/minisign"
+
 	"github.com/zekihan/t3-mesh/internal/launcher"
 	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/release"
@@ -43,11 +44,13 @@ func (f *fakeHealth) Restart() error { return f.rec("restart") }
 func (f *fakeHealth) Fail(reason, kind string) error {
 	return f.rec("fail:" + kind + ":" + reason)
 }
+
 func (f *fakeHealth) get() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.msgs...)
 }
+
 func (f *fakeHealth) has(prefix string) bool {
 	for _, m := range f.get() {
 		if strings.HasPrefix(m, prefix) {
@@ -91,9 +94,15 @@ func newEnv(t *testing.T) *env {
 		v, name := parts[0], parts[1]
 		bin := []byte("binary " + v)
 		sum := sha256.Sum256(bin)
-		mj, _ := json.Marshal(release.Manifest{Version: v, MinStateVersion: "v1.0.0", Assets: []release.Asset{
-			{Platform: "linux-amd64", Name: "agent-linux-amd64", SHA256: hex.EncodeToString(sum[:])},
-		}})
+		mj, _ := json.Marshal(
+			release.Manifest{Version: v, MinStateVersion: "v1.0.0", Assets: []release.Asset{
+				{
+					Platform: "linux-amd64",
+					Name:     "agent-linux-amd64",
+					SHA256:   hex.EncodeToString(sum[:]),
+				},
+			}},
+		)
 		switch name {
 		case release.ManifestAsset:
 			w.Write(mj)
@@ -107,7 +116,11 @@ func newEnv(t *testing.T) *env {
 	})
 	e.srv = httptest.NewServer(mux)
 	t.Cleanup(e.srv.Close)
-	e.dl = &release.Downloader{BaseURL: e.srv.URL, Client: e.srv.Client(), Keys: []minisign.PublicKey{pub}}
+	e.dl = &release.Downloader{
+		BaseURL: e.srv.URL,
+		Client:  e.srv.Client(),
+		Keys:    []minisign.PublicKey{pub},
+	}
 	return e
 }
 
@@ -182,7 +195,13 @@ func closedAddr(t *testing.T) string {
 }
 
 // drive steps probation with fake 1 s ticks until it concludes or n steps pass.
-func drive(t *testing.T, u *Updater, start time.Time, n int, between func(i int, now time.Time)) time.Time {
+func drive(
+	t *testing.T,
+	u *Updater,
+	start time.Time,
+	n int,
+	between func(i int, now time.Time),
+) time.Time {
 	t.Helper()
 	p := &probation{u: u, last: start}
 	now := start
@@ -439,7 +458,13 @@ func TestUpdateSkipsFailedVersion(t *testing.T) {
 	newRunning(t, e)
 	o := e.opts("v1.0.0")
 	o.Hooks.LastHelloAck = func() time.Time { return time.Now() }
-	if err := release.RecordFailure(o.StateDir, "v1.2.0", "bad", release.KindRelease, time.Now()); err != nil {
+	if err := release.RecordFailure(
+		o.StateDir,
+		"v1.2.0",
+		"bad",
+		release.KindRelease,
+		time.Now(),
+	); err != nil {
 		t.Fatal(err)
 	}
 	u, _ := New(o)
@@ -458,7 +483,14 @@ func TestLauncherOutcomeIngested(t *testing.T) {
 	newRunning(t, e)
 	o := e.opts("v1.0.0")
 	os.MkdirAll(o.StateDir, 0o755)
-	b, _ := json.Marshal(release.LauncherOutcome{Version: "v1.1.0", Reason: "crash", Kind: release.KindRelease, At: time.Now()})
+	b, _ := json.Marshal(
+		release.LauncherOutcome{
+			Version: "v1.1.0",
+			Reason:  "crash",
+			Kind:    release.KindRelease,
+			At:      time.Now(),
+		},
+	)
 	os.WriteFile(filepath.Join(o.StateDir, release.LauncherOutcomeFile), b, 0o600)
 	u, _ := New(o)
 	if f := u.FailedUpdates(); len(f) != 1 || f[0].Version != "v1.1.0" {

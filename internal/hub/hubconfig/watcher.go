@@ -229,8 +229,11 @@ func (w *Watcher) Stale(now time.Time) (bool, string) {
 	}
 
 	if now.Add(StaleCertWindow).After(cur.CertNotAfter) && w.diskCertEnd.After(cur.CertNotAfter) {
-		return true, fmt.Sprintf("serving certificate expires %s and a newer one (until %s) is mounted but not loaded",
-			cur.CertNotAfter.UTC().Format(time.RFC3339), w.diskCertEnd.UTC().Format(time.RFC3339))
+		return true, fmt.Sprintf(
+			"serving certificate expires %s and a newer one (until %s) is mounted but not loaded",
+			cur.CertNotAfter.UTC().Format(time.RFC3339),
+			w.diskCertEnd.UTC().Format(time.RFC3339),
+		)
 	}
 
 	return false, ""

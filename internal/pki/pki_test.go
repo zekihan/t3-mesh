@@ -124,15 +124,53 @@ func TestValidateCSRRejects(t *testing.T) {
 	}
 
 	cases := map[string][]byte{
-		"cn":        rawCSR(t, key, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "x"}, URIs: []*url.URL{good}}),
-		"org":       rawCSR(t, key, &x509.CertificateRequest{Subject: pkix.Name{Organization: []string{"x"}}, URIs: []*url.URL{good}}),
-		"dns":       rawCSR(t, key, &x509.CertificateRequest{DNSNames: []string{"a.example"}, URIs: []*url.URL{good}}),
-		"ip":        rawCSR(t, key, &x509.CertificateRequest{IPAddresses: []net.IP{net.IPv4(1, 2, 3, 4)}, URIs: []*url.URL{good}}),
-		"email":     rawCSR(t, key, &x509.CertificateRequest{EmailAddresses: []string{"a@b.c"}, URIs: []*url.URL{good}}),
-		"no uri":    rawCSR(t, key, &x509.CertificateRequest{}),
-		"two uris":  rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{good, uri(t, policy.IdentityURI("other"))}}),
-		"bad uri":   rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{uri(t, "https://example.com/x")}}),
-		"empty id":  rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{uri(t, policy.URIPrefix)}}),
+		"cn": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{Subject: pkix.Name{CommonName: "x"}, URIs: []*url.URL{good}},
+		),
+		"org": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{
+				Subject: pkix.Name{Organization: []string{"x"}},
+				URIs:    []*url.URL{good},
+			},
+		),
+		"dns": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{DNSNames: []string{"a.example"}, URIs: []*url.URL{good}},
+		),
+		"ip": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{
+				IPAddresses: []net.IP{net.IPv4(1, 2, 3, 4)},
+				URIs:        []*url.URL{good},
+			},
+		),
+		"email": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{EmailAddresses: []string{"a@b.c"}, URIs: []*url.URL{good}},
+		),
+		"no uri": rawCSR(t, key, &x509.CertificateRequest{}),
+		"two uris": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{URIs: []*url.URL{good, uri(t, policy.IdentityURI("other"))}},
+		),
+		"bad uri": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{URIs: []*url.URL{uri(t, "https://example.com/x")}},
+		),
+		"empty id": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{URIs: []*url.URL{uri(t, policy.URIPrefix)}},
+		),
 		"p384":      rawCSR(t, p384, &x509.CertificateRequest{URIs: []*url.URL{good}}),
 		"not pem":   []byte("nope"),
 		"wrong typ": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1}}),
@@ -211,19 +249,39 @@ func TestVerifyPeer(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 
-	if _, err := pki.VerifyPeer(server.Certificate, roots, x509.ExtKeyUsageServerAuth, now); err != nil {
+	if _, err := pki.VerifyPeer(
+		server.Certificate,
+		roots,
+		x509.ExtKeyUsageServerAuth,
+		now,
+	); err != nil {
 		t.Fatalf("server usage: %v", err)
 	}
 
-	if _, err := pki.VerifyPeer(client.Certificate, otherRoots, x509.ExtKeyUsageClientAuth, now); err == nil {
+	if _, err := pki.VerifyPeer(
+		client.Certificate,
+		otherRoots,
+		x509.ExtKeyUsageClientAuth,
+		now,
+	); err == nil {
 		t.Fatal("wrong CA accepted")
 	}
 
-	if _, err := pki.VerifyPeer(client.Certificate, roots, x509.ExtKeyUsageServerAuth, now); err == nil {
+	if _, err := pki.VerifyPeer(
+		client.Certificate,
+		roots,
+		x509.ExtKeyUsageServerAuth,
+		now,
+	); err == nil {
 		t.Fatal("wrong usage accepted")
 	}
 
-	if _, err := pki.VerifyPeer(client.Certificate, roots, x509.ExtKeyUsageClientAuth, now.Add(2*time.Hour)); err == nil {
+	if _, err := pki.VerifyPeer(
+		client.Certificate,
+		roots,
+		x509.ExtKeyUsageClientAuth,
+		now.Add(2*time.Hour),
+	); err == nil {
 		t.Fatal("expired accepted")
 	}
 
@@ -231,7 +289,12 @@ func TestVerifyPeer(t *testing.T) {
 		t.Fatal("empty chain accepted")
 	}
 
-	if _, err := pki.VerifyPeer([][]byte{{1, 2}}, roots, x509.ExtKeyUsageClientAuth, now); err == nil {
+	if _, err := pki.VerifyPeer(
+		[][]byte{{1, 2}},
+		roots,
+		x509.ExtKeyUsageClientAuth,
+		now,
+	); err == nil {
 		t.Fatal("garbage accepted")
 	}
 }
@@ -266,7 +329,12 @@ func TestWriteFileAtomic(t *testing.T) {
 }
 
 // issue enrolls key with ca through a CSR and returns cert and chain PEM.
-func issue(t *testing.T, ca *pkitest.CA, key *ecdsa.PrivateKey, identity string) (certPEM, chainPEM []byte) {
+func issue(
+	t *testing.T,
+	ca *pkitest.CA,
+	key *ecdsa.PrivateKey,
+	identity string,
+) (certPEM, chainPEM []byte) {
 	t.Helper()
 
 	csr, err := pki.CreateCSR(key, identity)
@@ -438,7 +506,10 @@ func TestPromoteCrashRecovery(t *testing.T) {
 	}
 
 	// Simulate a crash after the key rename but before the cert rename.
-	if err := os.Rename(filepath.Join(s.Dir, "next-key.pem"), filepath.Join(s.Dir, "key.pem")); err != nil {
+	if err := os.Rename(
+		filepath.Join(s.Dir, "next-key.pem"),
+		filepath.Join(s.Dir, "key.pem"),
+	); err != nil {
 		t.Fatal(err)
 	}
 

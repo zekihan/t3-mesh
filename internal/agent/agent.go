@@ -295,8 +295,11 @@ func (a *Agent) loadLocal() error {
 	tc, _, err := a.store.Load()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("agent: no identity in %s, run `t3-mesh-agent enroll --token <token>` first: %w",
-				a.cfg.Identity.Dir, err)
+			return fmt.Errorf(
+				"agent: no identity in %s, run `t3-mesh-agent enroll --token <token>` first: %w",
+				a.cfg.Identity.Dir,
+				err,
+			)
 		}
 
 		return fmt.Errorf("agent: load identity: %w", err)
@@ -314,7 +317,11 @@ func (a *Agent) loadLocal() error {
 	a.mu.Unlock()
 
 	if tc.Leaf != nil && !a.now().Before(tc.Leaf.NotAfter) {
-		a.log.Warn("identity certificate expired, re-enroll", "not_after", tc.Leaf.NotAfter.Format(time.RFC3339))
+		a.log.Warn(
+			"identity certificate expired, re-enroll",
+			"not_after",
+			tc.Leaf.NotAfter.Format(time.RFC3339),
+		)
 	}
 
 	return nil

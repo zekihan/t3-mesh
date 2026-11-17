@@ -30,19 +30,35 @@ func TestCheck(t *testing.T) {
 		{name: "native client, valid host, no headers", host: "127.0.0.1:27301", pass: true},
 		{name: "localhost host", host: "localhost:27301", pass: true},
 		{name: "localhost host uppercase", host: "LocalHost:27301", pass: true},
-		{name: "same-origin fetch", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, pass: true},
-		{name: "navigation none", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "none"}, pass: true},
-		{name: "origin 127.0.0.1", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27301"}, pass: true},
-		{name: "origin localhost", host: "localhost:27301",
-			headers: map[string]string{"Origin": "http://localhost:27301"}, pass: true},
-		{name: "origin localhost uppercase", host: "localhost:27301",
-			headers: map[string]string{"Origin": "http://LOCALHOST:27301"}, pass: true},
-		{name: "origin and same-origin together", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27301", "Sec-Fetch-Site": "same-origin"},
-			pass:    true},
+		{
+			name: "same-origin fetch", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, pass: true,
+		},
+		{
+			name: "navigation none", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "none"}, pass: true,
+		},
+		{
+			name: "origin 127.0.0.1", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://127.0.0.1:27301"}, pass: true,
+		},
+		{
+			name: "origin localhost", host: "localhost:27301",
+			headers: map[string]string{"Origin": "http://localhost:27301"}, pass: true,
+		},
+		{
+			name: "origin localhost uppercase", host: "localhost:27301",
+			headers: map[string]string{"Origin": "http://LOCALHOST:27301"}, pass: true,
+		},
+		{
+			name: "origin and same-origin together",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin":         "http://127.0.0.1:27301",
+				"Sec-Fetch-Site": "same-origin",
+			},
+			pass: true,
+		},
 
 		{name: "missing host", host: "", pass: false},
 		{name: "host no port", host: "127.0.0.1", pass: false},
@@ -57,45 +73,93 @@ func TestCheck(t *testing.T) {
 		{name: "host lookalike prefix", host: "127.0.0.1:272011", pass: false},
 		{name: "host public address", host: "192.168.1.5:27301", pass: false},
 
-		{name: "origin null", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "null"}, pass: false},
-		{name: "origin empty", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": ""}, pass: false},
-		{name: "origin https scheme", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "https://127.0.0.1:27301"}, pass: false},
-		{name: "origin https localhost", host: "localhost:27301",
-			headers: map[string]string{"Origin": "https://localhost:27301"}, pass: false},
-		{name: "origin other port", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27302"}, pass: false},
-		{name: "origin no port", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1"}, pass: false},
-		{name: "origin foreign", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://evil.example"}, pass: false},
-		{name: "origin foreign with loopback suffix", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27301.evil.example"}, pass: false},
-		{name: "origin trailing slash", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27301/"}, pass: false},
-		{name: "origin localhost on ip host", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://localhost:27301"}, pass: true},
+		{
+			name: "origin null", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "null"}, pass: false,
+		},
+		{
+			name: "origin empty", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": ""}, pass: false,
+		},
+		{
+			name: "origin https scheme", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "https://127.0.0.1:27301"}, pass: false,
+		},
+		{
+			name: "origin https localhost", host: "localhost:27301",
+			headers: map[string]string{"Origin": "https://localhost:27301"}, pass: false,
+		},
+		{
+			name: "origin other port", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://127.0.0.1:27302"}, pass: false,
+		},
+		{
+			name: "origin no port", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://127.0.0.1"}, pass: false,
+		},
+		{
+			name: "origin foreign", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://evil.example"}, pass: false,
+		},
+		{
+			name: "origin foreign with loopback suffix",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin": "http://127.0.0.1:27301.evil.example",
+			},
+			pass: false,
+		},
+		{
+			name: "origin trailing slash", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://127.0.0.1:27301/"}, pass: false,
+		},
+		{
+			name: "origin localhost on ip host", host: "127.0.0.1:27301",
+			headers: map[string]string{"Origin": "http://localhost:27301"}, pass: true,
+		},
 
-		{name: "sec-fetch-site cross-site", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, pass: false},
-		{name: "sec-fetch-site cross-site no origin", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, pass: false},
-		{name: "sec-fetch-site same-site", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "same-site"}, pass: false},
-		{name: "sec-fetch-site empty", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": ""}, pass: false},
-		{name: "sec-fetch-site garbage", host: "127.0.0.1:27301",
-			headers: map[string]string{"Sec-Fetch-Site": "same-origin, cross-site"}, pass: false},
-		{name: "same-origin with foreign origin", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://evil.example", "Sec-Fetch-Site": "same-origin"},
-			pass:    false},
-		{name: "valid origin with cross-site", host: "127.0.0.1:27301",
-			headers: map[string]string{"Origin": "http://127.0.0.1:27301", "Sec-Fetch-Site": "cross-site"},
-			pass:    false},
-		{name: "valid host with bad origin and good sec-fetch-site", host: "localhost:27301",
-			headers: map[string]string{"Origin": "null", "Sec-Fetch-Site": "none"}, pass: false},
+		{
+			name: "sec-fetch-site cross-site", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, pass: false,
+		},
+		{
+			name: "sec-fetch-site cross-site no origin", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, pass: false,
+		},
+		{
+			name: "sec-fetch-site same-site", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "same-site"}, pass: false,
+		},
+		{
+			name: "sec-fetch-site empty", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": ""}, pass: false,
+		},
+		{
+			name: "sec-fetch-site garbage", host: "127.0.0.1:27301",
+			headers: map[string]string{"Sec-Fetch-Site": "same-origin, cross-site"}, pass: false,
+		},
+		{
+			name: "same-origin with foreign origin",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin":         "http://evil.example",
+				"Sec-Fetch-Site": "same-origin",
+			},
+			pass: false,
+		},
+		{
+			name: "valid origin with cross-site",
+			host: "127.0.0.1:27301",
+			headers: map[string]string{
+				"Origin":         "http://127.0.0.1:27301",
+				"Sec-Fetch-Site": "cross-site",
+			},
+			pass: false,
+		},
+		{
+			name: "valid host with bad origin and good sec-fetch-site", host: "localhost:27301",
+			headers: map[string]string{"Origin": "null", "Sec-Fetch-Site": "none"}, pass: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -179,10 +243,16 @@ func TestMiddleware(t *testing.T) {
 		{"native client passes", "127.0.0.1:27301", nil, http.StatusTeapot, true},
 		{"localhost passes", "localhost:27301", nil, http.StatusTeapot, true},
 		{"bad host gets 403", "evil.example:27301", nil, http.StatusForbidden, false},
-		{"null origin gets 403", "127.0.0.1:27301",
-			map[string]string{"Origin": "null"}, http.StatusForbidden, false},
-		{"cross-site gets 403", "127.0.0.1:27301",
-			map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden, false},
+		{
+			"null origin gets 403", "127.0.0.1:27301",
+			map[string]string{"Origin": "null"},
+			http.StatusForbidden, false,
+		},
+		{
+			"cross-site gets 403", "127.0.0.1:27301",
+			map[string]string{"Sec-Fetch-Site": "cross-site"},
+			http.StatusForbidden, false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -116,7 +116,11 @@ func (f *file) build() (*Config, error) {
 		return nil, err
 	}
 
-	installDir, err := absOrDefault("installDir", f.InstallDir, filepath.Join(parent, defaultInstall))
+	installDir, err := absOrDefault(
+		"installDir",
+		f.InstallDir,
+		filepath.Join(parent, defaultInstall),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +131,10 @@ func (f *file) build() (*Config, error) {
 
 	for key, target := range f.Serve {
 		if !validLabel(key) {
-			return nil, fmt.Errorf("agentconfig: serve %q: service name must be [A-Za-z0-9_-]+", key)
+			return nil, fmt.Errorf(
+				"agentconfig: serve %q: service name must be [A-Za-z0-9_-]+",
+				key,
+			)
 		}
 
 		if err = validateLoopbackAddr(target); err != nil {
@@ -237,7 +244,10 @@ func (f *file) validateDirect(linkPorts map[int]bool) (Direct, error) {
 		}
 
 		if linkPorts[d.Port] {
-			return Direct{}, fmt.Errorf("agentconfig: direct.port %d collides with a link port", d.Port)
+			return Direct{}, fmt.Errorf(
+				"agentconfig: direct.port %d collides with a link port",
+				d.Port,
+			)
 		}
 	}
 

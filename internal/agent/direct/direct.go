@@ -160,7 +160,12 @@ func defaultGatewayMAC() (string, error) {
 }
 
 func keepAlive() net.KeepAliveConfig {
-	return net.KeepAliveConfig{Enable: true, Idle: keepIdle, Interval: keepInterval, Count: keepCount}
+	return net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     keepIdle,
+		Interval: keepInterval,
+		Count:    keepCount,
+	}
 }
 
 func defaultDial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -375,7 +380,6 @@ func (m *Manager) syncListeners(ctx context.Context, want map[netip.Addr]struct{
 	for _, a := range add {
 		ap := netip.AddrPortFrom(a, uint16(m.opts.Port)) //nolint:gosec // port validated by config
 		ln, err := lc.Listen(ctx, "tcp", ap.String())
-
 		if err != nil {
 			m.log.Warn("direct listen failed", "addr", ap.String(), "err", err)
 
@@ -524,7 +528,17 @@ func (m *Manager) closeWhere(reason func(*session) string) {
 	m.mu.Unlock()
 
 	for _, v := range victims {
-		m.log.Info("closing direct session", "dir", v.s.dir, "peer", v.s.peerID, "svc", v.s.rule.Svc, "reason", v.reason)
+		m.log.Info(
+			"closing direct session",
+			"dir",
+			v.s.dir,
+			"peer",
+			v.s.peerID,
+			"svc",
+			v.s.rule.Svc,
+			"reason",
+			v.reason,
+		)
 
 		_ = v.s.close()
 	}
