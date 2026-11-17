@@ -60,3 +60,7 @@ tmp/
 # Local IDE settings and environment overrides
 .idea/
 .override.env
+
+# Local builds
+/t3-mesh-hub
+/t3-mesh-agent
