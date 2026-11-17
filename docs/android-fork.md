@@ -16,7 +16,7 @@ the owner's own devices.
 
 ## Non-goals
 
-- Publishing to Play or a public F-Droid repository.
+- Publishing to Play, F-Droid or any other store.
 - Direct LAN connections from the phone. The direct listener trusts only agent
   identities; viewer authorization stays in Traefik and the hub.
 - Push notifications, Clerk sign-in and the managed relay. They depend on
@@ -45,20 +45,35 @@ the owner's own devices.
 
 ## Fork
 
-- **Repository.** A private `zekihan/t3code` fork, branch `mesh`. The fork's
-  commits stay a small stack on top of an upstream nightly tag.
+- **Repository.** A public GitHub fork, `zekihan/t3code`, branch `mesh`. GitHub
+  does not allow a private fork of a public repository, and the mesh hostnames are
+  already public in the t3-mesh docs. The fork's commits stay a small stack on top
+  of an upstream nightly tag.
 - **Base.** Every build rebases the stack onto the newest upstream nightly tag,
   e.g. `v0.1.11-nightly.20261117.4838`, not `main`, so the app matches the nightly
-  servers.
+  servers. Upstream tags several nightlies a day, and preview tags share the build
+  counter; only `-nightly.` tags are bases.
 - **First port.** Bring nickypro's commit onto a current nightly. With Expo and
   React Native upgrades in between this is a port, not a cherry-pick; budget
   1–2 days.
+- **Network stacks.** nickypro's commit covers OkHttp (fetch and WebSocket), Expo
+  FileSystem attachments and Expo Video. The port starts with an audit of every
+  other stack that reaches the environment origin: the `react-native-webview`
+  surfaces (`WorkspaceFileWebPreview`, `PdfPreview`, `PreviewStreamWebView`,
+  `McpAppWebView`, `DeviceStreamWebView`, `HtmlRenderWebView`) and expo-image.
+  Android WebView needs `onReceivedClientCertRequest`, which react-native-webview
+  does not handle.
+- **Certificate renewal.** Device certificates renew yearly. When the stored
+  KeyChain alias is missing, the app asks for the identity again.
 - **Separate app.** Application ID `com.noqer.t3mesh`, its own URL scheme and app
   name, so it installs next to the official app.
-- **Upstream accounts off.** Remove or neutralize Sentry upload, EAS project
-  settings, Clerk, FCM and the managed relay.
-- **No over-the-air updates.** Remove the Expo Updates URL. An upstream JavaScript
-  bundle must never replace the fork's code.
+- **Upstream accounts off.** Mostly build settings: `T3CODE_MOBILE_UPDATES_ENABLED=0`,
+  `T3CODE_RELAY_URL` unset (Observe then points at `observe.invalid`), no Clerk keys
+  and no `T3CODE_ANDROID_GOOGLE_SERVICES_FILE`. The fork's config plugin also removes
+  `updates.url`, `extra.eas.projectId`, `owner` and the `app.t3.codes` verified intent
+  filter.
+- **No over-the-air updates.** An upstream JavaScript bundle must never replace the
+  fork's code.
 
 ## Mesh features
 
@@ -109,18 +124,17 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 
 - **CI.** A scheduled GitHub Actions job in the fork rebases onto the newest
   nightly, runs the mobile tests, then `expo prebuild` and
-  `./gradlew assembleRelease`.
-- **Signing.** The APK signing key and the F-Droid index key live in the secrets
-  repo and are published to the fork's Actions secrets by homelab
-  `terraform/git`, like the t3-mesh minisign key. Losing the APK key means
-  reinstalling and re-pairing, so both keys are backed up.
-- **F-Droid repository.** `fdroid update` builds a signed index, published as
-  static files on the cluster, e.g. `fdroid.noqer.com`, with no client certificate
-  because the F-Droid client cannot send one. The APK contains no secrets, but
-  anyone can read the mesh hostnames from it.
-- **Sideload check.** Before relying on the F-Droid repository, confirm that
-  Google's developer verification does not block installs on the phone. `adb
-  install -r` is the fallback.
+  `./gradlew assembleRelease` for `arm64-v8a` only (Galaxy S24 Ultra and Galaxy
+  Tab S9 FE+).
+- **Signing.** The APK signing key lives in the secrets repo and is published to
+  the fork's Actions secrets by homelab `terraform/git`, like the t3-mesh minisign
+  key. Losing it means reinstalling and re-pairing, so it is backed up.
+- **Distribution.** Each build is a GitHub Release on the fork with the signed APK.
+  Obtainium on each device tracks those releases and installs updates; Android
+  refuses an update signed with a different key. No index, index key or hosting.
+  The APK contains no secrets, but anyone can read the mesh hostnames from it.
+- **Sideload check.** Before A0b, confirm that Google's developer verification does
+  not block Obtainium installs on the devices. `adb install -r` is the fallback.
 
 ## Versioning
 
@@ -130,6 +144,10 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 | `versionCode` | `<nightly build number> × 100 + <rev>` | `483801` |
 | Git tag | `v<nightly>-mesh.<rev>` | `v0.1.11-nightly.20261117.4838-mesh.1` |
 
+- Expo's `version` stays upstream's mobile version (e.g. `2.3.0`), because the app
+  sends it to the server in its auth client metadata. The fork's config plugin sets
+  `versionName` and `versionCode`; upstream takes `versionCode` from EAS, so a local
+  Gradle build would otherwise get 1.
 - `rev` restarts at 1 on each new upstream base.
 - The upstream build number only increases, so `versionCode` does too.
 - Hub endpoints are versioned (`/api/v1/...`) independently of t3-mesh releases.
@@ -148,7 +166,8 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 
 | | Scope | Done when |
 |---|---|---|
-| A0 | Fork, port of the mTLS commit, app identity, CI build, signing, F-Droid repository | The phone installs the fork from the F-Droid repository, pairs with z-arch over `t3.z-arch.mesh.noqer.com` using the KeyChain identity, and chats, uploads an attachment and survives a cold start |
+| A0a | Fork, port of the mTLS commit, network-stack audit, app identity; local build installed with `adb` | The phone pairs with z-arch over `t3.z-arch.mesh.noqer.com` using the KeyChain identity, chats, uploads an attachment, opens a file and a PDF preview, and survives a cold start |
+| A0b | CI build, signing, GitHub Releases, Obtainium | Both devices install and update the fork through Obtainium from a CI release, and the A0a checks pass on that build |
 | A1 | Item 1: `hub.mesh.noqer.com`, `/api/v1/machines` and the Mesh screen | The Mesh screen lists all three machines with online state; a viewer missing from a machine's policy does not see that machine |
 | A2 | Item 5: fleet screen | Versions and certificate expiry match `/status` |
 | A3 | Item 2: one declared preview service on z-arch | A Vite dev server on z-arch opens from the phone, home and away |
@@ -156,6 +175,5 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 
 ## Open decisions
 
-- Fork repository name, and whether it is private.
-- Where the F-Droid repository is served: the cluster or GitHub Pages.
-- Whether to do item 3 at all, given the approver-policy widening it needs.
+- Whether to do item 3 at all, given the approver-policy widening it needs. Decided
+  after A2.
