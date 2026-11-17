@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design; implementation in progress (M0 to M3 done 2026-11-17). Date: 2026-11-16.
+Status: accepted design; implemented (M0 to M4 done 2026-11-17). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -736,6 +736,20 @@ the hub's public addresses blackholed, z-mac opened no direct listener and diale
 peer; the hotspot's `10.167.57.0/24` is outside `homeCIDRs`, so the gateway-MAC check
 for a foreign `192.168.x` network was covered by the integration test rather than on
 z-mac. Since v0.1.8 the agent logs each change of its direct decision with the reason.
+
+**M4 rollout (2026-11-17):** a `renew-now` file forced a renewal on z-mac (new leaf
+in 2 s, hub admitted it, no leftover files). Two deliberately broken releases, built
+from a `FAULT` file and marked as pre-releases, proved recovery on all three
+machines: v0.1.10 (`agent-crash`) was rolled back within seconds and recorded as
+failed; v0.1.11 (`launcher-crash`) passed probation, then its launcher failed and the
+fallback restored v0.1.9 and recorded the version (Linux within 15 s, z-mac after
+about 13 minutes through the 5-minute fallback daemon). The hub's update-failed alert
+fired for each machine and cleared once v0.1.12 was desired, as Gatus showed. The
+rollout found and fixed two bugs: the fallback did not record the abandoned version,
+so the agent would have reinstalled it, and the update precondition counted only the
+session's `HelloAck`, which deferred every update on a long-lived session. After the
+update z-mac still dials the LAN and accepts direct connections; its application
+firewall is off, so the ad-hoc-signature firewall risk remains untested.
 
 After each machine moves, turn T3 Connect off on it (`t3 up`), bind T3 to
 `127.0.0.1`, turn LAN mode off, and remove any other proxy or listener that reaches
