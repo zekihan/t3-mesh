@@ -148,9 +148,11 @@ func (a *Agent) lanAddrs() []string {
 		}
 	}
 
+	// Loopback is kept only when a configured home prefix contains it (tests);
+	// the fallback above never picks it because it is not private.
 	out := make([]string, 0, len(picked))
 	for _, ad := range picked {
-		if ad.IsLoopback() || ad.IsLinkLocalUnicast() {
+		if ad.IsLinkLocalUnicast() {
 			continue
 		}
 
