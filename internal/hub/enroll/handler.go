@@ -19,6 +19,14 @@ import (
 // exchangeTimeout bounds a whole enrollment exchange.
 const exchangeTimeout = 30 * time.Second
 
+var (
+	errUnexpectedMessage   = errors.New("unexpected message")
+	errTokenBoundElsewhere = errors.New("token bound to a different identity")
+	errCertCount           = errors.New("issued PEM holds the wrong number of certificates")
+	errIdentityMismatch    = errors.New("issued certificate identity differs")
+	errKeyMismatch         = errors.New("issued certificate key differs from CSR key")
+)
+
 // Handler serves enrollment connections (ALPN t3-mesh-enroll/1).
 type Handler struct {
 	Tokens   *Tokens
@@ -30,13 +38,13 @@ type Handler struct {
 	Now      func() time.Time
 }
 
-// errRejected carries a short, non-sensitive detail for the client.
-type errRejected struct {
-	detail string
+// rejectedError carries a short, non-sensitive detail for the client.
+type rejectedError struct {
 	cause  error
+	detail string
 }
 
-func (e *errRejected) Error() string {
+func (e *rejectedError) Error() string {
 	if e.cause != nil {
 		return e.detail + ": " + e.cause.Error()
 	}
@@ -44,9 +52,14 @@ func (e *errRejected) Error() string {
 	return e.detail
 }
 
-func (e *errRejected) Unwrap() error { return e.cause }
+func (e *rejectedError) Unwrap() error { return e.cause }
 
-func reject(detail string, cause error) error { return &errRejected{detail: detail, cause: cause} }
+func reject(
+	detail string,
+	cause error,
+) error {
+	return &rejectedError{detail: detail, cause: cause}
+}
 
 // Serve runs one enrollment exchange on conn and closes it.
 //
@@ -55,21 +68,27 @@ func reject(detail string, cause error) error { return &errRejected{detail: deta
 // valid, the token is redeemed (consumed) before the identity, policy and
 // issuance checks, so a valid token presented with a mismatched identity or
 // for a disabled identity is burned.
-func (h *Handler) Serve(ctx context.Context, conn net.Conn, source netip.Addr) {
+func (handler *Handler) Serve(ctx context.Context, conn net.Conn, source netip.Addr) {
 	defer func() { _ = conn.Close() }()
 
-	log := h.Log
+	log := handler.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	log = log.With("source", source.String())
+	log = log.With(slog.String("source", source.String()))
 
-	_ = conn.SetDeadline(time.Now().Add(exchangeTimeout))
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
+	_ = conn.SetDeadline(
+		time.Now().Add(exchangeTimeout),
+	)
 
-	if h.Limiter != nil && !h.Limiter.Allow(source) {
-		log.Warn("enrollment rate limited")
-		h.writeReject(conn, "too many attempts")
+	if handler.Limiter != nil && !handler.Limiter.Allow(source) {
+		log.WarnContext(
+			ctx,
+			"Enrollment rate limited",
+		)
+		handler.writeReject(conn, "too many attempts")
 
 		return
 	}
@@ -80,92 +99,113 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn, source netip.Addr) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 
-	identity, fp, resp, err := h.exchange(ctx, conn)
+	identity, fp, resp, err := handler.exchange(ctx, conn)
 	if identity != "" {
-		log = log.With("identity", identity)
+		log = log.With(slog.Any("identity", identity))
 	}
 
 	if err != nil {
-		log.Warn("enrollment failed", "error", err)
+		log.WarnContext(
+			ctx,
+			"Enrollment failed",
+			slog.Any("error", err),
+		)
 
 		detail := "enrollment failed"
 
-		var rj *errRejected
-		if errors.As(err, &rj) {
+		if rj, ok := errors.AsType[*rejectedError](err); ok {
 			detail = rj.detail
 		}
 
-		h.writeReject(conn, detail)
+		handler.writeReject(conn, detail)
 
 		return
 	}
 
-	if err = proto.WriteMessage(conn, resp); err != nil {
-		log.Warn("enrollment reply failed", "error", err, "fingerprint", fp)
+	err = proto.WriteMessage(conn, resp)
+	if err != nil {
+		log.WarnContext(
+			ctx,
+			"Enrollment reply failed",
+			slog.Any("error", err),
+			slog.Any("fingerprint", fp),
+		)
 
 		return
 	}
 
-	log.Info("enrollment succeeded", "fingerprint", fp)
+	log.InfoContext(
+		ctx,
+		"Enrollment succeeded",
+		slog.Any("fingerprint", fp),
+	)
 }
 
-func (h *Handler) writeReject(conn net.Conn, detail string) {
-	_ = proto.WriteMessage(conn, proto.Reject{Reason: proto.RejectEnrollFailed, Detail: detail})
+func (handler *Handler) writeReject(conn net.Conn, detail string) {
+	//nolint:errcheck // best-effort notice; the peer may already be gone
+	_ = proto.WriteMessage(
+		conn,
+		proto.Reject{Reason: proto.RejectEnrollFailed, Detail: detail},
+	)
 }
 
-func (h *Handler) exchange(
+func (handler *Handler) exchange(
 	ctx context.Context,
 	conn net.Conn,
-) (identity, fp string, resp proto.Enrolled, err error) {
+) (string, string, proto.Enrolled, error) {
 	msg, err := proto.ReadMessage(conn, proto.MaxEnrollSize)
 	if err != nil {
-		return "", "", resp, reject("bad request", err)
+		return "", "", proto.Enrolled{}, reject("bad request", err)
 	}
 
 	req, ok := msg.(proto.Enroll)
 	if !ok {
-		return "", "", resp, reject("unexpected message", fmt.Errorf("got %s", msg.MessageType()))
+		return "", "", proto.Enrolled{}, reject(
+			"unexpected message",
+			fmt.Errorf("%w: got %s", errUnexpectedMessage, msg.MessageType()),
+		)
 	}
 
 	csr, csrIdentity, err := pki.ValidateCSR([]byte(req.CSR))
 	if err != nil {
-		return "", "", resp, reject("invalid CSR", err)
+		return "", "", proto.Enrolled{}, reject("invalid CSR", err)
 	}
 
-	tokenIdentity, err := h.Tokens.Redeem(req.Token)
+	tokenIdentity, err := handler.Tokens.Redeem(req.Token)
 	if err != nil {
-		return csrIdentity, "", resp, reject("invalid token", err)
+		return csrIdentity, "", proto.Enrolled{}, reject("invalid token", err)
 	}
 
 	if tokenIdentity != csrIdentity {
-		return csrIdentity, "", resp, reject(
+		return csrIdentity, "", proto.Enrolled{}, reject(
 			"identity mismatch",
-			fmt.Errorf("token bound to %q", tokenIdentity),
+			fmt.Errorf("%w: %q", errTokenBoundElsewhere, tokenIdentity),
 		)
 	}
 
-	identity = csrIdentity
+	identity := csrIdentity
 
-	if h.Allowed != nil {
-		if err = h.Allowed(identity); err != nil {
-			return identity, "", resp, reject("identity not allowed", err)
+	if handler.Allowed != nil {
+		err = handler.Allowed(identity)
+		if err != nil {
+			return identity, "", proto.Enrolled{}, reject("identity not allowed", err)
 		}
 	}
 
-	certPEM, chainPEM, err := h.Issuer.Issue(ctx, identity, []byte(req.CSR))
+	certPEM, chainPEM, err := handler.Issuer.Issue(ctx, identity, []byte(req.CSR))
 	if err != nil {
-		return identity, "", resp, reject("issuance failed", err)
+		return identity, "", proto.Enrolled{}, reject("issuance failed", err)
 	}
 
 	leaf, err := verifyLeaf(certPEM, identity, csr)
 	if err != nil {
-		return identity, "", resp, reject("issuance failed", err)
+		return identity, "", proto.Enrolled{}, reject("issuance failed", err)
 	}
 
-	fp = pki.Fingerprint(leaf)
+	fp := pki.Fingerprint(leaf)
 
-	if h.OnIssued != nil {
-		h.OnIssued(identity, fp)
+	if handler.OnIssued != nil {
+		handler.OnIssued(identity, fp)
 	}
 
 	return identity, fp, proto.Enrolled{Certificate: string(certPEM), Chain: string(chainPEM)}, nil
@@ -182,7 +222,7 @@ func verifyLeaf(
 	}
 
 	if len(certs) != 1 {
-		return nil, fmt.Errorf("issued PEM holds %d certificates, want 1", len(certs))
+		return nil, fmt.Errorf("%w: got %d, want 1", errCertCount, len(certs))
 	}
 
 	leaf := certs[0]
@@ -193,11 +233,11 @@ func verifyLeaf(
 	}
 
 	if got != identity {
-		return nil, fmt.Errorf("issued certificate identity %q, want %q", got, identity)
+		return nil, fmt.Errorf("%w: got %q, want %q", errIdentityMismatch, got, identity)
 	}
 
 	if !samePublicKey(leaf.PublicKey, csr.PublicKey) {
-		return nil, errors.New("issued certificate key differs from CSR key")
+		return nil, errKeyMismatch
 	}
 
 	return leaf, nil

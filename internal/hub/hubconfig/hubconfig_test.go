@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ policy:
   blockedFingerprints: ["AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12AB12"]
 `
 
-func mkCert(t *testing.T, ca bool, notAfter time.Time) (certPEM, keyPEM []byte) {
+func mkCert(t *testing.T, ca bool, notAfter time.Time) ([]byte, []byte) {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -75,11 +76,13 @@ func mkCert(t *testing.T, ca bool, notAfter time.Time) (certPEM, keyPEM []byte) 
 func write(t *testing.T, dir, name, content string) {
 	t.Helper()
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	err := os.MkdirAll(dir, 0o750)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+	err = os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 }
@@ -93,84 +96,100 @@ func newFixture(t *testing.T, cfg string, certEnd time.Time) *fixture {
 	t.Helper()
 
 	root := t.TempDir()
-	f := &fixture{root: root, p: Paths{
+	fix := &fixture{root: root, p: Paths{
 		ConfigDir: filepath.Join(root, "config"),
 		TrustDir:  filepath.Join(root, "trust"),
 		CertDir:   filepath.Join(root, "cert"),
 	}}
 
-	write(t, f.p.ConfigDir, ConfigFile, cfg)
+	write(t, fix.p.ConfigDir, ConfigFile, cfg)
 
 	ca1, _ := mkCert(t, true, time.Now().Add(1000*time.Hour))
 	ca2, _ := mkCert(t, true, time.Now().Add(1000*time.Hour))
-	write(t, f.p.TrustDir, TrustFile, string(ca1)+string(ca2))
-	write(t, f.p.TrustDir, RevFile, "rev-1\n")
+	write(t, fix.p.TrustDir, TrustFile, string(ca1)+string(ca2))
+	write(t, fix.p.TrustDir, RevFile, "rev-1\n")
 
 	crt, key := mkCert(t, false, certEnd)
-	write(t, f.p.CertDir, CertFile, string(crt))
-	write(t, f.p.CertDir, KeyFile, string(key))
+	write(t, fix.p.CertDir, CertFile, string(crt))
+	write(t, fix.p.CertDir, KeyFile, string(key))
 
-	return f
+	return fix
 }
 
 func TestLoadDerivedState(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(90*24*time.Hour))
 
-	s, err := Load(f.p)
+	snap, err := Load(f.p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got := s.Rules.Allow["t3.devbox"]
+	assertRulesAndMachines(t, snap)
+	assertRevisionsAndTrust(t, snap)
+	assertIdentityLookups(t, snap)
+}
+
+func assertRulesAndMachines(t *testing.T, snap *Snapshot) {
+	t.Helper()
+
+	got := snap.Rules.Allow["t3.devbox"]
 	if strings.Join(got, ",") != "agent-z-mac,z-phone,z-tablet" {
 		t.Errorf("allow devbox = %v", got)
 	}
 
-	if s.Machines["z-mac"].DisconnectAlertAfter != 24*time.Hour ||
-		s.Machines["devbox"].DisconnectAlertAfter != DefaultDisconnectAlertAfter {
-		t.Errorf("disconnect thresholds = %+v", s.Machines)
+	if snap.Machines["z-mac"].DisconnectAlertAfter != 24*time.Hour ||
+		snap.Machines["devbox"].DisconnectAlertAfter != DefaultDisconnectAlertAfter {
+		t.Errorf("disconnect thresholds = %+v", snap.Machines)
 	}
 
-	if len(s.Rules.Allow["t3.z-mac"]) != 1 || s.Rules.Revision == "" {
-		t.Errorf("rules = %+v", s.Rules)
+	if len(snap.Rules.Allow["t3.z-mac"]) != 1 || snap.Rules.Revision == "" {
+		t.Errorf("rules = %+v", snap.Rules)
+	}
+}
+
+func assertRevisionsAndTrust(t *testing.T, snap *Snapshot) {
+	t.Helper()
+
+	if snap.Revocations.BlockedFingerprints[0] != strings.Repeat("ab12", 16) {
+		t.Errorf("fingerprint not normalized: %v", snap.Revocations.BlockedFingerprints)
 	}
 
-	if s.Revocations.BlockedFingerprints[0] != strings.Repeat("ab12", 16) {
-		t.Errorf("fingerprint not normalized: %v", s.Revocations.BlockedFingerprints)
-	}
-
-	if s.Revocations.Revision == "" || s.Release.Revision == "" || s.PolicyRevision == "" {
+	if snap.Revocations.Revision == "" || snap.Release.Revision == "" || snap.PolicyRevision == "" {
 		t.Error("missing revisions")
 	}
 
-	if s.TrustBundle.Revision != "rev-1" || s.TrustBundle.PEM == "" || s.TrustPool == nil {
-		t.Errorf("trust = %+v", s.TrustBundle)
+	if snap.TrustBundle.Revision != "rev-1" || snap.TrustBundle.PEM == "" || snap.TrustPool == nil {
+		t.Errorf("trust = %+v", snap.TrustBundle)
 	}
 
-	if s.ServingCert == nil || s.CertNotAfter.IsZero() {
+	if snap.ServingCert == nil || snap.CertNotAfter.IsZero() {
 		t.Error("no serving cert")
 	}
+}
 
-	if m, ok := s.MachineForIdentity("agent-z-mac"); !ok || m != "z-mac" {
+func assertIdentityLookups(t *testing.T, snap *Snapshot) {
+	t.Helper()
+
+	if m, ok := snap.MachineForIdentity("agent-z-mac"); !ok || m != "z-mac" {
 		t.Errorf("MachineForIdentity = %q %v", m, ok)
 	}
 
-	if _, ok := s.MachineForIdentity("z-phone"); ok {
+	if _, ok := snap.MachineForIdentity("z-phone"); ok {
 		t.Error("z-phone is not an agent")
 	}
 
-	if s.Issuer.Name != "clients" {
-		t.Errorf("issuer = %+v", s.Issuer)
+	if snap.Issuer.Name != "clients" {
+		t.Errorf("issuer = %+v", snap.Issuer)
 	}
 
-	if strings.Join(s.Services("devbox"), ",") != "t3" || s.Services("nope") != nil {
+	if strings.Join(snap.Services("devbox"), ",") != "t3" || snap.Services("nope") != nil {
 		t.Error("Services")
 	}
 }
 
 func TestRevisionStable(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
-	a, _ := Load(f.p)
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	snap, _ := Load(fix.p)
 	// Reordered identities, same content.
 	reordered := strings.Replace(
 		goodConfig,
@@ -178,33 +197,33 @@ func TestRevisionStable(t *testing.T) {
 		"[agent-z-mac, z-phone, z-tablet]",
 		1,
 	)
-	write(t, f.p.ConfigDir, ConfigFile, reordered)
+	write(t, fix.p.ConfigDir, ConfigFile, reordered)
 
-	b, err := Load(f.p)
+	b, err := Load(fix.p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if a.PolicyRevision != b.PolicyRevision || a.Rules.Revision != b.Rules.Revision {
+	if snap.PolicyRevision != b.PolicyRevision || snap.Rules.Revision != b.Rules.Revision {
 		t.Error("revision should be order independent")
 	}
 
 	write(
 		t,
-		f.p.ConfigDir,
+		fix.p.ConfigDir,
 		ConfigFile,
 		strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1),
 	)
 
-	c, _ := Load(f.p)
-	if c.PolicyRevision == a.PolicyRevision || c.Release.Revision != a.Release.Revision {
+	c, _ := Load(fix.p)
+	if c.PolicyRevision == snap.PolicyRevision || c.Release.Revision != snap.Release.Revision {
 		t.Error("policy revision should change, release revision not")
 	}
 }
 
 func TestHostTarget(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
-	s, _ := Load(f.p)
+	snap, _ := Load(f.p)
 
 	cases := []struct {
 		host, machine, svc string
@@ -221,7 +240,7 @@ func TestHostTarget(t *testing.T) {
 		{"", "", "", false},
 	}
 	for _, c := range cases {
-		m, sv, ok := s.HostTarget(c.host)
+		m, sv, ok := snap.HostTarget(c.host)
 		if m != c.machine || sv != c.svc || ok != c.ok {
 			t.Errorf("HostTarget(%q) = %q %q %v", c.host, m, sv, ok)
 		}
@@ -230,7 +249,7 @@ func TestHostTarget(t *testing.T) {
 
 func TestIsHome(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
-	s, _ := Load(f.p)
+	snap, _ := Load(f.p)
 
 	for addr, want := range map[string]bool{
 		"192.168.1.5":          true,
@@ -240,7 +259,7 @@ func TestIsHome(t *testing.T) {
 		"fd12:3456:789a:2::1":  false,
 		"8.8.8.8":              false,
 	} {
-		if got := s.IsHome(netip.MustParseAddr(addr)); got != want {
+		if got := snap.IsHome(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("IsHome(%s) = %v", addr, got)
 		}
 	}
@@ -290,25 +309,28 @@ func TestValidation(t *testing.T) {
 }
 
 func TestTrustAndCertErrors(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
-	write(t, f.p.TrustDir, TrustFile, "not pem")
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	write(t, fix.p.TrustDir, TrustFile, "not pem")
 
-	if _, err := Load(f.p); err == nil {
+	_, err := Load(fix.p)
+	if err == nil {
 		t.Error("empty bundle accepted")
 	}
 
-	f = newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
-	write(t, f.p.TrustDir, RevFile, "  \n")
+	fix = newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	write(t, fix.p.TrustDir, RevFile, "  \n")
 
-	if _, err := Load(f.p); err == nil {
+	_, err = Load(fix.p)
+	if err == nil {
 		t.Error("empty revision accepted")
 	}
 
-	f = newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	fix = newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	_, otherKey := mkCert(t, false, time.Now().Add(time.Hour))
-	write(t, f.p.CertDir, KeyFile, string(otherKey))
+	write(t, fix.p.CertDir, KeyFile, string(otherKey))
 
-	if _, err := Load(f.p); err == nil {
+	_, err = Load(fix.p)
+	if err == nil {
 		t.Error("mismatched key accepted")
 	}
 }
@@ -316,61 +338,62 @@ func TestTrustAndCertErrors(t *testing.T) {
 func TestNewWatcherFirstLoadFails(t *testing.T) {
 	f := newFixture(t, "machines: [", time.Now().Add(time.Hour))
 
-	if _, err := NewWatcher(f.p, nil); err == nil {
+	_, err := NewWatcher(f.p, nil)
+	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestReloadKeepsPreviousOnFailure(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 
-	w, err := NewWatcher(f.p, nil)
+	watcher, err := NewWatcher(fix.p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	first := w.Current()
+	first := watcher.Current()
 
-	write(t, f.p.ConfigDir, ConfigFile, "garbage: [")
-	w.Reload(nil)
+	write(t, fix.p.ConfigDir, ConfigFile, "garbage: [")
+	watcher.Reload(nil)
 
-	if w.Current() != first || w.LastError() == nil {
+	if watcher.Current() != first || watcher.LastError() == nil {
 		t.Error("failed reload must keep snapshot and record error")
 	}
 
 	// Unchanged content: no swap, no callback.
-	write(t, f.p.ConfigDir, ConfigFile, goodConfig)
+	write(t, fix.p.ConfigDir, ConfigFile, goodConfig)
 
 	called := false
 
-	w.Reload(func(_, _ *Snapshot) { called = true })
+	watcher.Reload(func(_, _ *Snapshot) { called = true })
 
-	if called || w.Current() != first || w.LastError() != nil {
+	if called || watcher.Current() != first || watcher.LastError() != nil {
 		t.Error("identical reload should be a no-op")
 	}
 
-	write(t, f.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.4.0", 1))
-	w.Reload(func(old, next *Snapshot) {
+	write(t, fix.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.4.0", 1))
+	watcher.Reload(func(old, next *Snapshot) {
 		called = old == first && next.Release.Version == "v0.4.0"
 	})
 
-	if !called || w.Current().Release.Version != "v0.4.0" {
+	if !called || watcher.Current().Release.Version != "v0.4.0" {
 		t.Error("changed reload not applied")
 	}
 }
 
 func TestStalePolicy(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	clock := time.Now()
 
-	w, err := NewWatcher(f.p, nil)
+	watcher, err := NewWatcher(fix.p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	w.now = func() time.Time { return clock }
+	watcher.now = func() time.Time { return clock }
 
-	if stale, _ := w.Stale(clock); stale {
+	if stale, _ := watcher.Stale(clock); stale {
 		t.Fatal("fresh watcher stale")
 	}
 
@@ -378,28 +401,28 @@ func TestStalePolicy(t *testing.T) {
 	// mounted policy revision still differs.
 	write(
 		t,
-		f.p.ConfigDir,
+		fix.p.ConfigDir,
 		ConfigFile,
 		strings.Replace(goodConfig, "[z-phone]}", "[z-phone, z-new]}", 1),
 	)
-	write(t, f.p.TrustDir, TrustFile, "broken")
-	w.Reload(nil)
+	write(t, fix.p.TrustDir, TrustFile, "broken")
+	watcher.Reload(nil)
 
-	if stale, _ := w.Stale(clock.Add(9 * time.Minute)); stale {
+	if stale, _ := watcher.Stale(clock.Add(9 * time.Minute)); stale {
 		t.Error("stale before 10 minutes")
 	}
 
-	stale, reason := w.Stale(clock.Add(11 * time.Minute))
+	stale, reason := watcher.Stale(clock.Add(11 * time.Minute))
 	if !stale || reason == "" {
 		t.Error("expected stale after 10 minutes")
 	}
 
 	// Repair trust: reload applies, stale clears.
 	ca, _ := mkCert(t, true, time.Now().Add(time.Hour))
-	write(t, f.p.TrustDir, TrustFile, string(ca))
-	w.Reload(nil)
+	write(t, fix.p.TrustDir, TrustFile, string(ca))
+	watcher.Reload(nil)
 
-	if stale, _ := w.Stale(clock.Add(time.Hour)); stale {
+	if stale, _ := watcher.Stale(clock.Add(time.Hour)); stale {
 		t.Error("stale after successful reload")
 	}
 }
@@ -420,63 +443,64 @@ func TestStaleInvalidPolicyFile(t *testing.T) {
 
 func TestStaleCert(t *testing.T) {
 	clock := time.Now()
-	f := newFixture(t, goodConfig, clock.Add(10*24*time.Hour))
+	fix := newFixture(t, goodConfig, clock.Add(10*24*time.Hour))
 
-	w, err := NewWatcher(f.p, nil)
+	watcher, err := NewWatcher(fix.p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Near expiry but nothing newer mounted.
-	if stale, _ := w.Stale(clock); stale {
+	if stale, _ := watcher.Stale(clock); stale {
 		t.Error("stale without a newer cert")
 	}
 
 	// A newer cert is mounted but the key is mismatched, so the load fails.
 	newCrt, _ := mkCert(t, false, clock.Add(80*24*time.Hour))
-	write(t, f.p.CertDir, CertFile, string(newCrt))
-	w.Reload(nil)
+	write(t, fix.p.CertDir, CertFile, string(newCrt))
+	watcher.Reload(nil)
 
-	if stale, reason := w.Stale(clock); !stale {
+	if stale, reason := watcher.Stale(clock); !stale {
 		t.Errorf("expected stale cert, reason %q", reason)
 	}
 
 	// Far from expiry: not stale even with a newer cert mounted.
-	if stale, _ := w.Stale(clock.Add(-30 * 24 * time.Hour)); stale {
+	if stale, _ := watcher.Stale(clock.Add(-30 * 24 * time.Hour)); stale {
 		t.Error("stale while cert is far from expiry")
 	}
 }
 
 type recorder struct {
-	mu  sync.Mutex
 	ch  chan *Snapshot
 	cnt int
+	mu  sync.Mutex
 }
 
-func (r *recorder) on(_, next *Snapshot) {
-	r.mu.Lock()
-	r.cnt++
-	r.mu.Unlock()
+func (rec *recorder) on(_, next *Snapshot) {
+	rec.mu.Lock()
+	rec.cnt++
+	rec.mu.Unlock()
 
 	select {
-	case r.ch <- next:
+	case rec.ch <- next:
 	default:
 	}
 }
 
-func startRun(t *testing.T, w *Watcher) *recorder {
+func startRun(t *testing.T, watcher *Watcher) *recorder {
 	t.Helper()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	rec := &recorder{ch: make(chan *Snapshot, 16)}
 	done := make(chan error, 1)
 
-	go func() { done <- w.Run(ctx, rec.on) }()
+	go func() { done <- watcher.Run(ctx, rec.on) }()
 
 	t.Cleanup(func() {
 		cancel()
 
-		if err := <-done; err != nil {
+		err := <-done
+		if err != nil {
 			t.Errorf("Run: %v", err)
 		}
 	})
@@ -484,14 +508,14 @@ func startRun(t *testing.T, w *Watcher) *recorder {
 	return rec
 }
 
-func (r *recorder) wait(t *testing.T, pred func(*Snapshot) bool) *Snapshot {
+func (rec *recorder) wait(t *testing.T, pred func(*Snapshot) bool) *Snapshot {
 	t.Helper()
 
 	timeout := time.After(10 * time.Second)
 
 	for {
 		select {
-		case s := <-r.ch:
+		case s := <-rec.ch:
 			if pred(s) {
 				return s
 			}
@@ -502,33 +526,33 @@ func (r *recorder) wait(t *testing.T, pred func(*Snapshot) bool) *Snapshot {
 }
 
 func TestWatcherPicksUpPlainWrites(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 
-	w, err := NewWatcher(f.p, nil)
+	watcher, err := NewWatcher(fix.p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	w.debounce = 20 * time.Millisecond
-	rec := startRun(t, w)
+	watcher.debounce = 20 * time.Millisecond
+	rec := startRun(t, watcher)
 
-	write(t, f.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.9.9", 1))
+	write(t, fix.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.9.9", 1))
 	rec.wait(t, func(s *Snapshot) bool { return s.Release.Version == "v0.9.9" })
 
-	if w.Current().Release.Version != "v0.9.9" {
+	if watcher.Current().Release.Version != "v0.9.9" {
 		t.Error("Current not updated")
 	}
 }
 
 func TestWatcherPollBackstop(t *testing.T) {
-	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 
-	w, _ := NewWatcher(f.p, nil)
+	w, _ := NewWatcher(fix.p, nil)
 	w.debounce = time.Hour // events never fire a reload in time
 	w.poll = 30 * time.Millisecond
 	rec := startRun(t, w)
 
-	write(t, f.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.5.0", 1))
+	write(t, fix.p.ConfigDir, ConfigFile, strings.Replace(goodConfig, "v0.3.0", "v0.5.0", 1))
 	rec.wait(t, func(s *Snapshot) bool { return s.Release.Version == "v0.5.0" })
 }
 
@@ -539,32 +563,37 @@ type k8sMount struct {
 	gen int
 }
 
-func (m *k8sMount) publish(t *testing.T, files map[string]string) {
+func (mount *k8sMount) publish(t *testing.T, files map[string]string) {
 	t.Helper()
 
-	m.gen++
-	name := "..gen" + string(rune('0'+m.gen))
-	gen := filepath.Join(m.dir, name)
+	mount.gen++
+	name := "..gen" + strconv.Itoa(mount.gen)
+	gen := filepath.Join(mount.dir, name)
 
 	for f, c := range files {
 		write(t, gen, f, c)
 	}
 
-	tmp := filepath.Join(m.dir, "..data_tmp")
+	tmp := filepath.Join(mount.dir, "..data_tmp")
 	_ = os.Remove(tmp)
 
-	if err := os.Symlink(name, tmp); err != nil {
+	err := os.Symlink(name, tmp)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.Rename(tmp, filepath.Join(m.dir, "..data")); err != nil {
+	err = os.Rename(tmp, filepath.Join(mount.dir, "..data"))
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	for f := range files {
-		link := filepath.Join(m.dir, f)
-		if _, err := os.Lstat(link); err != nil {
-			if err := os.Symlink(filepath.Join("..data", f), link); err != nil {
+		link := filepath.Join(mount.dir, f)
+
+		_, err := os.Lstat(link)
+		if err != nil {
+			err := os.Symlink(filepath.Join("..data", f), link)
+			if err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -584,13 +613,13 @@ func TestWatcherKubernetesSymlinkSwap(t *testing.T) {
 	trust.publish(t, map[string]string{TrustFile: string(ca), RevFile: "r1"})
 	cert.publish(t, map[string]string{CertFile: string(crt1), KeyFile: string(key1)})
 
-	w, err := NewWatcher(Paths{cfg.dir, trust.dir, cert.dir}, nil)
+	watcher, err := NewWatcher(Paths{cfg.dir, trust.dir, cert.dir}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	w.debounce = 20 * time.Millisecond
-	rec := startRun(t, w)
+	watcher.debounce = 20 * time.Millisecond
+	rec := startRun(t, watcher)
 
 	cfg.publish(
 		t,
@@ -612,7 +641,7 @@ func TestWatcherKubernetesSymlinkSwap(t *testing.T) {
 		t.Error("no cert")
 	}
 
-	if stale, reason := w.Stale(time.Now()); stale {
+	if stale, reason := watcher.Stale(time.Now()); stale {
 		t.Errorf("unexpectedly stale: %s", reason)
 	}
 }

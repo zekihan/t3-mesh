@@ -33,6 +33,10 @@ const (
 	ipv4BlockSize        = 12
 	ipv6BlockSize        = 36
 
+	protocolVersion = 0x2
+	commandMask     = 0x0F
+	versionShift    = 4
+
 	cmdLocal = 0x0
 	cmdProxy = 0x1
 
@@ -62,20 +66,24 @@ func Listen(inner net.Listener, headerTimeout time.Duration) net.Listener {
 	if headerTimeout <= 0 {
 		headerTimeout = defaultHeaderTimeout
 	}
+
 	return &listener{Listener: inner, headerTimeout: headerTimeout}
 }
 
 type listener struct {
 	net.Listener
+
 	headerTimeout time.Duration
 }
 
-func (l *listener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
+func (ln *listener) Accept() (net.Conn, error) {
+	c, err := ln.Listener.Accept()
 	if err != nil {
+		//nolint:wrapcheck // transparent net.Listener wrapper; the accept loop inspects net errors
 		return nil, err
 	}
-	return &Conn{inner: c, timeout: l.headerTimeout}, nil
+
+	return &Conn{inner: c, timeout: ln.headerTimeout}, nil
 }
 
 // Conn is a connection whose PROXY v2 header is parsed on first use. For a PROXY
@@ -97,154 +105,191 @@ type Conn struct {
 // RemoteAddr returns the proxied source address, parsing the header if needed.
 // After an invalid header it returns a placeholder address, never nil.
 // It returns nil if the header is invalid.
-func (c *Conn) RemoteAddr() net.Addr {
-	if err := c.parse(); err != nil {
+func (conn *Conn) RemoteAddr() net.Addr {
+	err := conn.parse()
+	if err != nil {
 		return invalidAddr{}
 	}
-	return c.remote
+
+	return conn.remote
 }
 
 // Source returns the proxied source address and port. For a LOCAL command it is the
 // TCP peer, and it fails if the peer is not TCP.
-func (c *Conn) Source() (netip.AddrPort, error) {
-	if err := c.parse(); err != nil {
+func (conn *Conn) Source() (netip.AddrPort, error) {
+	err := conn.parse()
+	if err != nil {
 		return netip.AddrPort{}, err
 	}
-	if !c.src.IsValid() {
-		return netip.AddrPort{}, fmt.Errorf("proxyproto: %w: peer %v", ErrNoSource, c.remote)
+
+	if !conn.src.IsValid() {
+		return netip.AddrPort{}, fmt.Errorf("proxyproto: %w: peer %v", ErrNoSource, conn.remote)
 	}
-	return c.src, nil
+
+	return conn.src, nil
 }
 
 // Read parses the header on first use and then reads the caller's bytes.
-func (c *Conn) Read(p []byte) (int, error) {
-	if err := c.parse(); err != nil {
+func (conn *Conn) Read(buf []byte) (int, error) {
+	err := conn.parse()
+	if err != nil {
 		return 0, err
 	}
-	return c.inner.Read(p)
+
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.Read(buf)
 }
 
-func (c *Conn) Write(p []byte) (int, error) {
-	return c.inner.Write(p)
+func (conn *Conn) Write(p []byte) (int, error) {
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.Write(p)
 }
 
-func (c *Conn) Close() error {
-	return c.inner.Close()
+func (conn *Conn) Close() error {
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.Close()
 }
 
-func (c *Conn) LocalAddr() net.Addr {
-	return c.inner.LocalAddr()
+func (conn *Conn) LocalAddr() net.Addr {
+	return conn.inner.LocalAddr()
 }
 
 // SetDeadline and SetReadDeadline also apply while the header is being parsed: the
 // header deadline is the earlier of headerTimeout and the read deadline set here.
-func (c *Conn) SetDeadline(t time.Time) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.readDeadline = t
-	return c.inner.SetDeadline(t)
+func (conn *Conn) SetDeadline(deadline time.Time) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
+	conn.readDeadline = deadline
+
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.SetDeadline(deadline)
 }
 
-func (c *Conn) SetReadDeadline(t time.Time) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.readDeadline = t
-	return c.inner.SetReadDeadline(t)
+func (conn *Conn) SetReadDeadline(deadline time.Time) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
+	conn.readDeadline = deadline
+
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.SetReadDeadline(deadline)
 }
 
-func (c *Conn) SetWriteDeadline(t time.Time) error {
-	return c.inner.SetWriteDeadline(t)
+func (conn *Conn) SetWriteDeadline(t time.Time) error {
+	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
+	return conn.inner.SetWriteDeadline(t)
 }
 
-func (c *Conn) parse() error {
-	c.parseOnce.Do(func() {
-		c.parseErr = c.readHeader()
+func (conn *Conn) parse() error {
+	conn.parseOnce.Do(func() {
+		conn.parseErr = conn.readHeader()
 	})
-	return c.parseErr
+
+	return conn.parseErr
 }
 
-func (c *Conn) readHeader() error {
-	c.mu.Lock()
-	headerDeadline := time.Now().Add(c.timeout)
-	if !c.readDeadline.IsZero() && c.readDeadline.Before(headerDeadline) {
-		headerDeadline = c.readDeadline
-	}
-	c.mu.Unlock()
+func (conn *Conn) readHeader() error {
+	conn.mu.Lock()
 
-	err := c.inner.SetReadDeadline(headerDeadline)
+	headerDeadline := time.Now().Add(conn.timeout)
+	if !conn.readDeadline.IsZero() && conn.readDeadline.Before(headerDeadline) {
+		headerDeadline = conn.readDeadline
+	}
+	conn.mu.Unlock()
+
+	err := conn.inner.SetReadDeadline(headerDeadline)
 	if err == nil {
-		err = c.parseHeader()
+		err = conn.parseHeader()
 	}
 
-	c.mu.Lock()
-	restoreErr := c.inner.SetReadDeadline(c.readDeadline)
-	c.mu.Unlock()
+	conn.mu.Lock()
+	restoreErr := conn.inner.SetReadDeadline(conn.readDeadline)
+	conn.mu.Unlock()
+
 	if err == nil && restoreErr != nil {
 		err = fmt.Errorf("proxyproto: restore read deadline: %w", restoreErr)
 	}
 
 	if err != nil {
-		_ = c.inner.Close()
+		_ = conn.inner.Close()
+
 		return err
 	}
+
 	return nil
 }
 
 // parseHeader reads exactly the header bytes from the inner connection.
-func (c *Conn) parseHeader() error {
+func (conn *Conn) parseHeader() error {
 	var fixed [fixedHeaderSize]byte
-	if _, err := io.ReadFull(c.inner, fixed[:]); err != nil {
+
+	_, err := io.ReadFull(conn.inner, fixed[:])
+	if err != nil {
 		return fmt.Errorf("proxyproto: read header: %w", err)
 	}
+
 	if !bytes.Equal(fixed[:len(signature)], signature[:]) {
 		return ErrInvalidSignature
 	}
-	if version := fixed[12] >> 4; version != 2 {
+
+	if version := fixed[12] >> versionShift; version != protocolVersion {
 		return fmt.Errorf("%w: %d", ErrUnsupportedVersion, version)
 	}
+
 	length := int(binary.BigEndian.Uint16(fixed[14:16]))
 	if fixedHeaderSize+length > maxHeaderSize {
 		return ErrHeaderTooLarge
 	}
+
 	block := make([]byte, length)
-	if _, err := io.ReadFull(c.inner, block); err != nil {
+
+	_, err = io.ReadFull(conn.inner, block)
+	if err != nil {
 		return fmt.Errorf("proxyproto: read header block: %w", err)
 	}
 
-	switch command := fixed[12] & 0x0F; command {
+	switch command := fixed[12] & commandMask; command {
 	case cmdLocal:
-		c.remote = c.inner.RemoteAddr()
-		if ta, ok := c.remote.(*net.TCPAddr); ok {
+		conn.remote = conn.inner.RemoteAddr()
+		if ta, ok := conn.remote.(*net.TCPAddr); ok {
 			ap := ta.AddrPort()
-			c.src = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+			conn.src = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 		}
+
 		return nil
 	case cmdProxy:
 	default:
 		return fmt.Errorf("%w: %d", ErrUnsupportedCommand, command)
 	}
 
-	var src netip.Addr
-	var port uint16
+	var (
+		src  netip.Addr
+		port uint16
+	)
+
 	switch fixed[13] {
 	case famInetStrm:
 		if length < ipv4BlockSize {
 			return ErrShortAddress
 		}
+
 		src = netip.AddrFrom4([4]byte(block[0:4]))
 		port = binary.BigEndian.Uint16(block[8:10])
 	case famInet6Strm:
 		if length < ipv6BlockSize {
 			return ErrShortAddress
 		}
+
 		src = netip.AddrFrom16([16]byte(block[0:16])).Unmap()
 		port = binary.BigEndian.Uint16(block[32:34])
 	default:
 		return fmt.Errorf("%w: %#x", ErrUnsupportedFamily, fixed[13])
 	}
 
-	c.src = netip.AddrPortFrom(src, port)
-	c.remote = net.TCPAddrFromAddrPort(c.src)
+	conn.src = netip.AddrPortFrom(src, port)
+	conn.remote = net.TCPAddrFromAddrPort(conn.src)
+
 	return nil
 }
 

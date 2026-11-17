@@ -30,6 +30,25 @@ import (
 // closed. The hub half-closes the TLS connection at once after Reject.
 const rejectGrace = 2 * time.Second
 
+// Bounds on what an agent may announce in Hello and Status.
+const (
+	maxVersionLen        = 64
+	maxLANAddrs          = 16
+	maxAnnouncedServices = 64
+	maxServiceNameLen    = 64
+)
+
+var (
+	errSessionEnded   = errors.New("session ended")
+	errControlEnded   = errors.New("control stream ended")
+	errPushEnded      = errors.New("push loop ended")
+	errClosedAfterRej = errors.New("closed by peer after reject")
+	errRejected       = errors.New("rejected")
+	errNoHello        = errors.New("control stream closed before hello")
+	errHelloTimeout   = errors.New("hello timed out")
+	errFirstNotHello  = errors.New("first message is not Hello")
+)
+
 type machineState struct {
 	name         string
 	sessions     []*session // ordered by hub accept time, oldest first
@@ -42,9 +61,9 @@ type machineState struct {
 }
 
 func (m *machineState) newestLive() *session {
-	for i := len(m.sessions) - 1; i >= 0; i-- {
-		if !m.sessions[i].closing.Load() {
-			return m.sessions[i]
+	for _, v := range slices.Backward(m.sessions) {
+		if !v.closing.Load() {
+			return v
 		}
 	}
 
@@ -58,202 +77,207 @@ type sentState struct {
 }
 
 type session struct {
-	s           *Server
-	id          uint64
-	machine     string
-	identity    string
-	fingerprint string
 	notAfter    time.Time
-	leaf        *x509.Certificate
-	source      netip.Addr
 	accepted    time.Time
+	source      netip.Addr
+	closeErr    error
+	ctx         context.Context //nolint:containedctx // the session owns its lifetime context, shared by its goroutines
+	leaf        *x509.Certificate
+	kick        chan struct{}
 	conn        *tls.Conn
 	ymx         *yamux.Session
 	ctrl        *tunnel.Control
 	log         *slog.Logger
-	ctx         context.Context
 	cancel      context.CancelFunc
-
-	closing    atomic.Bool
-	closeOnce  sync.Once
-	rejectOnce sync.Once
-	closeErr   error
-	kick       chan struct{}
-	renewing   atomic.Bool
-	streams    atomic.Int64
-	linkStream atomic.Int64
-
-	// guarded by s.mu
-	hello proto.Hello
-	home  bool
-
-	sent sentState
+	s           *Server
+	hello       proto.Hello
+	fingerprint string
+	identity    string
+	machine     string
+	sent        sentState
+	streams     atomic.Int64
+	id          uint64
+	linkStream  atomic.Int64
+	rejectOnce  sync.Once
+	closeOnce   sync.Once
+	renewing    atomic.Bool
+	closing     atomic.Bool
+	home        bool
 }
 
-func (c *session) close(reason error) {
-	c.closeOnce.Do(func() {
-		c.closing.Store(true)
-		c.closeErr = reason
-		c.cancel()
-		_ = c.ctrl.Close()
-		_ = c.ymx.Close()
-		c.s.unregister(c)
-		c.s.closeTrackedFor(c)
+func (sess *session) close(reason error) {
+	sess.closeOnce.Do(func() {
+		sess.closing.Store(true)
+		sess.closeErr = reason
+		sess.cancel()
+		_ = sess.ctrl.Close()
+		_ = sess.ymx.Close()
+		sess.s.unregister(sess)
+		sess.s.closeTrackedFor(sess)
 	})
 }
 
 // reject sends Reject, ends routing to the session at once and closes it.
-func (c *session) reject(rej proto.Reject) {
-	c.rejectOnce.Do(func() {
-		c.closing.Store(true)
-		c.s.log.Info(
-			"reject",
-			"machine",
-			c.machine,
-			"identity",
-			c.identity,
-			"reason",
-			rej.Reason,
-			"detail",
-			rej.Detail,
+func (sess *session) reject(rej proto.Reject) {
+	sess.rejectOnce.Do(func() {
+		sess.closing.Store(true)
+		sess.s.log.Info(
+			"Reject",
+			slog.Any("machine", sess.machine),
+			slog.Any("identity", sess.identity),
+			slog.Any("reason", rej.Reason),
+			slog.Any("detail", rej.Detail),
 		)
-		_ = c.ctrl.Send(rej)
-		c.s.closeTrackedFor(c)
-		_ = c.conn.CloseWrite()
+		//nolint:errcheck // best-effort notice; the peer may already be gone
+		_ = sess.ctrl.Send(rej)
+		sess.s.closeTrackedFor(sess)
+		//nolint:errcheck // best-effort half-close; the connection is torn down right after
+		_ = sess.conn.CloseWrite()
 
-		t := time.AfterFunc(rejectGrace, func() { c.close(fmt.Errorf("rejected: %s", rej.Reason)) })
+		grace := time.AfterFunc(
+			rejectGrace,
+			func() { sess.close(fmt.Errorf("%w: %s", errRejected, rej.Reason)) },
+		)
+
 		go func() {
 			select {
-			case <-c.ymx.CloseChan():
-				t.Stop()
-				c.close(errors.New("closed by peer after reject"))
-			case <-c.ctx.Done():
-				t.Stop()
+			case <-sess.ymx.CloseChan():
+				grace.Stop()
+				sess.close(errClosedAfterRej)
+			case <-sess.ctx.Done():
+				grace.Stop()
 			}
 		}()
 	})
 }
 
-func (c *session) kickNow() {
+func (sess *session) kickNow() {
 	select {
-	case c.kick <- struct{}{}:
+	case sess.kick <- struct{}{}:
 	default:
 	}
 }
 
-func (s *Server) allSessions() []*session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (server *Server) allSessions() []*session {
+	server.mu.Lock()
+	defer server.mu.Unlock()
 
 	var out []*session
-	for _, m := range s.machines {
+	for _, m := range server.machines {
 		out = append(out, m.sessions...)
 	}
 
 	return out
 }
 
-func (s *Server) kickAll() {
-	for _, c := range s.allSessions() {
+func (server *Server) kickAll() {
+	for _, c := range server.allSessions() {
 		c.kickNow()
 	}
 }
 
-func (s *Server) liveSession(machine string) *session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (server *Server) liveSession(machine string) *session {
+	server.mu.Lock()
+	defer server.mu.Unlock()
 
-	if m := s.machines[machine]; m != nil {
+	if m := server.machines[machine]; m != nil {
 		return m.newestLive()
 	}
 
 	return nil
 }
 
-func (s *Server) warnLocked(m *machineState, msg string) {
-	m.warnings = append(m.warnings, s.now().UTC().Format(time.RFC3339)+" "+msg)
+func (server *Server) warnLocked(m *machineState, msg string) {
+	m.warnings = append(m.warnings, server.now().UTC().Format(time.RFC3339)+" "+msg)
 	if len(m.warnings) > maxWarnings {
 		m.warnings = m.warnings[len(m.warnings)-maxWarnings:]
 	}
 }
 
-func (s *Server) warn(machine, msg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (server *Server) warn(machine, msg string) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
 
-	s.warnLocked(s.machineLocked(machine), msg)
+	server.warnLocked(server.machineLocked(machine), msg)
 }
 
-func (s *Server) machineLocked(name string) *machineState {
-	m := s.machines[name]
+func (server *Server) machineLocked(name string) *machineState {
+	m := server.machines[name]
 	if m == nil {
 		m = &machineState{name: name}
-		s.machines[name] = m
+		server.machines[name] = m
 	}
 
 	return m
 }
 
-func (s *Server) register(c *session) (superseded []*session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (server *Server) register(sess *session) []*session {
+	server.mu.Lock()
+	defer server.mu.Unlock()
 
-	m := s.machineLocked(c.machine)
-	m.sessions = append(m.sessions, c)
-	m.lastSeen = s.now()
-	m.version = c.hello.Version
-	m.announced = c.hello.Services
-	m.certNotAfter = c.notAfter
+	state := server.machineLocked(sess.machine)
+	state.sessions = append(state.sessions, sess)
+	state.lastSeen = server.now()
+	state.version = sess.hello.Version
+	state.announced = sess.hello.Services
+	state.certNotAfter = sess.notAfter
 
-	if len(m.sessions) > maxSessionsPerMachine {
-		superseded = slices.Clone(m.sessions[:len(m.sessions)-maxSessionsPerMachine])
+	var superseded []*session
+
+	if len(state.sessions) > maxSessionsPerMachine {
+		superseded = slices.Clone(state.sessions[:len(state.sessions)-maxSessionsPerMachine])
 	}
 
 	return superseded
 }
 
-func (s *Server) unregister(c *session) {
-	s.mu.Lock()
-	m := s.machines[c.machine]
+func (server *Server) unregister(c *session) {
+	server.mu.Lock()
+	m := server.machines[c.machine]
 
 	if m != nil {
 		m.sessions = slices.DeleteFunc(m.sessions, func(x *session) bool { return x == c })
-		m.lastSeen = s.now()
+		m.lastSeen = server.now()
 	}
-	s.mu.Unlock()
+	server.mu.Unlock()
 
-	s.kickAll()
+	server.kickAll()
 }
 
-func (s *Server) serveSession(
+func (server *Server) serveSession(
 	ctx context.Context,
 	conn *tls.Conn,
 	source netip.Addr,
-	state tls.ConnectionState,
+	state *tls.ConnectionState,
 ) {
-	snap := s.cfg.Current()
+	snap := server.cfg.Current()
 
-	adm, err := s.admit(snap, state.PeerCertificates, s.now())
+	adm, err := server.admit(snap, state.PeerCertificates, server.now())
 	if err != nil {
-		s.log.Info("rejected peer", "source", source.String(), "reason", err.Error())
+		server.log.InfoContext(
+			ctx,
+			"Rejected peer",
+			slog.String("source", source.String()),
+			slog.String("reason", err.Error()),
+		)
 
 		return
 	}
 
-	log := s.log.With(
-		"machine",
-		adm.machine,
-		"identity",
-		adm.identity,
-		"fingerprint",
-		adm.fingerprint,
-		"source",
-		source.String(),
+	log := server.log.With(
+		slog.Any("machine", adm.machine),
+		slog.Any("identity", adm.identity),
+		slog.Any("fingerprint", adm.fingerprint),
+		slog.String("source", source.String()),
 	)
 
 	ymx, err := yamux.Server(conn, tunnel.YamuxConfig())
 	if err != nil {
-		log.Warn("yamux setup failed", "error", err)
+		log.WarnContext(
+			ctx,
+			"Yamux setup failed",
+			slog.Any("error", err),
+		)
 
 		return
 	}
@@ -266,7 +290,11 @@ func (s *Server) serveSession(
 	acancel()
 
 	if err != nil {
-		log.Info("no control stream", "error", err.Error())
+		log.InfoContext(
+			ctx,
+			"No control stream",
+			slog.String("error", err.Error()),
+		)
 
 		return
 	}
@@ -276,24 +304,45 @@ func (s *Server) serveSession(
 
 	hello, err := readHello(ctx, ctrl)
 	if err != nil {
-		log.Info("reject", "reason", "bad hello", "error", err.Error())
+		log.InfoContext(
+			ctx,
+			"Reject",
+			slog.String("reason", "bad hello"),
+			slog.String("error", err.Error()),
+		)
 
 		return
 	}
 
-	ok, noRecord, err := s.checkNewest(ctx, adm.identity, adm.fingerprint)
+	ok, noRecord, err := server.checkNewest(ctx, adm.identity, adm.fingerprint)
 
 	switch {
 	case err != nil:
-		log.Warn("reject", "reason", "newest-leaf lookup failed", "error", err.Error())
+		log.WarnContext(
+			ctx,
+			"Reject",
+			slog.String("reason", "newest-leaf lookup failed"),
+			slog.String("error", err.Error()),
+		)
+
+		//nolint:errcheck // best-effort notice; the peer may already be gone
 		_ = ctrl.Send(
 			proto.Reject{Reason: proto.RejectOther, Detail: "certificate check unavailable"},
 		)
 
 		return
 	case !ok:
-		log.Info("reject", "reason", proto.RejectLeafNotNewest)
-		s.warn(adm.machine, "tunnel refused: leaf "+adm.fingerprint+" is not the newest issued")
+		log.InfoContext(
+			ctx,
+			"Reject",
+			slog.Any("reason", proto.RejectLeafNotNewest),
+		)
+		server.warn(
+			adm.machine,
+			"tunnel refused: leaf "+adm.fingerprint+" is not the newest issued",
+		)
+
+		//nolint:errcheck // best-effort notice; the peer may already be gone
 		_ = ctrl.Send(
 			proto.Reject{
 				Reason: proto.RejectLeafNotNewest,
@@ -303,49 +352,58 @@ func (s *Server) serveSession(
 
 		return
 	case noRecord:
-		log.Warn(
-			"no issuance record for leaf; admitting",
-			"reason",
-			"issuer has no record for identity",
+		log.WarnContext(
+			ctx,
+			"No issuance record for leaf; admitting",
+			slog.String("reason", "issuer has no record for identity"),
 		)
-		s.warn(adm.machine, "no issuance record for "+adm.identity+"; leaf admitted unchecked")
+		server.warn(adm.machine, "no issuance record for "+adm.identity+"; leaf admitted unchecked")
 	}
 
 	if hello.CertFingerprint != "" && !strings.EqualFold(hello.CertFingerprint, adm.fingerprint) {
-		log.Warn("hello fingerprint differs from TLS leaf", "announced", hello.CertFingerprint)
+		log.WarnContext(
+			ctx,
+			"Hello fingerprint differs from TLS leaf",
+			slog.Any("announced", hello.CertFingerprint),
+		)
 	}
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sess := &session{
-		s: s, machine: adm.machine, identity: adm.identity, fingerprint: adm.fingerprint,
-		notAfter: adm.leaf.NotAfter, leaf: adm.leaf, source: source, accepted: s.now(),
+		s: server, machine: adm.machine, identity: adm.identity, fingerprint: adm.fingerprint,
+		notAfter: adm.leaf.NotAfter, leaf: adm.leaf, source: source, accepted: server.now(),
 		conn: conn, ymx: ymx, ctrl: ctrl, log: log, ctx: sctx, cancel: cancel,
 		kick: make(chan struct{}, 1), hello: hello, home: snap.IsHome(source),
 	}
 
-	s.mu.Lock()
-	s.nextID++
-	sess.id = s.nextID
-	s.mu.Unlock()
+	server.mu.Lock()
+	server.nextID++
+	sess.id = server.nextID
+	server.mu.Unlock()
 
-	for _, old := range s.register(sess) {
+	for _, old := range server.register(sess) {
 		old.reject(
 			proto.Reject{Reason: proto.RejectOther, Detail: "too many sessions for this machine"},
 		)
 	}
 
-	defer sess.close(errors.New("session ended"))
+	defer sess.close(errSessionEnded)
 
-	if err := sess.sendHelloAck(); err != nil {
-		log.Warn("hello ack failed", "error", err.Error())
+	err = sess.sendHelloAck()
+	if err != nil {
+		log.WarnContext(
+			ctx,
+			"Hello ack failed",
+			slog.String("error", err.Error()),
+		)
 
 		return
 	}
 
 	sess.logConnect(snap)
-	s.kickAll()
+	server.kickAll()
 
 	var wg sync.WaitGroup
 
@@ -361,72 +419,73 @@ func (s *Server) serveSession(
 	sess.close(context.Cause(sctx))
 	wg.Wait()
 
-	log.Info(
-		"disconnect",
-		"duration",
-		s.now().Sub(sess.accepted).String(),
-		"reason",
-		fmt.Sprint(sess.closeErr),
+	log.InfoContext(
+		ctx,
+		"Disconnect",
+		slog.String("duration", server.now().Sub(sess.accepted).String()),
+		slog.Any("reason", sess.closeErr),
 	)
 }
 
 func readHello(ctx context.Context, ctrl *tunnel.Control) (proto.Hello, error) {
-	t := time.NewTimer(helloTimeout)
-	defer t.Stop()
+	timer := time.NewTimer(helloTimeout)
+	defer timer.Stop()
 
 	select {
 	case msg, ok := <-ctrl.Messages():
 		if !ok {
-			return proto.Hello{}, errors.New("control stream closed before hello")
+			return proto.Hello{}, errNoHello
 		}
 
-		h, isHello := msg.(proto.Hello)
+		hello, isHello := msg.(proto.Hello)
 		if !isHello {
-			return proto.Hello{}, fmt.Errorf("first message is %s, want Hello", msg.MessageType())
+			return proto.Hello{}, fmt.Errorf("%w: got %s", errFirstNotHello, msg.MessageType())
 		}
 
-		return sanitizeHello(h), nil
-	case <-t.C:
-		return proto.Hello{}, errors.New("hello timed out")
+		return sanitizeHello(&hello), nil
+	case <-timer.C:
+		return proto.Hello{}, errHelloTimeout
 	case <-ctx.Done():
 		return proto.Hello{}, fmt.Errorf("hello: %w", ctx.Err())
 	}
 }
 
-func sanitizeHello(h proto.Hello) proto.Hello {
-	h.Version = truncate(h.Version, 64)
+func sanitizeHello(incoming *proto.Hello) proto.Hello {
+	hello := *incoming
+	hello.Version = truncate(hello.Version, maxVersionLen)
 
 	var addrs []string
 
-	for _, a := range h.LANAddrs {
-		if len(addrs) >= 16 {
+	for _, a := range hello.LANAddrs {
+		if len(addrs) >= maxLANAddrs {
 			break
 		}
 
-		if ip, err := netip.ParseAddr(a); err == nil {
+		ip, err := netip.ParseAddr(a)
+		if err == nil {
 			addrs = append(addrs, ip.String())
 		}
 	}
 
-	h.LANAddrs = addrs
+	hello.LANAddrs = addrs
 
-	if h.DirectPort < 0 || h.DirectPort > 65535 {
-		h.DirectPort = 0
+	if hello.DirectPort < 0 || hello.DirectPort > 65535 {
+		hello.DirectPort = 0
 	}
 
-	svcs := slices.Clone(h.Services)
-	if len(svcs) > 64 {
-		svcs = svcs[:64]
+	svcs := slices.Clone(hello.Services)
+	if len(svcs) > maxAnnouncedServices {
+		svcs = svcs[:maxAnnouncedServices]
 	}
 
 	for i := range svcs {
-		svcs[i] = truncate(svcs[i], 64)
+		svcs[i] = truncate(svcs[i], maxServiceNameLen)
 	}
 
 	slices.Sort(svcs)
-	h.Services = slices.Compact(svcs)
+	hello.Services = slices.Compact(svcs)
 
-	return h
+	return hello
 }
 
 func truncate(s string, n int) string {
@@ -437,7 +496,9 @@ func truncate(s string, n int) string {
 	return s
 }
 
-func serviceDiff(announced, configured []string) (missing, unexpected []string) {
+func serviceDiff(announced, configured []string) ([]string, []string) {
+	var missing, unexpected []string
+
 	for _, c := range configured {
 		if !slices.Contains(announced, c) {
 			missing = append(missing, c)
@@ -453,31 +514,25 @@ func serviceDiff(announced, configured []string) (missing, unexpected []string) 
 	return missing, unexpected
 }
 
-func (c *session) logConnect(snap *hubconfig.Snapshot) {
-	path := pathName(c.home)
-	c.log.Info(
-		"connect",
-		"path",
-		path,
-		"version",
-		c.hello.Version,
-		"services",
-		c.hello.Services,
-		"notAfter",
-		c.notAfter.UTC().Format(time.RFC3339),
+func (sess *session) logConnect(snap *hubconfig.Snapshot) {
+	path := pathName(sess.home)
+	sess.log.Info(
+		"Connect",
+		slog.Any("path", path),
+		slog.String("version", sess.hello.Version),
+		slog.Any("services", sess.hello.Services),
+		slog.String("notAfter", sess.notAfter.UTC().Format(time.RFC3339)),
 	)
 
-	missing, unexpected := serviceDiff(c.hello.Services, snap.Services(c.machine))
+	missing, unexpected := serviceDiff(sess.hello.Services, snap.Services(sess.machine))
 	if len(missing) > 0 || len(unexpected) > 0 {
-		c.log.Warn(
-			"announced services differ from configuration",
-			"missing",
-			missing,
-			"unexpected",
-			unexpected,
+		sess.log.Warn(
+			"Announced services differ from configuration",
+			slog.Any("missing", missing),
+			slog.Any("unexpected", unexpected),
 		)
-		c.s.warn(
-			c.machine,
+		sess.s.warn(
+			sess.machine,
 			fmt.Sprintf("announced services differ: missing=%v unexpected=%v", missing, unexpected),
 		)
 	}
@@ -503,62 +558,71 @@ type desired struct {
 
 // desiredState computes what the agent should hold now. It updates the
 // session's home flag from the current configuration.
-func (c *session) desiredState() (d desired, homeChanged bool) {
-	snap := c.s.cfg.Current()
-	home := snap.IsHome(c.source)
+func (sess *session) desiredState() (desired, bool) {
+	var (
+		want        desired
+		homeChanged bool
+	)
 
-	c.s.mu.Lock()
-	if home != c.home {
-		c.home = home
+	snap := sess.s.cfg.Current()
+	home := snap.IsHome(sess.source)
+
+	sess.s.mu.Lock()
+	if home != sess.home {
+		sess.home = home
 		homeChanged = true
 	}
 
-	d.peers = c.s.peersLocked(snap, c)
-	c.s.mu.Unlock()
+	want.peers = sess.s.peersLocked(snap, sess)
+	sess.s.mu.Unlock()
 
-	d.home = home
-	d.rules = snap.Rules
-	d.revs = snap.Revocations
-	d.trust = snap.TrustBundle
-	d.release = snap.Release
+	want.home = home
+	want.rules = snap.Rules
+	want.revs = snap.Revocations
+	want.trust = snap.TrustBundle
+	want.release = snap.Release
 
 	for _, p := range snap.HomePrefixes {
-		d.cidrs = append(d.cidrs, p.String())
+		want.cidrs = append(want.cidrs, p.String())
 	}
 
-	return d, homeChanged
+	return want, homeChanged
 }
 
-func (c *session) sendHelloAck() error {
-	d, _ := c.desiredState()
+func (sess *session) sendHelloAck() error {
+	want, _ := sess.desiredState()
 
-	err := c.ctrl.Send(proto.HelloAck{
-		Machine: c.machine, Home: d.home, Release: d.release, Rules: d.rules,
-		Peers: d.peers, Revocations: d.revs, TrustBundle: d.trust, HomeCIDRs: d.cidrs,
+	err := sess.ctrl.Send(proto.HelloAck{
+		Machine: sess.machine, Home: want.home, Release: want.release, Rules: want.rules,
+		Peers: want.peers, Revocations: want.revs, TrustBundle: want.trust, HomeCIDRs: want.cidrs,
 	})
 	if err != nil {
 		return fmt.Errorf("hub: send HelloAck: %w", err)
 	}
 
-	c.sent = sentState{
-		rules: d.rules.Revision, revs: d.revs.Revision, trust: d.trust.Revision,
-		release: d.release.Revision, peers: d.peers.Revision, home: d.home,
-		cidrs: strings.Join(d.cidrs, ","),
+	sess.sent = sentState{
+		rules: want.rules.Revision, revs: want.revs.Revision, trust: want.trust.Revision,
+		release: want.release.Revision, peers: want.peers.Revision, home: want.home,
+		cidrs: strings.Join(want.cidrs, ","),
 	}
 
 	return nil
 }
 
-func (c *session) pushLoop() {
-	defer c.close(errors.New("push loop ended"))
+func (sess *session) pushLoop() {
+	defer sess.close(errPushEnded)
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-sess.ctx.Done():
 			return
-		case <-c.kick:
-			if err := c.push(); err != nil {
-				c.log.Warn("update failed", "error", err.Error())
+		case <-sess.kick:
+			err := sess.push()
+			if err != nil {
+				sess.log.Warn(
+					"Update failed",
+					slog.String("error", err.Error()),
+				)
 
 				return
 			}
@@ -566,11 +630,14 @@ func (c *session) pushLoop() {
 	}
 }
 
-func (c *session) push() error {
-	d, homeChanged := c.desiredState()
+func (sess *session) push() error {
+	want, homeChanged := sess.desiredState()
 	if homeChanged {
-		c.log.Info("path change", "path", pathName(d.home))
-		c.s.kickAll()
+		sess.log.Info(
+			"Path change",
+			slog.Any("path", pathName(want.home)),
+		)
+		sess.s.kickAll()
 	}
 
 	var (
@@ -578,53 +645,59 @@ func (c *session) push() error {
 		dirt bool
 	)
 
-	if d.rules.Revision != c.sent.rules {
-		upd.Rules, dirt = &d.rules, true
+	if want.rules.Revision != sess.sent.rules {
+		upd.Rules, dirt = &want.rules, true
 	}
 
-	if d.revs.Revision != c.sent.revs {
-		upd.Revocations, dirt = &d.revs, true
+	if want.revs.Revision != sess.sent.revs {
+		upd.Revocations, dirt = &want.revs, true
 	}
 
-	if d.trust.Revision != c.sent.trust {
-		upd.TrustBundle, dirt = &d.trust, true
+	if want.trust.Revision != sess.sent.trust {
+		upd.TrustBundle, dirt = &want.trust, true
 	}
 
-	if d.peers.Revision != c.sent.peers {
-		upd.Peers, dirt = &d.peers, true
+	if want.peers.Revision != sess.sent.peers {
+		upd.Peers, dirt = &want.peers, true
 	}
 
-	if d.home != c.sent.home {
-		h := d.home
+	if want.home != sess.sent.home {
+		h := want.home
 		upd.Home, dirt = &h, true
 	}
 
-	if cidrs := strings.Join(d.cidrs, ","); cidrs != c.sent.cidrs && len(d.cidrs) > 0 {
-		upd.HomeCIDRs, dirt = d.cidrs, true
+	if cidrs := strings.Join(want.cidrs, ","); cidrs != sess.sent.cidrs && len(want.cidrs) > 0 {
+		upd.HomeCIDRs, dirt = want.cidrs, true
 	}
 
 	if dirt {
-		if err := c.ctrl.Send(upd); err != nil {
+		err := sess.ctrl.Send(upd)
+		if err != nil {
 			return fmt.Errorf("hub: send Update: %w", err)
 		}
 
-		c.sent.rules, c.sent.revs, c.sent.trust, c.sent.peers, c.sent.home = d.rules.Revision, d.revs.Revision, d.trust.Revision, d.peers.Revision, d.home
-		c.sent.cidrs = strings.Join(d.cidrs, ",")
+		sess.sent.rules = want.rules.Revision
+		sess.sent.revs = want.revs.Revision
+		sess.sent.trust = want.trust.Revision
+		sess.sent.peers = want.peers.Revision
+		sess.sent.home = want.home
+		sess.sent.cidrs = strings.Join(want.cidrs, ",")
 	}
 
-	if d.release.Revision != c.sent.release {
-		if err := c.ctrl.Send(d.release); err != nil {
+	if want.release.Revision != sess.sent.release {
+		err := sess.ctrl.Send(want.release)
+		if err != nil {
 			return fmt.Errorf("hub: send Release: %w", err)
 		}
 
-		c.sent.release = d.release.Revision
+		sess.sent.release = want.release.Revision
 	}
 
 	return nil
 }
 
-// peersLocked builds the peer table for c. s.mu must be held.
-func (s *Server) peersLocked(snap *hubconfig.Snapshot, c *session) proto.PeerTable {
+// Builds the peer table for the given session; server.mu must be held.
+func (server *Server) peersLocked(snap *hubconfig.Snapshot, sess *session) proto.PeerTable {
 	names := make([]string, 0, len(snap.Machines))
 	for n := range snap.Machines {
 		names = append(names, n)
@@ -635,14 +708,14 @@ func (s *Server) peersLocked(snap *hubconfig.Snapshot, c *session) proto.PeerTab
 	peers := []proto.Peer{}
 
 	for _, name := range names {
-		if name == c.machine {
+		if name == sess.machine {
 			continue
 		}
 
 		var svcs []string
 
 		for _, svc := range snap.Services(name) {
-			if policy.Allowed(snap.Rules, c.identity, svc, name) {
+			if policy.Allowed(snap.Rules, sess.identity, svc, name) {
 				svcs = append(svcs, svc)
 			}
 		}
@@ -651,35 +724,37 @@ func (s *Server) peersLocked(snap *hubconfig.Snapshot, c *session) proto.PeerTab
 			continue
 		}
 
-		p := proto.Peer{Machine: name, Identity: snap.Machines[name].Identity, Services: svcs}
+		peer := proto.Peer{Machine: name, Identity: snap.Machines[name].Identity, Services: svcs}
 
-		if ms := s.machines[name]; ms != nil {
+		if ms := server.machines[name]; ms != nil {
 			if live := ms.newestLive(); live != nil {
-				p.LANAddrs = live.hello.LANAddrs
-				p.DirectPort = live.hello.DirectPort
-				p.Home = live.home
+				peer.LANAddrs = live.hello.LANAddrs
+				peer.DirectPort = live.hello.DirectPort
+				peer.Home = live.home
 			}
 		}
 
-		peers = append(peers, p)
+		peers = append(peers, peer)
 	}
 
-	b, _ := json.Marshal(peers)
-	sum := sha256.Sum256(b)
+	//nolint:errcheck,errchkjson // Peer holds only strings, numbers and slices, so Marshal cannot fail
+	data, _ := json.Marshal(peers)
+	sum := sha256.Sum256(data)
 
 	return proto.PeerTable{Revision: hex.EncodeToString(sum[:8]), Peers: peers}
 }
 
-func (c *session) controlLoop() {
-	defer c.close(errors.New("control stream ended"))
+func (sess *session) controlLoop() {
+	defer sess.close(errControlEnded)
 
-	for msg := range c.ctrl.Messages() {
-		switch m := msg.(type) {
+	for msg := range sess.ctrl.Messages() {
+		switch typed := msg.(type) {
 		case proto.Status:
-			c.s.recordStatus(c, m)
+			sess.s.recordStatus(sess, &typed)
 		case proto.Renew:
-			if !c.renewing.CompareAndSwap(false, true) {
-				_ = c.ctrl.Send(
+			if !sess.renewing.CompareAndSwap(false, true) {
+				//nolint:errcheck // best-effort notice; the peer may already be gone
+				_ = sess.ctrl.Send(
 					proto.Reject{
 						Reason: proto.RejectRenewFailed,
 						Detail: "renewal already in progress",
@@ -689,42 +764,46 @@ func (c *session) controlLoop() {
 				continue
 			}
 
-			c.s.wg.Go(func() {
-				defer c.renewing.Store(false)
-				c.handleRenew(m)
+			sess.s.wg.Go(func() {
+				defer sess.renewing.Store(false)
+
+				sess.handleRenew(typed)
 			})
 		default:
-			c.log.Debug("unexpected control message", "type", msg.MessageType())
+			sess.log.Debug(
+				"Unexpected control message",
+				slog.Any("type", msg.MessageType()),
+			)
 		}
 	}
 }
 
-func (c *session) acceptLoop() {
+func (sess *session) acceptLoop() {
 	for {
-		st, err := c.ymx.AcceptStream()
+		st, err := sess.ymx.AcceptStream()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				c.close(fmt.Errorf("accept stream: %w", err))
+				sess.close(fmt.Errorf("accept stream: %w", err))
 			} else {
-				c.close(err)
+				sess.close(err)
 			}
 
 			return
 		}
 
-		c.s.wg.Go(func() { c.s.handleAgentStream(c, st) })
+		sess.s.wg.Go(func() { sess.s.handleAgentStream(sess, st) })
 	}
 }
 
-func (s *Server) recordStatus(c *session, st proto.Status) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (server *Server) recordStatus(c *session, st *proto.Status) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
 
-	m := s.machineLocked(c.machine)
-	cp := st
+	m := server.machineLocked(c.machine)
+	cp := *st
 	m.status = &cp
 
 	if st.Version != "" {
-		m.version = truncate(st.Version, 64)
+		m.version = truncate(st.Version, maxVersionLen)
 	}
 }

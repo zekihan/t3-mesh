@@ -18,19 +18,20 @@ const TokenTTL = 15 * time.Minute
 // ErrInvalidToken is returned by Redeem for unknown, used or expired tokens.
 var ErrInvalidToken = errors.New("enroll: invalid or expired token")
 
+var errEmptyIdentity = errors.New("enroll: empty identity")
+
 type tokenEntry struct {
-	identity string
 	expires  time.Time
+	identity string
 }
 
 // Tokens is an in-memory store of single-use enrollment tokens. Only SHA-256
 // hashes of tokens are kept.
 type Tokens struct {
-	now func() time.Time
-
-	mu         sync.Mutex
+	now        func() time.Time
 	byHash     map[[32]byte]tokenEntry
 	byIdentity map[string][32]byte
+	mu         sync.Mutex
 }
 
 // NewTokens returns an empty store using now as its clock.
@@ -47,74 +48,76 @@ func NewTokens(now func() time.Time) *Tokens {
 }
 
 // Create mints a token bound to identity, replacing any previous one for it.
-func (t *Tokens) Create(identity string) (string, time.Time, error) {
+func (tokens *Tokens) Create(identity string) (string, time.Time, error) {
 	if identity == "" {
-		return "", time.Time{}, errors.New("enroll: empty identity")
+		return "", time.Time{}, errEmptyIdentity
 	}
 
 	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
+
+	_, err := rand.Read(raw[:])
+	if err != nil {
 		return "", time.Time{}, fmt.Errorf("enroll: generate token: %w", err)
 	}
 
 	token := base64.RawURLEncoding.EncodeToString(raw[:])
 	hash := sha256.Sum256([]byte(token))
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	tokens.mu.Lock()
+	defer tokens.mu.Unlock()
 
-	t.pruneLocked()
+	tokens.pruneLocked()
 
-	if old, ok := t.byIdentity[identity]; ok {
-		delete(t.byHash, old)
+	if old, ok := tokens.byIdentity[identity]; ok {
+		delete(tokens.byHash, old)
 	}
 
-	expires := t.now().Add(TokenTTL)
-	t.byHash[hash] = tokenEntry{identity: identity, expires: expires}
-	t.byIdentity[identity] = hash
+	expires := tokens.now().Add(TokenTTL)
+	tokens.byHash[hash] = tokenEntry{identity: identity, expires: expires}
+	tokens.byIdentity[identity] = hash
 
 	return token, expires, nil
 }
 
 // Outstanding reports whether any unexpired token exists.
-func (t *Tokens) Outstanding() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+func (tokens *Tokens) Outstanding() bool {
+	tokens.mu.Lock()
+	defer tokens.mu.Unlock()
 
-	t.pruneLocked()
+	tokens.pruneLocked()
 
-	return len(t.byHash) > 0
+	return len(tokens.byHash) > 0
 }
 
 // Redeem consumes token and returns the identity it is bound to.
-func (t *Tokens) Redeem(token string) (string, error) {
+func (tokens *Tokens) Redeem(token string) (string, error) {
 	hash := sha256.Sum256([]byte(token))
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	tokens.mu.Lock()
+	defer tokens.mu.Unlock()
 
-	entry, ok := t.byHash[hash]
+	entry, ok := tokens.byHash[hash]
 	if !ok {
 		return "", ErrInvalidToken
 	}
 
-	delete(t.byHash, hash)
-	delete(t.byIdentity, entry.identity)
+	delete(tokens.byHash, hash)
+	delete(tokens.byIdentity, entry.identity)
 
-	if !t.now().Before(entry.expires) {
+	if !tokens.now().Before(entry.expires) {
 		return "", ErrInvalidToken
 	}
 
 	return entry.identity, nil
 }
 
-func (t *Tokens) pruneLocked() {
-	now := t.now()
+func (tokens *Tokens) pruneLocked() {
+	now := tokens.now()
 
-	for hash, entry := range t.byHash {
+	for hash, entry := range tokens.byHash {
 		if !now.Before(entry.expires) {
-			delete(t.byHash, hash)
-			delete(t.byIdentity, entry.identity)
+			delete(tokens.byHash, hash)
+			delete(tokens.byIdentity, entry.identity)
 		}
 	}
 }

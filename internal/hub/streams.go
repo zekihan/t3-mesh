@@ -3,6 +3,7 @@ package hub
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -17,105 +18,112 @@ import (
 // tracked is a relayed or viewer stream that is re-checked on every
 // configuration change and at its certificate's NotAfter.
 type tracked struct {
-	kind    string // "relay" or "viewer"
-	pol     policy.Session
-	target  *session
-	source  *session // relay only
-	closeFn func()
-	once    sync.Once
 	err     error
+	target  *session
+	source  *session
+	closeFn func()
+	pol     policy.Session
+	kind    string
+	once    sync.Once
 }
 
-func (t *tracked) close() { t.once.Do(t.closeFn) }
+func (track *tracked) close() { track.once.Do(track.closeFn) }
 
-func (s *Server) track(t *tracked) {
-	s.tmu.Lock()
-	s.tracked[t] = struct{}{}
-	s.tmu.Unlock()
+func (server *Server) track(entry *tracked) {
+	server.tmu.Lock()
+	server.tracked[entry] = struct{}{}
+	server.tmu.Unlock()
 
-	if t.target != nil {
-		t.target.streams.Add(1)
+	if entry.target != nil {
+		entry.target.streams.Add(1)
 	}
 
-	if t.source != nil {
-		t.source.linkStream.Add(1)
+	if entry.source != nil {
+		entry.source.linkStream.Add(1)
 	}
 }
 
-func (s *Server) untrack(t *tracked) {
-	s.tmu.Lock()
-	_, ok := s.tracked[t]
-	delete(s.tracked, t)
-	s.tmu.Unlock()
+func (server *Server) untrack(entry *tracked) {
+	server.tmu.Lock()
+	_, ok := server.tracked[entry]
+	delete(server.tracked, entry)
+	server.tmu.Unlock()
 
 	if !ok {
 		return
 	}
 
-	if t.target != nil {
-		t.target.streams.Add(-1)
+	if entry.target != nil {
+		entry.target.streams.Add(-1)
 	}
 
-	if t.source != nil {
-		t.source.linkStream.Add(-1)
+	if entry.source != nil {
+		entry.source.linkStream.Add(-1)
 	}
 }
 
-func (s *Server) closeTrackedFor(c *session) {
+func (server *Server) closeTrackedFor(c *session) {
 	var doomed []*tracked
 
-	s.tmu.Lock()
-	for t := range s.tracked {
+	server.tmu.Lock()
+	for t := range server.tracked {
 		if t.target == c || t.source == c {
 			doomed = append(doomed, t)
 		}
 	}
-	s.tmu.Unlock()
+	server.tmu.Unlock()
 
 	for _, t := range doomed {
 		t.close()
 	}
 }
 
-func (s *Server) closeAllTracked() {
-	var all []*tracked
+func (server *Server) closeAllTracked() {
+	server.tmu.Lock()
 
-	s.tmu.Lock()
-	for t := range s.tracked {
+	all := make([]*tracked, 0, len(server.tracked))
+	for t := range server.tracked {
 		all = append(all, t)
 	}
-	s.tmu.Unlock()
+	server.tmu.Unlock()
 
 	for _, t := range all {
 		t.close()
 	}
 }
 
-func (s *Server) checkNow(t policy.Session) error {
-	snap := s.cfg.Current()
+func (server *Server) checkNow(pol *policy.Session) error {
+	snap := server.cfg.Current()
 
-	return policy.Check(snap.Rules, snap.Revocations, t, s.now())
+	//nolint:wrapcheck // policy errors are returned verbatim; callers send them as reject reasons
+	return policy.Check(snap.Rules, snap.Revocations, *pol, server.now())
 }
 
 // handleAgentStream serves one agent-opened link stream: it relays to the
 // target machine's newest session after the policy check. The hub never reads
 // the payload bytes.
-func (s *Server) handleAgentStream(src *session, st *yamux.Stream) {
+func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 	fail := func(msg string) {
+		//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 		_ = st.SetWriteDeadline(time.Now().Add(headerReadTimeout))
+		//nolint:errcheck // best-effort notice; the peer may already be gone
 		_ = proto.WriteLine(st, proto.StreamReply{OK: false, Error: msg})
 		_ = st.Close()
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetReadDeadline(time.Now().Add(headerReadTimeout))
 
 	var hdr proto.StreamHeader
-	if err := proto.ReadLine(st, &hdr); err != nil || hdr.To == "" {
+
+	err := proto.ReadLine(st, &hdr)
+	if err != nil || hdr.To == "" {
 		_ = st.Close()
 
 		return
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetReadDeadline(time.Time{})
 
 	svc, machine, ok := policy.SplitTarget(hdr.To)
@@ -132,22 +140,27 @@ func (s *Server) handleAgentStream(src *session, st *yamux.Stream) {
 		Svc:         svc,
 		Machine:     machine,
 	}
-	log := src.log.With("target", hdr.To)
+	log := src.log.With(slog.Any("target", hdr.To))
 
-	if err := s.checkNow(pol); err != nil {
-		log.Info("reject", "kind", "relay", "reason", err.Error())
+	err = server.checkNow(&pol)
+	if err != nil {
+		log.Info(
+			"Reject",
+			slog.String("kind", "relay"),
+			slog.String("reason", err.Error()),
+		)
 		fail("not allowed")
 
 		return
 	}
 
-	if _, ok := s.cfg.Current().Machines[machine].Services[svc]; !ok {
+	if _, ok := server.cfg.Current().Machines[machine].Services[svc]; !ok {
 		fail("unknown target")
 
 		return
 	}
 
-	tgt := s.liveSession(machine)
+	tgt := server.liveSession(machine)
 	if tgt == nil {
 		fail("target not connected")
 
@@ -164,11 +177,13 @@ func (s *Server) handleAgentStream(src *session, st *yamux.Stream) {
 	tr := &tracked{kind: "relay", pol: pol, target: tgt, source: src}
 	tr.closeFn = func() { _ = st.Close(); _ = out.Close() }
 
-	s.track(tr)
-	defer s.untrack(tr)
+	server.track(tr)
+	defer server.untrack(tr)
 
-	if err := s.checkNow(pol); err != nil {
+	err = server.checkNow(&pol)
+	if err != nil {
 		_ = out.Close()
+
 		fail("not allowed")
 
 		return
@@ -178,43 +193,57 @@ func (s *Server) handleAgentStream(src *session, st *yamux.Stream) {
 	if err != nil || !reply.OK {
 		msg := "target error"
 		if err == nil {
-			msg = "target refused: " + truncate(reply.Error, 200)
+			msg = "target refused: " + truncate(reply.Error, maxDetailLen)
 		}
 
-		log.Info("relay failed", "error", fmt.Sprint(err), "reply", reply.Error)
+		log.Info(
+			"Relay failed",
+			slog.Any("error", err),
+			slog.String("reply", reply.Error),
+		)
+
 		_ = out.Close()
+
 		fail(msg)
 
 		return
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetWriteDeadline(time.Now().Add(headerReadTimeout))
-	if err := proto.WriteLine(st, proto.StreamReply{OK: true}); err != nil {
+
+	err = proto.WriteLine(st, proto.StreamReply{OK: true})
+	if err != nil {
 		_ = out.Close()
 		_ = st.Close()
 
 		return
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetWriteDeadline(time.Time{})
 
-	log.Debug("relay open")
+	log.Debug("Relay open")
 	tunnel.Join(st, out)
 }
 
 func openRelay(out *yamux.Stream, hdr proto.StreamHeader) (proto.StreamReply, error) {
 	var reply proto.StreamReply
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = out.SetDeadline(time.Now().Add(replyTimeout))
 
-	if err := proto.WriteLine(out, hdr); err != nil {
+	err := proto.WriteLine(out, hdr)
+	if err != nil {
 		return reply, fmt.Errorf("write header: %w", err)
 	}
 
-	if err := proto.ReadLine(out, &reply); err != nil {
+	err = proto.ReadLine(out, &reply)
+	if err != nil {
 		return reply, fmt.Errorf("read reply: %w", err)
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = out.SetDeadline(time.Time{})
 
 	return reply, nil
@@ -223,8 +252,9 @@ func openRelay(out *yamux.Stream, hdr proto.StreamHeader) (proto.StreamReply, er
 // trackedConn untracks its stream when closed.
 type trackedConn struct {
 	net.Conn
-	once    sync.Once
+
 	onClose func()
+	once    sync.Once
 }
 
 func (c *trackedConn) Close() error {

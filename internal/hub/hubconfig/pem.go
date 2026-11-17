@@ -7,15 +7,15 @@ type pemBlock = pem.Block
 // nextCert returns the next CERTIFICATE block in data and the remainder.
 func nextCert(data []byte) (*pemBlock, []byte) {
 	for {
-		var b *pem.Block
+		var block *pem.Block
 
-		b, data = pem.Decode(data)
-		if b == nil {
+		block, data = pem.Decode(data)
+		if block == nil {
 			return nil, nil
 		}
 
-		if b.Type == "CERTIFICATE" {
-			return b, data
+		if block.Type == "CERTIFICATE" {
+			return block, data
 		}
 	}
 }

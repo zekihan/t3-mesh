@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -21,22 +22,24 @@ const (
 
 // OpsHandler returns the handler for /status, /alerts/<name>, /healthz and
 // /readyz.
-func (s *Server) OpsHandler() http.Handler {
+func (server *Server) OpsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		//nolint:errcheck // best-effort response; the client may already be gone
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !s.Ready() {
+		if !server.Ready() {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 
 			return
 		}
 
+		//nolint:errcheck // best-effort response; the client may already be gone
 		_, _ = w.Write([]byte("ready\n"))
 	})
-	mux.HandleFunc("GET /status", s.serveStatus)
-	mux.HandleFunc("GET /alerts/{name}", s.serveAlert)
+	mux.HandleFunc("GET /status", server.serveStatus)
+	mux.HandleFunc("GET /alerts/{name}", server.serveAlert)
 
 	return mux
 }
@@ -56,85 +59,95 @@ type ackedStatus struct {
 }
 
 type machineStatus struct {
-	Identity       string               `json:"identity"`
-	Connected      bool                 `json:"connected"`
-	Path           string               `json:"path,omitempty"`
-	ConnectedSince *time.Time           `json:"connectedSince,omitempty"`
-	Sessions       int                  `json:"sessions"`
-	OpenStreams    int64                `json:"openStreams"`
-	LinkStreams    int64                `json:"linkStreams"`
-	DirectSessions int                  `json:"directSessions"`
-	Version        string               `json:"version,omitempty"`
 	CertNotAfter   *time.Time           `json:"certNotAfter,omitempty"`
+	Alerts         map[string]bool      `json:"alerts"`
+	ConnectedSince *time.Time           `json:"connectedSince,omitempty"`
 	LastSeen       *time.Time           `json:"lastSeen,omitempty"`
-	Services       servicesStatus       `json:"services"`
 	Acked          ackedStatus          `json:"acked"`
+	Version        string               `json:"version,omitempty"`
+	Identity       string               `json:"identity"`
+	Path           string               `json:"path,omitempty"`
+	Services       servicesStatus       `json:"services"`
 	Warnings       []string             `json:"warnings"`
 	AgentWarnings  []string             `json:"agentWarnings,omitempty"`
 	FailedUpdates  []proto.FailedUpdate `json:"failedUpdates"`
-	Alerts         map[string]bool      `json:"alerts"`
+	LinkStreams    int64                `json:"linkStreams"`
+	DirectSessions int                  `json:"directSessions"`
+	OpenStreams    int64                `json:"openStreams"`
+	Sessions       int                  `json:"sessions"`
+	Connected      bool                 `json:"connected"`
 }
 
 type statusDoc struct {
 	Now            time.Time                `json:"now"`
 	StartedAt      time.Time                `json:"startedAt"`
+	Machines       map[string]machineStatus `json:"machines"`
+	Release        proto.Release            `json:"release"`
 	PolicyRevision string                   `json:"policyRevision"`
 	Rules          string                   `json:"rulesRevision"`
 	Revocations    string                   `json:"revocationRevision"`
 	TrustBundle    string                   `json:"trustBundleRevision"`
-	Release        proto.Release            `json:"release"`
-	Stale          bool                     `json:"stale"`
 	StaleReason    string                   `json:"staleReason,omitempty"`
 	ConfigError    string                   `json:"configError,omitempty"`
-	Machines       map[string]machineStatus `json:"machines"`
+	Stale          bool                     `json:"stale"`
 }
 
-func ptrTime(t time.Time) *time.Time {
-	if t.IsZero() {
+func ptrTime(timestamp time.Time) *time.Time {
+	if timestamp.IsZero() {
 		return nil
 	}
 
-	t = t.UTC()
+	timestamp = timestamp.UTC()
 
-	return &t
+	return &timestamp
 }
 
-func (s *Server) serveStatus(w http.ResponseWriter, _ *http.Request) {
-	snap := s.cfg.Current()
-	now := s.now()
-	stale, reason := s.cfg.Stale(now)
+func (server *Server) serveStatus(w http.ResponseWriter, req *http.Request) {
+	snap := server.cfg.Current()
+	now := server.now()
+	stale, reason := server.cfg.Stale(now)
 
 	doc := statusDoc{
-		Now: now.UTC(), StartedAt: s.started.UTC(),
+		Now: now.UTC(), StartedAt: server.started.UTC(),
 		PolicyRevision: snap.PolicyRevision, Rules: snap.Rules.Revision,
 		Revocations: snap.Revocations.Revision, TrustBundle: snap.TrustBundle.Revision,
 		Release: snap.Release, Stale: stale, StaleReason: reason,
 		Machines: map[string]machineStatus{},
 	}
-	if err := s.cfg.LastError(); err != nil {
+
+	err := server.cfg.LastError()
+	if err != nil {
 		doc.ConfigError = err.Error()
 	}
 
-	s.mu.Lock()
+	server.mu.Lock()
 	for name, mc := range snap.Machines {
-		doc.Machines[name] = s.machineStatusLocked(snap, name, mc, now)
+		doc.Machines[name] = server.machineStatusLocked(snap, name, mc, now)
 	}
-	s.mu.Unlock()
+	server.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(doc)
+
+	err = enc.Encode(doc)
+	if err != nil {
+		server.log.DebugContext(
+			req.Context(),
+			"Status response write failed",
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
-func (s *Server) machineStatusLocked(
+func (server *Server) machineStatusLocked(
 	snap *hubconfig.Snapshot,
 	name string,
 	mc hubconfig.Machine,
 	now time.Time,
 ) machineStatus {
-	ms := s.machines[name]
+	ms := server.machines[name]
 	if ms == nil {
 		ms = &machineState{name: name}
 	}
@@ -185,10 +198,10 @@ func (s *Server) machineStatusLocked(
 	}
 
 	out.Alerts = map[string]bool{
-		"disconnected": s.disconnectedLocked(mc, ms, now),
+		"disconnected": server.disconnectedLocked(mc, ms, now),
 		"cert-expiry":  certExpiring(ms, now),
 		"update-failed": func() bool {
-			f, _ := s.updateFailedLocked(snap, ms, now)
+			f, _ := server.updateFailedLocked(snap, ms, now)
 
 			return f
 		}(),
@@ -216,12 +229,16 @@ func nonNilFU(in []proto.FailedUpdate) []proto.FailedUpdate {
 // disconnectedLocked: the machine has had no live session for longer than its
 // DisconnectAlertAfter, counted from the later of hub start and its last
 // disconnect.
-func (s *Server) disconnectedLocked(mc hubconfig.Machine, ms *machineState, now time.Time) bool {
+func (server *Server) disconnectedLocked(
+	mc hubconfig.Machine,
+	ms *machineState,
+	now time.Time,
+) bool {
 	if ms.newestLive() != nil {
 		return false
 	}
 
-	since := s.started
+	since := server.started
 	if ms.lastSeen.After(since) {
 		since = ms.lastSeen
 	}
@@ -241,7 +258,7 @@ func normVersion(v string) string { return strings.TrimPrefix(strings.TrimSpace(
 // currently desired release version, or when the connected agent has run a
 // version other than the desired one for over an hour (counted from the later
 // of its connection and the desired version becoming desired).
-func (s *Server) updateFailedLocked(
+func (server *Server) updateFailedLocked(
 	snap *hubconfig.Snapshot,
 	ms *machineState,
 	now time.Time,
@@ -266,8 +283,8 @@ func (s *Server) updateFailedLocked(
 	}
 
 	since := live.accepted
-	if s.releaseSince.After(since) {
-		since = s.releaseSince
+	if server.releaseSince.After(since) {
+		since = server.releaseSince
 	}
 
 	if now.Sub(since) > versionLagAfter {
@@ -282,20 +299,20 @@ func (s *Server) updateFailedLocked(
 	return false, ""
 }
 
-func (s *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
+func (server *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	snap := s.cfg.Current()
-	now := s.now()
+	snap := server.cfg.Current()
+	now := server.now()
 
 	firing, reason, known := false, "", false
 
 	if name == "stale-config" {
 		known = true
-		firing, reason = s.cfg.Stale(now)
+		firing, reason = server.cfg.Stale(now)
 	} else {
-		s.mu.Lock()
+		server.mu.Lock()
 		for mname, mc := range snap.Machines {
-			ms := s.machines[mname]
+			ms := server.machines[mname]
 			if ms == nil {
 				ms = &machineState{name: mname}
 			}
@@ -303,7 +320,7 @@ func (s *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 			switch name {
 			case "agent-" + mname + "-disconnected":
 				known = true
-				firing = s.disconnectedLocked(mc, ms, now)
+				firing = server.disconnectedLocked(mc, ms, now)
 				reason = "agent not connected"
 			case "agent-" + mname + "-cert-expiry":
 				known = true
@@ -311,10 +328,10 @@ func (s *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 				reason = "certificate expires " + ms.certNotAfter.UTC().Format(statusTimeFormat)
 			case "agent-" + mname + "-update-failed":
 				known = true
-				firing, reason = s.updateFailedLocked(snap, ms, now)
+				firing, reason = server.updateFailedLocked(snap, ms, now)
 			}
 		}
-		s.mu.Unlock()
+		server.mu.Unlock()
 	}
 
 	if !known {
@@ -329,5 +346,6 @@ func (s *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//nolint:errcheck // best-effort response; the client may already be gone
 	_, _ = w.Write([]byte("ok\n"))
 }

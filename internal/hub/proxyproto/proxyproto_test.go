@@ -18,20 +18,23 @@ func v2Header(verCmd, fam byte, block []byte) []byte {
 	if len(block) > math.MaxUint16 {
 		panic("v2Header: block longer than the length field allows")
 	}
-	h := make([]byte, 0, fixedHeaderSize+len(block))
-	h = append(h, signature[:]...)
-	h = append(h, verCmd, fam)
-	h = binary.BigEndian.AppendUint16(
-		h,
-		uint16(len(block)),
-	) //nolint:gosec // bounded by the check above
-	return append(h, block...)
+
+	header := make([]byte, 0, fixedHeaderSize+len(block))
+	header = append(header, signature[:]...)
+	header = append(header, verCmd, fam)
+	header = binary.BigEndian.AppendUint16(
+		header,
+		uint16(len(block)), //nolint:gosec // length checked against math.MaxUint16 above
+	)
+
+	return append(header, block...)
 }
 
 func inetBlock(src, dst netip.Addr, sport, dport uint16) []byte {
 	b := append([]byte{}, src.AsSlice()...)
 	b = append(b, dst.AsSlice()...)
 	b = binary.BigEndian.AppendUint16(b, sport)
+
 	return binary.BigEndian.AppendUint16(b, dport)
 }
 
@@ -39,60 +42,82 @@ func proxyHeader(src, dst netip.AddrPort) []byte {
 	if src.Addr().Is4() {
 		return v2Header(0x21, 0x11, inetBlock(src.Addr(), dst.Addr(), src.Port(), dst.Port()))
 	}
+
 	block := append([]byte{}, src.Addr().AsSlice()...)
 	block = append(block, netip.AddrFrom16(dst.Addr().As16()).AsSlice()...)
 	block = binary.BigEndian.AppendUint16(block, src.Port())
 	block = binary.BigEndian.AppendUint16(block, dst.Port())
+
 	return v2Header(0x21, 0x21, block)
 }
 
 func newListener(t *testing.T, headerTimeout time.Duration) net.Listener {
 	t.Helper()
-	inner, err := net.Listen("tcp", "127.0.0.1:0")
+
+	var lc net.ListenConfig
+
+	inner, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ln := Listen(inner, headerTimeout)
+
 	t.Cleanup(func() { _ = ln.Close() })
+
 	return ln
 }
 
 func dial(t *testing.T, ln net.Listener) net.Conn {
 	t.Helper()
-	c, err := net.Dial("tcp", ln.Addr().String())
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(t.Context(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
-	_ = c.SetDeadline(time.Now().Add(ioTimeout))
-	return c
+
+	t.Cleanup(func() { _ = conn.Close() })
+
+	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+
+	return conn
 }
 
 // acceptConn accepts one connection, failing the test if Accept does not return promptly.
 func acceptConn(t *testing.T, ln net.Listener) *Conn {
 	t.Helper()
+
 	type result struct {
 		c   net.Conn
 		err error
 	}
+
 	ch := make(chan result, 1)
+
 	go func() {
 		c, err := ln.Accept()
 		ch <- result{c, err}
 	}()
+
 	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatal(r.err)
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatal(res.err)
 		}
-		c, ok := r.c.(*Conn)
+
+		wrapped, ok := res.c.(*Conn)
 		if !ok {
-			t.Fatalf("Accept returned %T, want *Conn", r.c)
+			t.Fatalf("Accept returned %T, want *Conn", res.c)
 		}
-		t.Cleanup(func() { _ = c.Close() })
-		return c
+
+		t.Cleanup(func() { _ = wrapped.Close() })
+
+		return wrapped
 	case <-time.After(ioTimeout):
 		t.Fatal("Accept blocked")
+
 		return nil
 	}
 }
@@ -123,20 +148,26 @@ func TestProxiedSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ln := newListener(t, time.Second)
 			client := dial(t, ln)
+
 			dst := netip.MustParseAddrPort("192.168.1.10:8443")
-			if _, err := client.Write(proxyHeader(tt.src, dst)); err != nil {
+
+			_, err := client.Write(proxyHeader(tt.src, dst))
+			if err != nil {
 				t.Fatal(err)
 			}
+
 			sc := acceptConn(t, ln)
 
 			addr := sc.RemoteAddr()
 			if addr == nil || addr.String() != tt.want.String() {
 				t.Fatalf("RemoteAddr = %v, want %v", addr, tt.want)
 			}
+
 			got, err := sc.Source()
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if got != tt.want {
 				t.Fatalf("Source = %v, want %v", got, tt.want)
 			}
@@ -146,12 +177,16 @@ func TestProxiedSource(t *testing.T) {
 
 func TestRemoteAddrBeforeRead(t *testing.T) {
 	ln := newListener(t, time.Second)
+
 	client := dial(t, ln)
-	if _, err := client.Write(
+
+	_, err := client.Write(
 		proxyHeader(netip.MustParseAddrPort("10.0.0.5:1"), netip.MustParseAddrPort("10.0.0.6:2")),
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	sc := acceptConn(t, ln)
 	if got := sc.RemoteAddr().String(); got != "10.0.0.5:1" {
 		t.Fatalf("RemoteAddr = %s", got)
@@ -173,21 +208,27 @@ func TestLocalCommandUsesPeer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ln := newListener(t, time.Second)
 			client := dial(t, ln)
+
 			fam := byte(0x00)
 			if tt.block != nil {
 				fam = 0x11
 			}
-			if _, err := client.Write(v2Header(0x20, fam, tt.block)); err != nil {
+
+			_, err := client.Write(v2Header(0x20, fam, tt.block))
+			if err != nil {
 				t.Fatal(err)
 			}
+
 			sc := acceptConn(t, ln)
 			if got, want := sc.RemoteAddr().String(), client.LocalAddr().String(); got != want {
 				t.Fatalf("RemoteAddr = %s, want peer %s", got, want)
 			}
+
 			src, err := sc.Source()
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if src.String() != client.LocalAddr().String() {
 				t.Fatalf("Source = %v, want peer %s", src, client.LocalAddr())
 			}
@@ -195,80 +236,122 @@ func TestLocalCommandUsesPeer(t *testing.T) {
 	}
 }
 
+type malformedCase struct {
+	wantErr error
+	name    string
+	payload []byte
+	closeAt bool
+}
+
+func malformed(name string, payload []byte, closeAt bool, wantErr error) malformedCase {
+	return malformedCase{name: name, payload: payload, closeAt: closeAt, wantErr: wantErr}
+}
+
 func TestMalformedHeadersAreRejected(t *testing.T) {
 	src := netip.MustParseAddr("203.0.113.7")
 	dst := netip.MustParseAddr("10.0.0.1")
 	good := inetBlock(src, dst, 1, 2)
 
-	tests := []struct {
-		name    string
-		payload []byte
-		closeAt bool // client closes its write side after payload, truncating the header
-		wantErr error
-	}{
-		{"bad signature", func() []byte {
+	tests := []malformedCase{
+		malformed("bad signature", func() []byte {
 			h := v2Header(0x21, 0x11, good)
 			h[0] ^= 0xFF
+
 			return h
-		}(), false, ErrInvalidSignature},
-		{
+		}(), false, ErrInvalidSignature),
+		malformed(
 			"v1 text header",
 			[]byte("PROXY TCP4 203.0.113.7 10.0.0.1 1 2\r\n"),
 			false,
 			ErrInvalidSignature,
-		},
-		{"no header at all", []byte("GET / HTTP/1.1\r\n\r\n"), false, ErrInvalidSignature},
-		{"wrong version", v2Header(0x11, 0x11, good), false, ErrUnsupportedVersion},
-		{"unknown command", v2Header(0x22, 0x11, good), false, ErrUnsupportedCommand},
-		{"unix stream", v2Header(0x21, 0x31, make([]byte, 216)), false, ErrUnsupportedFamily},
-		{"inet dgram", v2Header(0x21, 0x12, good), false, ErrUnsupportedFamily},
-		{"inet6 dgram", v2Header(0x21, 0x22, make([]byte, 36)), false, ErrUnsupportedFamily},
-		{"unspec proxy", v2Header(0x21, 0x00, nil), false, ErrUnsupportedFamily},
-		{"inet block too short", v2Header(0x21, 0x11, good[:4]), false, ErrShortAddress},
-		{"inet6 block too short", v2Header(0x21, 0x21, make([]byte, 35)), false, ErrShortAddress},
-		{
+		),
+		malformed("no header at all", []byte("GET / HTTP/1.1\r\n\r\n"), false, ErrInvalidSignature),
+		malformed("wrong version", v2Header(0x11, 0x11, good), false, ErrUnsupportedVersion),
+		malformed("unknown command", v2Header(0x22, 0x11, good), false, ErrUnsupportedCommand),
+		malformed(
+			"unix stream",
+			v2Header(0x21, 0x31, make([]byte, 216)),
+			false,
+			ErrUnsupportedFamily,
+		),
+		malformed("inet dgram", v2Header(0x21, 0x12, good), false, ErrUnsupportedFamily),
+		malformed(
+			"inet6 dgram",
+			v2Header(0x21, 0x22, make([]byte, 36)),
+			false,
+			ErrUnsupportedFamily,
+		),
+		malformed("unspec proxy", v2Header(0x21, 0x00, nil), false, ErrUnsupportedFamily),
+		malformed("inet block too short", v2Header(0x21, 0x11, good[:4]), false, ErrShortAddress),
+		malformed(
+			"inet6 block too short",
+			v2Header(0x21, 0x21, make([]byte, 35)),
+			false,
+			ErrShortAddress,
+		),
+		malformed(
 			"header too large",
 			append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xFF),
 			false,
 			ErrHeaderTooLarge,
-		},
-		{
+		),
+		malformed(
 			"header one byte over 64 KiB",
 			append(append([]byte{}, signature[:]...), 0x21, 0x11, 0xFF, 0xF1),
 			false,
 			ErrHeaderTooLarge,
-		},
-		{"truncated fixed header", v2Header(0x21, 0x11, good)[:10], true, io.ErrUnexpectedEOF},
-		{"truncated address block", v2Header(0x21, 0x11, good)[:20], true, io.ErrUnexpectedEOF},
+		),
+		malformed(
+			"truncated fixed header",
+			v2Header(0x21, 0x11, good)[:10],
+			true,
+			io.ErrUnexpectedEOF,
+		),
+		malformed(
+			"truncated address block",
+			v2Header(0x21, 0x11, good)[:20],
+			true,
+			io.ErrUnexpectedEOF,
+		),
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ln := newListener(t, time.Second)
+
 			client := dial(t, ln)
-			if _, err := client.Write(tt.payload); err != nil {
+
+			_, err := client.Write(tt.payload)
+			if err != nil {
 				t.Fatal(err)
 			}
+
 			if tt.closeAt {
 				closeWrite(t, client)
 			}
+
 			sc := acceptConn(t, ln)
 
-			_, err := sc.Read(make([]byte, 16))
+			_, err = sc.Read(make([]byte, 16))
 			if err == nil {
 				t.Fatal("Read succeeded on malformed header")
 			}
+
 			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Read error = %v, want %v", err, tt.wantErr)
 			}
+
 			if _, ok := sc.RemoteAddr().(invalidAddr); !ok {
 				t.Fatalf(
 					"RemoteAddr = %v after malformed header, want invalidAddr",
 					sc.RemoteAddr(),
 				)
 			}
-			if _, err := sc.Source(); err == nil {
+
+			_, err = sc.Source()
+			if err == nil {
 				t.Fatal("Source succeeded on malformed header")
 			}
+
 			assertClosedByServer(t, client)
 		})
 	}
@@ -277,12 +360,15 @@ func TestMalformedHeadersAreRejected(t *testing.T) {
 // assertClosedByServer checks that the client sees the connection closed.
 func assertClosedByServer(t *testing.T, c net.Conn) {
 	t.Helper()
+
 	_ = c.SetReadDeadline(time.Now().Add(ioTimeout))
 	buf := make([]byte, 1)
+
 	_, err := c.Read(buf)
 	if err == nil {
 		t.Fatal("connection still open after rejected header")
 	}
+
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		t.Fatal("connection not closed by server")
@@ -291,26 +377,36 @@ func assertClosedByServer(t *testing.T, c net.Conn) {
 
 func closeWrite(t *testing.T, c net.Conn) {
 	t.Helper()
+
 	tc, ok := c.(*net.TCPConn)
 	if !ok {
 		t.Fatalf("client is %T, want *net.TCPConn", c)
 	}
-	if err := tc.CloseWrite(); err != nil {
+
+	err := tc.CloseWrite()
+	if err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestTruncatedHeaderFromClientClose(t *testing.T) {
 	ln := newListener(t, time.Second)
+
 	client := dial(t, ln)
-	if _, err := client.Write(
+
+	_, err := client.Write(
 		v2Header(0x21, 0x11, inetBlock(netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("10.0.0.1"), 1, 2))[:12],
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	closeWrite(t, client)
+
 	sc := acceptConn(t, ln)
-	if _, err := sc.Read(make([]byte, 1)); !errors.Is(err, io.ErrUnexpectedEOF) {
+
+	_, err = sc.Read(make([]byte, 1))
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Read error = %v, want unexpected EOF", err)
 	}
 }
@@ -323,18 +419,26 @@ func TestTLVsSkipped(t *testing.T) {
 
 	ln := newListener(t, time.Second)
 	client := dial(t, ln)
+
 	payload := []byte("after-tlvs")
-	if _, err := client.Write(append(v2Header(0x21, 0x11, block), payload...)); err != nil {
+
+	_, err := client.Write(append(v2Header(0x21, 0x11, block), payload...))
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	sc := acceptConn(t, ln)
 	if got := sc.RemoteAddr().String(); got != src.String() {
 		t.Fatalf("RemoteAddr = %s, want %s", got, src)
 	}
+
 	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(sc, got); err != nil {
+
+	_, err = io.ReadFull(sc, got)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("payload = %q, want %q", got, payload)
 	}
@@ -347,13 +451,16 @@ func TestHeaderSizeBoundary(t *testing.T) {
 	t.Run("exactly 64 KiB accepted", func(t *testing.T) {
 		// Address block of 65520 bytes: 12 address bytes, one TLV header, then its value.
 		const tlvValue = 65520 - 12 - 3
+
 		block := append([]byte{}, addrs...)
 		block = append(block, 0x20, byte(tlvValue>>8), byte(tlvValue&0xFF))
 		block = append(block, make([]byte, tlvValue)...)
 		ln := newListener(t, time.Second)
 		client := dial(t, ln)
+
 		header := v2Header(0x21, 0x11, block)
 		go func() { _, _ = client.Write(header) }()
+
 		sc := acceptConn(t, ln)
 		if got := sc.RemoteAddr().String(); got != src.String() {
 			t.Fatalf("RemoteAddr = %s, want %s", got, src)
@@ -362,10 +469,14 @@ func TestHeaderSizeBoundary(t *testing.T) {
 
 	t.Run("65521 bytes rejected", func(t *testing.T) {
 		ln := newListener(t, time.Second)
+
 		client := dial(t, ln)
 		go func() { _, _ = client.Write(v2Header(0x21, 0x11, make([]byte, 65521))) }()
+
 		sc := acceptConn(t, ln)
-		if _, err := sc.Read(make([]byte, 1)); !errors.Is(err, ErrHeaderTooLarge) {
+
+		_, err := sc.Read(make([]byte, 1))
+		if !errors.Is(err, ErrHeaderTooLarge) {
 			t.Fatalf("Read error = %v, want %v", err, ErrHeaderTooLarge)
 		}
 	})
@@ -395,7 +506,8 @@ func TestDataAfterHeaderPreserved(t *testing.T) {
 							2,
 						),
 					),
-					clientHello...),
+					clientHello...,
+				),
 			},
 			clientHello,
 		},
@@ -422,18 +534,25 @@ func TestDataAfterHeaderPreserved(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ln := newListener(t, time.Second)
 			client := dial(t, ln)
+
 			go func() {
 				for _, w := range tt.writes {
-					if _, err := client.Write(w); err != nil {
+					_, err := client.Write(w)
+					if err != nil {
 						return
 					}
 				}
 			}()
+
 			sc := acceptConn(t, ln)
+
 			got := make([]byte, len(tt.want))
-			if _, err := io.ReadFull(sc, got); err != nil {
+
+			_, err := io.ReadFull(sc, got)
+			if err != nil {
 				t.Fatal(err)
 			}
+
 			if !bytes.Equal(got, tt.want) {
 				t.Fatal("bytes after header were altered or lost")
 			}
@@ -447,15 +566,19 @@ func TestSlowClientDoesNotBlockAccept(t *testing.T) {
 	_ = dial(t, ln) // connects and sends nothing
 
 	fast := dial(t, ln)
-	if _, err := fast.Write(
+
+	_, err := fast.Write(
 		proxyHeader(
 			netip.MustParseAddrPort("203.0.113.8:5555"),
 			netip.MustParseAddrPort("10.0.0.1:443"),
 		),
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fast.Write([]byte("hi")); err != nil {
+
+	_, err = fast.Write([]byte("hi"))
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -464,16 +587,22 @@ func TestSlowClientDoesNotBlockAccept(t *testing.T) {
 
 	// Both Accept calls return while the first connection is still silent; the second is readable.
 	buf := make([]byte, 2)
+
 	_ = second.SetReadDeadline(time.Now().Add(ioTimeout))
-	if _, err := io.ReadFull(second, buf); err != nil {
+
+	_, err = io.ReadFull(second, buf)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(buf) != "hi" {
 		t.Fatalf("payload = %q", buf)
 	}
+
 	if got := second.RemoteAddr().String(); got != "203.0.113.8:5555" {
 		t.Fatalf("RemoteAddr = %s", got)
 	}
+
 	_ = first.Close()
 }
 
@@ -483,27 +612,36 @@ func TestHeaderTimeoutClosesConnection(t *testing.T) {
 	sc := acceptConn(t, ln)
 
 	start := time.Now()
+
 	_, err := sc.Read(make([]byte, 1))
 	if err == nil {
 		t.Fatal("Read succeeded without a header")
 	}
+
 	var ne net.Error
 	if !errors.As(err, &ne) || !ne.Timeout() {
 		t.Fatalf("Read error = %v, want timeout", err)
 	}
+
 	if elapsed := time.Since(start); elapsed > ioTimeout {
 		t.Fatalf("timeout took %v", elapsed)
 	}
+
 	assertClosedByServer(t, client)
 }
 
 func TestListenDefaultTimeout(t *testing.T) {
-	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+
+	inner, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ln := Listen(inner, 0)
+
 	t.Cleanup(func() { _ = ln.Close() })
+
 	l, ok := ln.(*listener)
 	if !ok || l.headerTimeout != defaultHeaderTimeout {
 		t.Fatalf("headerTimeout = %v, want %v", l.headerTimeout, defaultHeaderTimeout)

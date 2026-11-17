@@ -39,6 +39,12 @@ const (
 var (
 	errNoEnrollment = errors.New("hub: enrollment is not open")
 	errNoSession    = errors.New("hub: machine not connected")
+
+	errConfigRequired  = errors.New("hub: Config is required")
+	errIssuerRequired  = errors.New("hub: Issuer is required")
+	errUnknownIdentity = errors.New("hub: not a configured agent identity")
+	errUnsupportedALPN = errors.New("hub: unsupported ALPN")
+	errNeedClientCert  = errors.New("hub: tunnel needs a client certificate")
 )
 
 // Options configures a Server.
@@ -56,43 +62,39 @@ type Options struct {
 
 // Server is the hub.
 type Server struct {
-	cfg      *hubconfig.Watcher
-	issuer   issuer.Issuer
-	tokens   *enroll.Tokens
-	enrollH  *enroll.Handler
-	log      *slog.Logger
-	now      func() time.Time
-	proxyTO  time.Duration
-	started  time.Time
-	sweepInt time.Duration
-
-	ready atomic.Bool
-	wg    sync.WaitGroup
-
-	mu           sync.Mutex
-	machines     map[string]*machineState
-	nextID       uint64
-	releaseRev   string
+	started      time.Time
 	releaseSince time.Time
-
-	nmu    sync.Mutex
-	newest map[string]string
-
-	tmu     sync.Mutex
-	tracked map[*tracked]struct{}
+	issuer       issuer.Issuer
+	now          func() time.Time
+	cfg          *hubconfig.Watcher
+	tracked      map[*tracked]struct{}
+	enrollH      *enroll.Handler
+	log          *slog.Logger
+	newest       map[string]string
+	tokens       *enroll.Tokens
+	machines     map[string]*machineState
+	releaseRev   string
+	wg           sync.WaitGroup
+	sweepInt     time.Duration
+	nextID       uint64
+	proxyTO      time.Duration
+	mu           sync.Mutex
+	nmu          sync.Mutex
+	tmu          sync.Mutex
+	ready        atomic.Bool
 }
 
 // New builds a Server.
 func New(opts Options) (*Server, error) {
 	if opts.Config == nil {
-		return nil, errors.New("hub: Config is required")
+		return nil, errConfigRequired
 	}
 
 	if opts.Issuer == nil {
-		return nil, errors.New("hub: Issuer is required")
+		return nil, errIssuerRequired
 	}
 
-	s := &Server{
+	server := &Server{
 		cfg:      opts.Config,
 		issuer:   opts.Issuer,
 		tokens:   opts.Tokens,
@@ -104,63 +106,61 @@ func New(opts Options) (*Server, error) {
 		newest:   map[string]string{},
 		tracked:  map[*tracked]struct{}{},
 	}
-	if s.log == nil {
-		s.log = slog.New(slog.DiscardHandler)
+	if server.log == nil {
+		server.log = slog.New(slog.DiscardHandler)
 	}
 
-	if s.now == nil {
-		s.now = time.Now
+	if server.now == nil {
+		server.now = time.Now
 	}
 
-	if s.tokens == nil {
-		s.tokens = enroll.NewTokens(s.now)
+	if server.tokens == nil {
+		server.tokens = enroll.NewTokens(server.now)
 	}
 
-	s.started = s.now()
-	s.releaseSince = s.started
-	s.releaseRev = opts.Config.Current().Release.Revision
+	server.started = server.now()
+	server.releaseSince = server.started
+	server.releaseRev = opts.Config.Current().Release.Revision
 
-	s.enrollH = &enroll.Handler{
-		Tokens:  s.tokens,
-		Issuer:  s.issuer,
-		Allowed: s.EnrollAllowed,
+	server.enrollH = &enroll.Handler{
+		Tokens:  server.tokens,
+		Issuer:  server.issuer,
+		Allowed: server.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
-			s.setNewest(identity, fp)
-			s.log.Info(
-				"certificate issued",
-				"identity",
-				identity,
-				"fingerprint",
-				fp,
-				"via",
-				"enrollment",
+			server.setNewest(identity, fp)
+			server.log.Info(
+				"Certificate issued",
+				slog.Any("identity", identity),
+				slog.Any("fingerprint", fp),
+				slog.String("via", "enrollment"),
 			)
 		},
-		Limiter: enroll.NewLimiter(s.now),
-		Log:     s.log,
-		Now:     s.now,
+		Limiter: enroll.NewLimiter(server.now),
+		Log:     server.log,
+		Now:     server.now,
 	}
 
-	return s, nil
+	return server, nil
 }
 
 // ProxyHeaderTimeout returns the configured PROXY header timeout.
-func (s *Server) ProxyHeaderTimeout() time.Duration { return s.proxyTO }
+func (server *Server) ProxyHeaderTimeout() time.Duration { return server.proxyTO }
 
 // Ready reports whether the tunnel listener is up and configuration is loaded.
-func (s *Server) Ready() bool {
-	return s.ready.Load() && s.cfg.Current() != nil
+func (server *Server) Ready() bool {
+	return server.ready.Load() && server.cfg.Current() != nil
 }
 
 // EnrollAllowed reports whether identity may enroll: a configured agent
 // identity that is not disabled.
-func (s *Server) EnrollAllowed(identity string) error {
-	snap := s.cfg.Current()
+func (server *Server) EnrollAllowed(identity string) error {
+	snap := server.cfg.Current()
 	if _, ok := snap.MachineForIdentity(identity); !ok {
-		return fmt.Errorf("hub: %q is not a configured agent identity", identity)
+		return fmt.Errorf("%w: %q", errUnknownIdentity, identity)
 	}
 
-	if err := policy.Revoked(snap.Revocations, identity, ""); err != nil {
+	err := policy.Revoked(snap.Revocations, identity, "")
+	if err != nil {
 		return fmt.Errorf("hub: %w", err)
 	}
 
@@ -169,17 +169,17 @@ func (s *Server) EnrollAllowed(identity string) error {
 
 // ServeTunnels accepts agent tunnel and enrollment connections on ln until ctx
 // is done.
-func (s *Server) ServeTunnels(ctx context.Context, ln net.Listener) error {
+func (server *Server) ServeTunnels(ctx context.Context, ln net.Listener) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 
-	s.ready.Store(true)
-	defer s.ready.Store(false)
+	server.ready.Store(true)
+	defer server.ready.Store(false)
 
-	s.wg.Go(func() { s.sweepLoop(ctx) })
+	server.wg.Go(func() { server.sweepLoop(ctx) })
 
 	var serveErr error
 
@@ -193,14 +193,28 @@ func (s *Server) ServeTunnels(ctx context.Context, ln net.Listener) error {
 			break
 		}
 
-		s.wg.Go(func() { s.handleConn(ctx, conn) })
+		server.wg.Go(func() { server.handleConn(ctx, conn) })
 	}
 
 	cancel()
-	s.closeAllTracked()
-	s.wg.Wait()
+	server.closeAllTracked()
+	server.wg.Wait()
 
 	return serveErr
+}
+
+// OnConfigChange applies a new snapshot: it closes what is no longer allowed
+// and pushes updates to every session. Pass it to Watcher.Run.
+func (server *Server) OnConfigChange(_, next *hubconfig.Snapshot) {
+	server.mu.Lock()
+	if next.Release.Revision != server.releaseRev {
+		server.releaseRev = next.Release.Revision
+		server.releaseSince = server.now()
+	}
+	server.mu.Unlock()
+
+	server.enforce()
+	server.kickAll()
 }
 
 // sourceAddr returns the client source address of conn: the PROXY v2 source
@@ -230,19 +244,25 @@ func sourceAddr(conn net.Conn) (netip.Addr, error) {
 	return ap.Addr().Unmap(), nil
 }
 
-func (s *Server) handleConn(ctx context.Context, raw net.Conn) {
+func (server *Server) handleConn(ctx context.Context, raw net.Conn) {
 	defer func() { _ = raw.Close() }()
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = raw.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	source, err := sourceAddr(raw)
 	if err != nil {
-		s.log.Info("rejected peer", "reason", "no usable source address", "error", err)
+		server.log.InfoContext(
+			ctx,
+			"Rejected peer",
+			slog.String("reason", "no usable source address"),
+			slog.Any("error", err),
+		)
 
 		return
 	}
 
-	tc := tls.Server(raw, s.tlsConfig(source))
+	tc := tls.Server(raw, server.tlsConfig(source))
 
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	err = tc.HandshakeContext(hctx)
@@ -250,24 +270,30 @@ func (s *Server) handleConn(ctx context.Context, raw net.Conn) {
 	cancel()
 
 	if err != nil {
-		s.log.Debug("tls handshake failed", "source", source.String(), "error", err)
+		server.log.DebugContext(
+			ctx,
+			"TLS handshake failed",
+			slog.String("source", source.String()),
+			slog.Any("error", err),
+		)
 
 		return
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = tc.SetDeadline(time.Time{})
 
 	state := tc.ConnectionState()
 	if state.NegotiatedProtocol == proto.ALPNEnroll {
-		s.enrollH.Serve(ctx, tc, source)
+		server.enrollH.Serve(ctx, tc, source)
 
 		return
 	}
 
-	s.serveSession(ctx, tc, source, state)
+	server.serveSession(ctx, tc, source, &state)
 }
 
-func (s *Server) tlsConfig(source netip.Addr) *tls.Config {
+func (server *Server) tlsConfig(source netip.Addr) *tls.Config {
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
 		MaxVersion:             tls.VersionTLS13,
@@ -275,18 +301,16 @@ func (s *Server) tlsConfig(source netip.Addr) *tls.Config {
 		ClientAuth:             tls.RequestClientCert,
 		SessionTicketsDisabled: true,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return s.cfg.Current().ServingCert, nil
+			return server.cfg.Current().ServingCert, nil
 		},
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			if err := s.verifyPeer(cs); err != nil {
-				s.log.Info(
-					"rejected peer",
-					"source",
-					source.String(),
-					"alpn",
-					cs.NegotiatedProtocol,
-					"reason",
-					err.Error(),
+			err := server.verifyPeer(&cs)
+			if err != nil {
+				server.log.Info(
+					"Rejected peer",
+					slog.String("source", source.String()),
+					slog.Any("alpn", cs.NegotiatedProtocol),
+					slog.String("reason", err.Error()),
 				)
 
 				return err
@@ -297,20 +321,20 @@ func (s *Server) tlsConfig(source netip.Addr) *tls.Config {
 	}
 }
 
-func (s *Server) verifyPeer(cs tls.ConnectionState) error {
+func (server *Server) verifyPeer(cs *tls.ConnectionState) error {
 	switch {
 	case cs.NegotiatedProtocol == proto.ALPNEnroll:
-		if !s.tokens.Outstanding() {
+		if !server.tokens.Outstanding() {
 			return errNoEnrollment
 		}
 
 		return nil
 	case slices.Contains(proto.AcceptedTunnelALPNs(), cs.NegotiatedProtocol):
-		_, err := s.admit(s.cfg.Current(), cs.PeerCertificates, s.now())
+		_, err := server.admit(server.cfg.Current(), cs.PeerCertificates, server.now())
 
 		return err
 	default:
-		return fmt.Errorf("hub: unsupported ALPN %q", cs.NegotiatedProtocol)
+		return fmt.Errorf("%w: %q", errUnsupportedALPN, cs.NegotiatedProtocol)
 	}
 }
 
@@ -323,13 +347,13 @@ type admitted struct {
 
 // admit verifies a tunnel client certificate chain against the trust bundle
 // and the configured agents. It does not check the newest-leaf rule.
-func (s *Server) admit(
+func (server *Server) admit(
 	snap *hubconfig.Snapshot,
 	certs []*x509.Certificate,
 	now time.Time,
 ) (admitted, error) {
 	if len(certs) == 0 {
-		return admitted{}, errors.New("hub: tunnel needs a client certificate")
+		return admitted{}, errNeedClientCert
 	}
 
 	raw := make([][]byte, len(certs))
@@ -349,26 +373,28 @@ func (s *Server) admit(
 
 	machine, ok := snap.MachineForIdentity(identity)
 	if !ok {
-		return admitted{}, fmt.Errorf("hub: %q is not a configured agent identity", identity)
+		return admitted{}, fmt.Errorf("%w: %q", errUnknownIdentity, identity)
 	}
 
 	fp := pki.Fingerprint(leaf)
-	if err := policy.Revoked(snap.Revocations, identity, fp); err != nil {
+
+	err = policy.Revoked(snap.Revocations, identity, fp)
+	if err != nil {
 		return admitted{}, fmt.Errorf("hub: %w", err)
 	}
 
 	return admitted{leaf: leaf, identity: identity, machine: machine, fingerprint: fp}, nil
 }
 
-// checkNewest reports whether fp is the newest issued leaf for identity. noRecord
+// checkNewest reports whether fp is the newest issued leaf for identity. NoRecord
 // is true when the issuer has no record at all (the leaf is then admitted).
-func (s *Server) checkNewest(
+func (server *Server) checkNewest(
 	ctx context.Context,
 	identity, fp string,
-) (ok, noRecord bool, err error) {
-	s.nmu.Lock()
-	cached := s.newest[identity]
-	s.nmu.Unlock()
+) (bool, bool, error) {
+	server.nmu.Lock()
+	cached := server.newest[identity]
+	server.nmu.Unlock()
 
 	if cached == fp {
 		return true, false, nil
@@ -377,7 +403,7 @@ func (s *Server) checkNewest(
 	ctx, cancel := context.WithTimeout(ctx, newestTimeout)
 	defer cancel()
 
-	got, err := s.issuer.Newest(ctx, identity)
+	got, err := server.issuer.Newest(ctx, identity)
 	if err != nil {
 		return false, false, fmt.Errorf("hub: newest leaf lookup: %w", err)
 	}
@@ -390,61 +416,44 @@ func (s *Server) checkNewest(
 		return true, true, nil
 	}
 
-	s.setNewest(identity, got)
+	server.setNewest(identity, got)
 
 	return got == fp, false, nil
 }
 
-func (s *Server) setNewest(identity, fp string) {
-	s.nmu.Lock()
-	s.newest[identity] = fp
-	s.nmu.Unlock()
+func (server *Server) setNewest(identity, fp string) {
+	server.nmu.Lock()
+	server.newest[identity] = fp
+	server.nmu.Unlock()
 }
 
-// OnConfigChange applies a new snapshot: it closes what is no longer allowed
-// and pushes updates to every session. Pass it to Watcher.Run.
-func (s *Server) OnConfigChange(_, next *hubconfig.Snapshot) {
-	s.mu.Lock()
-	if next.Release.Revision != s.releaseRev {
-		s.releaseRev = next.Release.Revision
-		s.releaseSince = s.now()
-	}
-	s.mu.Unlock()
-
-	s.enforce()
-	s.kickAll()
-}
-
-func (s *Server) sweepLoop(ctx context.Context) {
-	t := time.NewTicker(s.sweepInt)
-	defer t.Stop()
+func (server *Server) sweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(server.sweepInt)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			s.enforce()
+		case <-ticker.C:
+			server.enforce()
 		}
 	}
 }
 
 // enforce closes sessions and streams that are no longer allowed, including
 // those whose certificate has expired.
-func (s *Server) enforce() {
-	snap := s.cfg.Current()
-	now := s.now()
+func (server *Server) enforce() {
+	snap := server.cfg.Current()
+	now := server.now()
 
-	for _, sess := range s.allSessions() {
-		if rej, bad := s.sessionViolation(snap, sess, now); bad {
-			s.log.Info(
-				"revoke session",
-				"machine",
-				sess.machine,
-				"identity",
-				sess.identity,
-				"reason",
-				rej.Detail,
+	for _, sess := range server.allSessions() {
+		if rej, bad := server.sessionViolation(snap, sess, now); bad {
+			server.log.Info(
+				"Revoke session",
+				slog.Any("machine", sess.machine),
+				slog.Any("identity", sess.identity),
+				slog.Any("reason", rej.Detail),
 			)
 			go sess.reject(rej)
 		}
@@ -452,23 +461,29 @@ func (s *Server) enforce() {
 
 	var doomed []*tracked
 
-	s.tmu.Lock()
-	for t := range s.tracked {
-		if err := policy.Check(snap.Rules, snap.Revocations, t.pol, now); err != nil {
+	server.tmu.Lock()
+	for t := range server.tracked {
+		err := policy.Check(snap.Rules, snap.Revocations, t.pol, now)
+		if err != nil {
 			t.err = err
 			doomed = append(doomed, t)
 		}
 	}
-	s.tmu.Unlock()
+	server.tmu.Unlock()
 
-	for _, t := range doomed {
-		s.log.Info("revoke stream", "kind", t.kind, "identity", t.pol.Identity,
-			"target", policy.Target(t.pol.Svc, t.pol.Machine), "reason", t.err.Error())
-		t.close()
+	for _, track := range doomed {
+		server.log.Info(
+			"Revoke stream",
+			slog.Any("kind", track.kind),
+			slog.Any("identity", track.pol.Identity),
+			slog.String("target", policy.Target(track.pol.Svc, track.pol.Machine)),
+			slog.String("reason", track.err.Error()),
+		)
+		track.close()
 	}
 }
 
-func (s *Server) sessionViolation(
+func (server *Server) sessionViolation(
 	snap *hubconfig.Snapshot,
 	sess *session,
 	now time.Time,
@@ -477,7 +492,8 @@ func (s *Server) sessionViolation(
 		return proto.Reject{Reason: proto.RejectOther, Detail: "machine no longer configured"}, true
 	}
 
-	if err := policy.Revoked(snap.Revocations, sess.identity, sess.fingerprint); err != nil {
+	err := policy.Revoked(snap.Revocations, sess.identity, sess.fingerprint)
+	if err != nil {
 		return proto.Reject{Reason: proto.RejectIdentityDisabled, Detail: err.Error()}, true
 	}
 

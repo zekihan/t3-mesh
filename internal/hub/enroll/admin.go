@@ -20,6 +20,12 @@ const (
 
 	adminDeadline    = 10 * time.Second
 	adminMaxLineSize = 4 << 10
+	adminSocketMode  = 0o600
+)
+
+var (
+	errAdminRefused   = errors.New("enroll: hub refused")
+	errMalformedReply = errors.New("enroll: malformed reply")
 )
 
 type adminRequest struct {
@@ -35,36 +41,30 @@ type adminReply struct {
 
 // Admin serves the enroll-token admin protocol on a unix socket.
 type Admin struct {
-	Path    string
 	Tokens  *Tokens
 	Allowed func(identity string) error
 	Log     *slog.Logger
-}
-
-func (a *Admin) log() *slog.Logger {
-	if a.Log != nil {
-		return a.Log
-	}
-
-	return slog.New(slog.DiscardHandler)
+	Path    string
 }
 
 // Serve listens on Path (mode 0600, replacing a stale socket) until ctx ends.
-func (a *Admin) Serve(ctx context.Context) error {
-	if err := os.Remove(a.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+func (admin *Admin) Serve(ctx context.Context) error {
+	err := os.Remove(admin.Path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("enroll: remove stale admin socket: %w", err)
 	}
 
 	var lc net.ListenConfig
 
-	ln, err := lc.Listen(ctx, "unix", a.Path)
+	ln, err := lc.Listen(ctx, "unix", admin.Path)
 	if err != nil {
 		return fmt.Errorf("enroll: listen admin socket: %w", err)
 	}
 
-	defer func() { _ = os.Remove(a.Path) }()
+	defer func() { _ = os.Remove(admin.Path) }()
 
-	if err = os.Chmod(a.Path, 0o600); err != nil {
+	err = os.Chmod(admin.Path, adminSocketMode)
+	if err != nil {
 		_ = ln.Close()
 
 		return fmt.Errorf("enroll: chmod admin socket: %w", err)
@@ -72,6 +72,7 @@ func (a *Admin) Serve(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+
 		_ = ln.Close()
 	}()
 
@@ -88,63 +89,94 @@ func (a *Admin) Serve(ctx context.Context) error {
 			return fmt.Errorf("enroll: accept admin connection: %w", err)
 		}
 
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-			a.handle(conn)
-		}()
+		wg.Go(func() {
+			admin.handle(conn)
+		})
 	}
 }
 
-func (a *Admin) handle(conn net.Conn) {
+func (admin *Admin) log() *slog.Logger {
+	if admin.Log != nil {
+		return admin.Log
+	}
+
+	return slog.New(slog.DiscardHandler)
+}
+
+func (admin *Admin) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(adminDeadline))
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
+	_ = conn.SetDeadline(
+		time.Now().Add(adminDeadline),
+	)
 
 	line, err := bufio.NewReaderSize(io.LimitReader(conn, adminMaxLineSize), adminMaxLineSize).
 		ReadBytes('\n')
 	if err != nil {
-		a.reply(conn, adminReply{Error: "bad request"})
+		admin.reply(conn, adminReply{Error: "bad request"})
 
 		return
 	}
 
 	var req adminRequest
-	if err = json.Unmarshal(
+
+	err = json.Unmarshal(
 		line,
 		&req,
-	); err != nil || req.Op != "enroll-token" ||
+	)
+	if err != nil || req.Op != "enroll-token" ||
 		req.Identity == "" {
-		a.reply(conn, adminReply{Error: "bad request"})
+		admin.reply(conn, adminReply{Error: "bad request"})
 
 		return
 	}
 
-	if a.Allowed != nil {
-		if err = a.Allowed(req.Identity); err != nil {
-			a.log().Warn("enroll token refused", "identity", req.Identity, "error", err)
-			a.reply(conn, adminReply{Error: err.Error()})
+	if admin.Allowed != nil {
+		err = admin.Allowed(req.Identity)
+		if err != nil {
+			admin.log().Warn(
+				"Enroll token refused",
+				slog.Any("identity", req.Identity),
+				slog.Any("error", err),
+			)
+			admin.reply(conn, adminReply{Error: err.Error()})
 
 			return
 		}
 	}
 
-	token, expires, err := a.Tokens.Create(req.Identity)
+	token, expires, err := admin.Tokens.Create(req.Identity)
 	if err != nil {
-		a.log().Error("enroll token creation failed", "identity", req.Identity, "error", err)
-		a.reply(conn, adminReply{Error: "internal error"})
+		admin.log().Error(
+			"Enroll token creation failed",
+			slog.Any("identity", req.Identity),
+			slog.Any("error", err),
+		)
+		admin.reply(conn, adminReply{Error: "internal error"})
 
 		return
 	}
 
-	a.log().Info("enroll token created", "identity", req.Identity, "expires", expires)
-	a.reply(conn, adminReply{Token: token, Expires: expires.UTC().Format(time.RFC3339)})
+	admin.log().Info(
+		"Enroll token created",
+		slog.Any("identity", req.Identity),
+		slog.Any("expires", expires),
+	)
+	admin.reply(conn, adminReply{Token: token, Expires: expires.UTC().Format(time.RFC3339)})
 }
 
-func (a *Admin) reply(conn net.Conn, r adminReply) {
-	data, _ := json.Marshal(r)
-	_, _ = conn.Write(append(data, '\n'))
+func (admin *Admin) reply(conn net.Conn, r adminReply) {
+	data, err := json.Marshal(r)
+	if err != nil {
+		// The reply holds only strings, so marshaling cannot fail.
+		return
+	}
+
+	//nolint:errcheck // best-effort response; the client may already be gone
+	_, _ = conn.Write(
+		append(data, '\n'),
+	)
 }
 
 // RequestToken asks the running hub for an enrollment token for identity.
@@ -162,7 +194,10 @@ func RequestToken(ctx context.Context, socketPath, identity string) (string, tim
 	defer func() { _ = conn.Close() }()
 
 	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
+		//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
+		_ = conn.SetDeadline(
+			dl,
+		)
 	}
 
 	data, err := json.Marshal(adminRequest{Op: "enroll-token", Identity: identity})
@@ -170,7 +205,8 @@ func RequestToken(ctx context.Context, socketPath, identity string) (string, tim
 		return "", time.Time{}, fmt.Errorf("enroll: marshal request: %w", err)
 	}
 
-	if _, err = conn.Write(append(data, '\n')); err != nil {
+	_, err = conn.Write(append(data, '\n'))
+	if err != nil {
 		return "", time.Time{}, fmt.Errorf("enroll: send request: %w", err)
 	}
 
@@ -181,17 +217,19 @@ func RequestToken(ctx context.Context, socketPath, identity string) (string, tim
 	}
 
 	var rep adminReply
-	if err = json.Unmarshal(line, &rep); err != nil {
+
+	err = json.Unmarshal(line, &rep)
+	if err != nil {
 		return "", time.Time{}, fmt.Errorf("enroll: parse reply: %w", err)
 	}
 
 	if rep.Error != "" {
-		return "", time.Time{}, fmt.Errorf("enroll: hub refused: %s", rep.Error)
+		return "", time.Time{}, fmt.Errorf("%w: %s", errAdminRefused, rep.Error)
 	}
 
 	expires, err := time.Parse(time.RFC3339, rep.Expires)
 	if err != nil || rep.Token == "" {
-		return "", time.Time{}, errors.New("enroll: malformed reply")
+		return "", time.Time{}, errMalformedReply
 	}
 
 	return rep.Token, expires, nil

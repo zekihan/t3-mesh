@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -31,28 +32,26 @@ var fingerprintRe = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 // A tunnel stream is therefore opened for exactly one request and is never
 // reused by, or handed to, another viewer or fingerprint. A stream costs no
 // handshake, so nothing is lost by not pooling.
-func (s *Server) ViewerHandler() http.Handler {
-	return http.HandlerFunc(s.serveViewer)
+func (server *Server) ViewerHandler() http.Handler {
+	return http.HandlerFunc(server.serveViewer)
 }
 
-func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
+func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	viewer, fp, notAfter, ok := viewerIdentity(r)
 	if !ok {
-		s.log.Info(
-			"reject",
-			"kind",
-			"viewer",
-			"reason",
-			"missing or invalid viewer headers",
-			"host",
-			r.Host,
+		server.log.InfoContext(
+			r.Context(),
+			"Reject",
+			slog.String("kind", "viewer"),
+			slog.String("reason", "missing or invalid viewer headers"),
+			slog.Any("host", r.Host),
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
 
 		return
 	}
 
-	snap := s.cfg.Current()
+	snap := server.cfg.Current()
 
 	machine, svc, ok := snap.HostTarget(r.Host)
 	if !ok {
@@ -68,25 +67,24 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 		Svc:         svc,
 		Machine:     machine,
 	}
-	if err := s.checkNow(pol); err != nil {
-		s.log.Info(
-			"reject",
-			"kind",
-			"viewer",
-			"viewer",
-			viewer,
-			"target",
-			policy.Target(svc, machine),
-			"reason",
-			err.Error(),
+
+	err := server.checkNow(&pol)
+	if err != nil {
+		server.log.InfoContext(
+			r.Context(),
+			"Reject",
+			slog.String("kind", "viewer"),
+			slog.Any("viewer", viewer),
+			slog.String("target", policy.Target(svc, machine)),
+			slog.String("reason", err.Error()),
 		)
 		http.Error(w, "forbidden", http.StatusForbidden)
 
 		return
 	}
 
-	if s.liveSession(machine) == nil {
-		s.writeOffline(w, machine)
+	if server.liveSession(machine) == nil {
+		server.writeOffline(w, machine)
 
 		return
 	}
@@ -94,7 +92,7 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			return s.dialViewer(pol)
+			return server.dialViewer(&pol)
 		},
 	}
 
@@ -112,15 +110,13 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL.Host = pr.In.Host
 			pr.Out.Host = pr.In.Host
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			s.log.Debug(
-				"viewer upstream error",
-				"viewer",
-				viewer,
-				"target",
-				policy.Target(svc, machine),
-				"error",
-				err.Error(),
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			server.log.DebugContext(
+				req.Context(),
+				"Viewer upstream error",
+				slog.Any("viewer", viewer),
+				slog.String("target", policy.Target(svc, machine)),
+				slog.String("error", err.Error()),
 			)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
@@ -129,7 +125,7 @@ func (s *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, r)
 }
 
-func viewerIdentity(r *http.Request) (viewer, fp string, notAfter time.Time, ok bool) {
+func viewerIdentity(r *http.Request) (string, string, time.Time, bool) {
 	get := func(name string) (string, bool) {
 		v := r.Header.Values(name)
 		if len(v) != 1 || strings.TrimSpace(v[0]) == "" {
@@ -156,14 +152,14 @@ func viewerIdentity(r *http.Request) (viewer, fp string, notAfter time.Time, ok 
 	return viewer, strings.ToLower(fpRaw), notAfter, true
 }
 
-func (s *Server) writeOffline(w http.ResponseWriter, machine string) {
-	s.mu.Lock()
+func (server *Server) writeOffline(w http.ResponseWriter, machine string) {
+	server.mu.Lock()
 
 	var last time.Time
-	if m := s.machines[machine]; m != nil {
+	if m := server.machines[machine]; m != nil {
 		last = m.lastSeen
 	}
-	s.mu.Unlock()
+	server.mu.Unlock()
 
 	seen := "not seen since the hub started"
 	if !last.IsZero() {
@@ -174,20 +170,23 @@ func (s *Server) writeOffline(w http.ResponseWriter, machine string) {
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = fmt.Fprintf(
 		w,
-		"<!doctype html><html><head><title>%[1]s is offline</title></head><body><h1>%[1]s is offline</h1><p>The machine is not connected to the mesh (%[2]s).</p></body></html>\n",
+		"<!doctype html><html><head><title>%[1]s is offline</title></head>"+
+			"<body><h1>%[1]s is offline</h1>"+
+			"<p>The machine is not connected to the mesh (%[2]s).</p></body></html>\n",
 		html.EscapeString(machine),
 		html.EscapeString(seen),
 	)
 }
 
 // dialViewer opens a tunnel stream for one viewer request and tracks it.
-func (s *Server) dialViewer(pol policy.Session) (net.Conn, error) {
-	tgt := s.liveSession(pol.Machine)
+func (server *Server) dialViewer(pol *policy.Session) (net.Conn, error) {
+	tgt := server.liveSession(pol.Machine)
 	if tgt == nil {
 		return nil, errNoSession
 	}
 
-	if err := s.checkNow(pol); err != nil {
+	err := server.checkNow(pol)
+	if err != nil {
 		return nil, fmt.Errorf("hub: viewer no longer allowed: %w", err)
 	}
 
@@ -196,27 +195,31 @@ func (s *Server) dialViewer(pol policy.Session) (net.Conn, error) {
 		return nil, fmt.Errorf("hub: open stream: %w", err)
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetWriteDeadline(time.Now().Add(headerReadTimeout))
 
-	if err := proto.WriteLine(
+	err = proto.WriteLine(
 		st,
 		proto.StreamHeader{Svc: pol.Svc, Viewer: pol.Identity},
-	); err != nil {
+	)
+	if err != nil {
 		_ = st.Close()
 
 		return nil, fmt.Errorf("hub: write stream header: %w", err)
 	}
 
+	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write
 	_ = st.SetWriteDeadline(time.Time{})
 
-	t := &tracked{kind: "viewer", pol: pol, target: tgt}
-	conn := &trackedConn{Conn: st, onClose: func() { s.untrack(t) }}
-	t.closeFn = func() { _ = conn.Close() }
+	entry := &tracked{kind: "viewer", pol: *pol, target: tgt}
+	conn := &trackedConn{Conn: st, onClose: func() { server.untrack(entry) }}
+	entry.closeFn = func() { _ = conn.Close() }
 
-	s.track(t)
+	server.track(entry)
 
 	// Close the window between the check above and tracking.
-	if err := s.checkNow(pol); err != nil {
+	err = server.checkNow(pol)
+	if err != nil {
 		_ = conn.Close()
 
 		return nil, fmt.Errorf("hub: viewer no longer allowed: %w", err)

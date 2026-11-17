@@ -55,10 +55,8 @@ type Service struct {
 
 // Machine is one configured machine.
 type Machine struct {
-	Identity string
-	Services map[string]Service
-	// DisconnectAlertAfter is how long the agent may be disconnected before
-	// its disconnected alert fires.
+	Services             map[string]Service
+	Identity             string
 	DisconnectAlertAfter time.Duration
 }
 
@@ -76,58 +74,50 @@ type Issuer struct {
 // Snapshot is an immutable view of the loaded configuration. Callers must not
 // modify any of its fields.
 type Snapshot struct {
-	Machines     map[string]Machine
-	ViewerDomain string
-	HomePrefixes []netip.Prefix
-	Issuer       Issuer
-
-	Rules       proto.Rules
-	Revocations proto.Revocations
-	Release     proto.Release
-	TrustBundle proto.TrustBundle
-	// TrustPool holds every CA certificate of TrustBundle.
-	TrustPool *x509.CertPool
-
-	ServingCert *tls.Certificate
-	// CertNotAfter is the serving certificate's expiry.
-	CertNotAfter time.Time
-
-	// PolicyRevision hashes rules and revocations; the stale check compares it.
+	CertNotAfter   time.Time
+	Rules          proto.Rules
+	TrustPool      *x509.CertPool
+	byIdentity     map[string]string
+	Machines       map[string]Machine
+	ServingCert    *tls.Certificate
+	Issuer         Issuer
+	Release        proto.Release
+	TrustBundle    proto.TrustBundle
 	PolicyRevision string
-
-	// Fingerprint identifies the raw inputs this snapshot was built from.
-	Fingerprint string
-
-	byIdentity map[string]string
+	Fingerprint    string
+	ViewerDomain   string
+	Revocations    proto.Revocations
+	HomePrefixes   []netip.Prefix
 }
 
 // MachineForIdentity returns the machine whose agent identity is id.
-func (s *Snapshot) MachineForIdentity(id string) (string, bool) {
-	m, ok := s.byIdentity[id]
+func (snap *Snapshot) MachineForIdentity(id string) (string, bool) {
+	m, ok := snap.byIdentity[id]
 
 	return m, ok
 }
 
 // HostTarget maps a viewer host "<svc>.<machine>.<viewerDomain>" (any case,
 // optional port) to its machine and service.
-func (s *Snapshot) HostTarget(host string) (machine, svc string, ok bool) {
-	if h, _, err := net.SplitHostPort(host); err == nil {
+func (snap *Snapshot) HostTarget(host string) (string, string, bool) {
+	h, _, err := net.SplitHostPort(host)
+	if err == nil {
 		host = h
 	}
 
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 
-	rest, found := strings.CutSuffix(host, "."+s.ViewerDomain)
+	rest, found := strings.CutSuffix(host, "."+snap.ViewerDomain)
 	if !found {
 		return "", "", false
 	}
 
-	svc, machine, ok = policy.SplitTarget(rest)
+	svc, machine, ok := policy.SplitTarget(rest)
 	if !ok {
 		return "", "", false
 	}
 
-	m, found := s.Machines[machine]
+	m, found := snap.Machines[machine]
 	if !found {
 		return "", "", false
 	}
@@ -140,9 +130,9 @@ func (s *Snapshot) HostTarget(host string) (machine, svc string, ok bool) {
 }
 
 // IsHome reports whether addr is inside a configured home CIDR.
-func (s *Snapshot) IsHome(addr netip.Addr) bool {
+func (snap *Snapshot) IsHome(addr netip.Addr) bool {
 	addr = addr.Unmap().WithZone("")
-	for _, p := range s.HomePrefixes {
+	for _, p := range snap.HomePrefixes {
 		if p.Contains(addr) {
 			return true
 		}
@@ -152,8 +142,8 @@ func (s *Snapshot) IsHome(addr netip.Addr) bool {
 }
 
 // Services returns the sorted service names of machine.
-func (s *Snapshot) Services(machine string) []string {
-	m, ok := s.Machines[machine]
+func (snap *Snapshot) Services(machine string) []string {
+	m, ok := snap.Machines[machine]
 	if !ok {
 		return nil
 	}
@@ -169,9 +159,10 @@ func (s *Snapshot) Services(machine string) []string {
 }
 
 type rawConfig struct {
-	Machines     map[string]rawMachine `yaml:"machines"`
-	HomeCIDRs    []string              `yaml:"homeCIDRs"`
-	ViewerDomain string                `yaml:"viewerDomain"`
+	Machines map[string]rawMachine `yaml:"machines"`
+	//nolint:tagliatelle // public config key; renaming it would break existing config files
+	HomeCIDRs    []string `yaml:"homeCIDRs"`
+	ViewerDomain string   `yaml:"viewerDomain"`
 	Release      struct {
 		Version         string `yaml:"version"`
 		RollbackAllowed bool   `yaml:"rollbackAllowed"`
@@ -192,26 +183,26 @@ type rawConfig struct {
 }
 
 type rawMachine struct {
-	Identity             string `yaml:"identity"`
-	DisconnectAlertAfter string `yaml:"disconnectAlertAfter"`
-	Services             map[string]struct {
+	Services map[string]struct {
 		Kind string `yaml:"kind"`
 	} `yaml:"services"`
+	Identity             string `yaml:"identity"`
+	DisconnectAlertAfter string `yaml:"disconnectAlertAfter"`
 }
 
 // config is the validated, derived content of config.yaml.
 type config struct {
-	machines     map[string]Machine
-	viewerDomain string
-	home         []netip.Prefix
-	issuer       Issuer
 	rules        proto.Rules
-	revs         proto.Revocations
+	machines     map[string]Machine
+	issuer       Issuer
 	release      proto.Release
+	viewerDomain string
+	revs         proto.Revocations
+	home         []netip.Prefix
 }
 
-func (c *config) policyRevision() string {
-	return shortHash(c.rules.Revision, c.revs.Revision)
+func (cfg *config) policyRevision() string {
+	return shortHash(cfg.rules.Revision, cfg.revs.Revision)
 }
 
 func invalid(format string, args ...any) error {
@@ -219,14 +210,14 @@ func invalid(format string, args ...any) error {
 }
 
 func shortHash(parts ...string) string {
-	h := sha256.New()
+	hasher := sha256.New()
 
 	for _, p := range parts {
-		_, _ = h.Write([]byte(p))
-		_, _ = h.Write([]byte{0})
+		_, _ = hasher.Write([]byte(p))
+		_, _ = hasher.Write([]byte{0})
 	}
 
-	return hex.EncodeToString(h.Sum(nil)[:8])
+	return hex.EncodeToString(hasher.Sum(nil)[:8])
 }
 
 func jsonRevision(v any) string {
@@ -254,81 +245,85 @@ func parseConfig(data []byte) (*config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&raw); err != nil {
+	err := dec.Decode(&raw)
+	if err != nil {
 		return nil, invalid("parse %s: %v", ConfigFile, err)
 	}
 
-	c := &config{machines: map[string]Machine{}}
+	cfg := &config{machines: map[string]Machine{}}
 
-	if err := c.parseMachines(raw.Machines); err != nil {
+	err = cfg.parseMachines(raw.Machines)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := c.parseGeneral(&raw); err != nil {
+	err = cfg.parseGeneral(&raw)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := c.parsePolicy(&raw); err != nil {
+	err = cfg.parsePolicy(&raw)
+	if err != nil {
 		return nil, err
 	}
 
-	return c, nil
+	return cfg, nil
 }
 
-func (c *config) parseMachines(in map[string]rawMachine) error {
+func (cfg *config) parseMachines(in map[string]rawMachine) error {
 	if len(in) == 0 {
 		return invalid("no machines configured")
 	}
 
-	for name, m := range in {
+	for name, machine := range in {
 		if !labelRe.MatchString(name) {
 			return invalid("machine name %q is not a DNS label", name)
 		}
 
-		if m.Identity != policy.AgentIdentity(name) {
+		if machine.Identity != policy.AgentIdentity(name) {
 			return invalid(
 				"machine %q identity %q must be %q",
 				name,
-				m.Identity,
+				machine.Identity,
 				policy.AgentIdentity(name),
 			)
 		}
 
-		if len(m.Services) == 0 {
+		if len(machine.Services) == 0 {
 			return invalid("machine %q has no services", name)
 		}
 
 		svcs := map[string]Service{}
 
-		for svc, s := range m.Services {
+		for svc, service := range machine.Services {
 			if !labelRe.MatchString(svc) {
 				return invalid("machine %q service name %q is not a DNS label", name, svc)
 			}
 
-			if s.Kind != KindHTTP {
-				return invalid("machine %q service %q kind %q unsupported", name, svc, s.Kind)
+			if service.Kind != KindHTTP {
+				return invalid("machine %q service %q kind %q unsupported", name, svc, service.Kind)
 			}
 
-			svcs[svc] = Service{Kind: s.Kind}
+			svcs[svc] = Service{Kind: service.Kind}
 		}
 
 		alertAfter := DefaultDisconnectAlertAfter
 
-		if m.DisconnectAlertAfter != "" {
-			d, err := time.ParseDuration(m.DisconnectAlertAfter)
-			if err != nil || d <= 0 {
+		if machine.DisconnectAlertAfter != "" {
+			duration, err := time.ParseDuration(machine.DisconnectAlertAfter)
+			if err != nil || duration <= 0 {
 				return invalid(
 					"machine %q disconnectAlertAfter %q is not a positive duration",
 					name,
-					m.DisconnectAlertAfter,
+					machine.DisconnectAlertAfter,
 				)
 			}
 
-			alertAfter = d
+			alertAfter = duration
 		}
 
-		c.machines[name] = Machine{
-			Identity:             m.Identity,
+		cfg.machines[name] = Machine{
+			Identity:             machine.Identity,
 			Services:             svcs,
 			DisconnectAlertAfter: alertAfter,
 		}
@@ -337,13 +332,13 @@ func (c *config) parseMachines(in map[string]rawMachine) error {
 	return nil
 }
 
-func (c *config) parseGeneral(raw *rawConfig) error {
-	c.viewerDomain = strings.ToLower(strings.TrimSuffix(raw.ViewerDomain, "."))
-	if c.viewerDomain == "" {
+func (cfg *config) parseGeneral(raw *rawConfig) error {
+	cfg.viewerDomain = strings.ToLower(strings.TrimSuffix(raw.ViewerDomain, "."))
+	if cfg.viewerDomain == "" {
 		return invalid("viewerDomain is required")
 	}
 
-	for label := range strings.SplitSeq(c.viewerDomain, ".") {
+	for label := range strings.SplitSeq(cfg.viewerDomain, ".") {
 		if !labelRe.MatchString(label) {
 			return invalid("viewerDomain %q is not a valid domain", raw.ViewerDomain)
 		}
@@ -355,36 +350,36 @@ func (c *config) parseGeneral(raw *rawConfig) error {
 			return invalid("homeCIDR %q: %v", s, err)
 		}
 
-		c.home = append(c.home, p.Masked())
+		cfg.home = append(cfg.home, p.Masked())
 	}
 
 	if !versionRe.MatchString(raw.Release.Version) {
 		return invalid("release.version %q must look like vX.Y.Z", raw.Release.Version)
 	}
 
-	c.release = proto.Release{
+	cfg.release = proto.Release{
 		Version:         raw.Release.Version,
 		RollbackAllowed: raw.Release.RollbackAllowed,
 	}
-	c.release.Revision = jsonRevision(struct {
+	cfg.release.Revision = jsonRevision(struct {
 		Version         string `json:"version"`
 		RollbackAllowed bool   `json:"rollbackAllowed"`
-	}{c.release.Version, c.release.RollbackAllowed})
+	}{cfg.release.Version, cfg.release.RollbackAllowed})
 
-	c.issuer = Issuer(raw.Issuer)
-	if (c.issuer != Issuer{}) && (c.issuer.Name == "" || c.issuer.Kind == "") {
+	cfg.issuer = Issuer(raw.Issuer)
+	if (cfg.issuer != Issuer{}) && (cfg.issuer.Name == "" || cfg.issuer.Kind == "") {
 		return invalid("issuer needs at least name and kind")
 	}
 
 	return nil
 }
 
-func (c *config) parsePolicy(raw *rawConfig) error {
+func (cfg *config) parsePolicy(raw *rawConfig) error {
 	// Entry names are "mesh-<svc>-<machine>"; both parts may contain dashes, so
 	// match against the configured pairs instead of splitting.
 	known := map[string]string{}
 
-	for machine, m := range c.machines {
+	for machine, m := range cfg.machines {
 		for svc := range m.Services {
 			known["mesh-"+svc+"-"+machine] = policy.Target(svc, machine)
 		}
@@ -392,26 +387,26 @@ func (c *config) parsePolicy(raw *rawConfig) error {
 
 	allow := map[string][]string{}
 
-	for name, e := range raw.Policy.Entries {
+	for name, entry := range raw.Policy.Entries {
 		target, ok := known[name]
 		if !ok {
 			return invalid("policy entry %q matches no configured mesh-<svc>-<machine>", name)
 		}
 
-		if len(e.Identities) == 0 {
+		if len(entry.Identities) == 0 {
 			return invalid("policy entry %q has no identities", name)
 		}
 
-		for _, id := range e.Identities {
+		for _, id := range entry.Identities {
 			if strings.TrimSpace(id) == "" || strings.ContainsAny(id, " \t:/") {
 				return invalid("policy entry %q has invalid identity %q", name, id)
 			}
 		}
 
-		allow[target] = sortedUnique(e.Identities)
+		allow[target] = sortedUnique(entry.Identities)
 	}
 
-	c.rules = proto.Rules{Allow: allow, Revision: jsonRevision(allow)}
+	cfg.rules = proto.Rules{Allow: allow, Revision: jsonRevision(allow)}
 
 	disabled := sortedUnique(raw.Policy.DisabledIdentities)
 	if slices.Contains(disabled, "") {
@@ -430,8 +425,8 @@ func (c *config) parsePolicy(raw *rawConfig) error {
 	}
 
 	blocked = sortedUnique(blocked)
-	c.revs = proto.Revocations{DisabledIdentities: disabled, BlockedFingerprints: blocked}
-	c.revs.Revision = jsonRevision(struct {
+	cfg.revs = proto.Revocations{DisabledIdentities: disabled, BlockedFingerprints: blocked}
+	cfg.revs.Revision = jsonRevision(struct {
 		Disabled []string `json:"disabledIdentities"`
 		Blocked  []string `json:"blockedFingerprints"`
 	}{disabled, blocked})
@@ -465,9 +460,10 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 	}
 
 	pool := x509.NewCertPool()
-	n := 0
+	count := 0
 
 	rest := pemBytes
+
 	for {
 		var block *pemBlock
 
@@ -483,10 +479,10 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 
 		pool.AddCert(cert)
 
-		n++
+		count++
 	}
 
-	if n == 0 {
+	if count == 0 {
 		return proto.TrustBundle{}, nil, nil, invalid("trust bundle has no certificates")
 	}
 
@@ -495,7 +491,8 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 		PEM:      string(pemBytes),
 	}, pool, append(
 		pemBytes,
-		rev...), nil
+		rev...,
+	), nil
 }
 
 func loadCert(dir string) (*tls.Certificate, []byte, error) {
@@ -525,8 +522,8 @@ func loadCert(dir string) (*tls.Certificate, []byte, error) {
 }
 
 // Load reads and validates every input and builds a Snapshot.
-func Load(p Paths) (*Snapshot, error) {
-	cfgBytes, err := readFile(p.ConfigDir, ConfigFile)
+func Load(paths Paths) (*Snapshot, error) {
+	cfgBytes, err := readFile(paths.ConfigDir, ConfigFile)
 	if err != nil {
 		return nil, err
 	}
@@ -536,17 +533,17 @@ func Load(p Paths) (*Snapshot, error) {
 		return nil, err
 	}
 
-	bundle, pool, trustRaw, err := loadTrust(p.TrustDir)
+	bundle, pool, trustRaw, err := loadTrust(paths.TrustDir)
 	if err != nil {
 		return nil, err
 	}
 
-	cert, certRaw, err := loadCert(p.CertDir)
+	cert, certRaw, err := loadCert(paths.CertDir)
 	if err != nil {
 		return nil, err
 	}
 
-	s := &Snapshot{
+	snap := &Snapshot{
 		Machines:       cfg.machines,
 		ViewerDomain:   cfg.viewerDomain,
 		HomePrefixes:   cfg.home,
@@ -564,8 +561,8 @@ func Load(p Paths) (*Snapshot, error) {
 	}
 
 	for name, m := range cfg.machines {
-		s.byIdentity[m.Identity] = name
+		snap.byIdentity[m.Identity] = name
 	}
 
-	return s, nil
+	return snap, nil
 }

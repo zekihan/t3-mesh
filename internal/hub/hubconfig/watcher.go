@@ -18,86 +18,80 @@ const (
 	StaleCertWindow  = 14 * 24 * time.Hour
 )
 
+const (
+	defaultDebounce = 200 * time.Millisecond
+	defaultPoll     = 60 * time.Second
+)
+
 // Paths are the three mounted directories.
 type Paths struct{ ConfigDir, TrustDir, CertDir string }
 
 // Watcher keeps the current Snapshot up to date.
 type Watcher struct {
-	paths Paths
-	log   *slog.Logger
-	cur   atomic.Pointer[Snapshot]
-
-	debounce time.Duration
-	poll     time.Duration
-	now      func() time.Time
-
-	mu            sync.Mutex
-	diskPolicyRev string
 	diffSince     time.Time
 	diskCertEnd   time.Time
 	lastErr       error
+	log           *slog.Logger
+	cur           atomic.Pointer[Snapshot]
+	now           func() time.Time
+	paths         Paths
+	diskPolicyRev string
+	debounce      time.Duration
+	poll          time.Duration
+	mu            sync.Mutex
 }
 
 // NewWatcher loads the configuration once and fails if that load fails.
-func NewWatcher(p Paths, log *slog.Logger) (*Watcher, error) {
+func NewWatcher(paths Paths, log *slog.Logger) (*Watcher, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	w := &Watcher{
-		paths:    p,
+	watcher := &Watcher{
+		paths:    paths,
 		log:      log,
-		debounce: 200 * time.Millisecond,
-		poll:     60 * time.Second,
+		debounce: defaultDebounce,
+		poll:     defaultPoll,
 		now:      time.Now,
 	}
 
-	s, err := Load(p)
+	s, err := Load(paths)
 	if err != nil {
 		return nil, fmt.Errorf("hubconfig: initial load: %w", err)
 	}
 
-	w.cur.Store(s)
-	w.observe(s, nil)
+	watcher.cur.Store(s)
+	watcher.observe(s, nil)
 
-	return w, nil
+	return watcher, nil
 }
 
 // Current returns the loaded snapshot.
-func (w *Watcher) Current() *Snapshot { return w.cur.Load() }
+func (watcher *Watcher) Current() *Snapshot { return watcher.cur.Load() }
 
 // LastError returns the error of the most recent failed reload, or nil.
-func (w *Watcher) LastError() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (watcher *Watcher) LastError() error {
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
 
-	return w.lastErr
+	return watcher.lastErr
 }
 
-// Run watches the mounted directories until ctx is done. onChange (may be nil)
+// Run watches the mounted directories until ctx is done. OnChange (may be nil)
 // is called after a changed snapshot is installed.
-func (w *Watcher) Run(ctx context.Context, onChange func(old, next *Snapshot)) error {
+func (watcher *Watcher) Run(ctx context.Context, onChange func(old, next *Snapshot)) error {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("hubconfig: create watcher: %w", err)
 	}
 	defer fw.Close()
 
-	seen := map[string]bool{}
-
-	for _, d := range []string{w.paths.ConfigDir, w.paths.TrustDir, w.paths.CertDir} {
-		if seen[d] {
-			continue
-		}
-
-		seen[d] = true
-
-		if err := fw.Add(d); err != nil {
-			return fmt.Errorf("hubconfig: watch %s: %w", d, err)
-		}
+	err = watcher.watchDirs(fw)
+	if err != nil {
+		return err
 	}
 
-	ticker := time.NewTicker(w.poll)
+	ticker := time.NewTicker(watcher.poll)
 	defer ticker.Stop()
 
 	timer := time.NewTimer(time.Hour)
@@ -108,7 +102,7 @@ func (w *Watcher) Run(ctx context.Context, onChange func(old, next *Snapshot)) e
 	pending := false
 
 	// Cover changes that landed between the initial load and the watches.
-	w.Reload(onChange)
+	watcher.Reload(onChange)
 
 	for {
 		select {
@@ -121,66 +115,107 @@ func (w *Watcher) Run(ctx context.Context, onChange func(old, next *Snapshot)) e
 				return nil
 			}
 
-			w.log.Debug("config event", "name", ev.Name, "op", ev.Op.String())
+			watcher.log.DebugContext(
+				ctx,
+				"Config event",
+				slog.Any("name", ev.Name),
+				slog.String("op", ev.Op.String()),
+			)
 
 			if !pending {
 				pending = true
 
-				timer.Reset(w.debounce)
+				timer.Reset(watcher.debounce)
 			}
 		case err, ok := <-fw.Errors:
 			if !ok {
 				return nil
 			}
 
-			w.log.Error("config watcher error", "err", err)
+			watcher.log.ErrorContext(
+				ctx,
+				"Config watcher error",
+				slog.Any("err", err),
+			)
 		case <-timer.C:
 			pending = false
 
-			w.Reload(onChange)
+			watcher.Reload(onChange)
 		case <-ticker.C:
-			w.Reload(onChange)
+			watcher.Reload(onChange)
 		}
 	}
 }
 
 // Reload re-reads everything. On failure the previous snapshot stays.
-func (w *Watcher) Reload(onChange func(old, next *Snapshot)) {
-	old := w.cur.Load()
+func (watcher *Watcher) Reload(onChange func(old, next *Snapshot)) {
+	old := watcher.cur.Load()
 
-	next, err := Load(w.paths)
+	next, err := Load(watcher.paths)
 	if err != nil {
-		w.observe(old, err)
-		w.log.Error("config reload failed; keeping previous snapshot", "err", err)
+		watcher.observe(old, err)
+		watcher.log.Error(
+			"Config reload failed; keeping previous snapshot",
+			slog.Any("err", err),
+		)
 
 		return
 	}
 
-	w.observe(next, nil)
+	watcher.observe(next, nil)
 
 	if next.Fingerprint == old.Fingerprint {
 		return
 	}
 
-	w.cur.Store(next)
-	w.log.Info("config reloaded",
-		"policyRevision", next.PolicyRevision,
-		"release", next.Release.Version,
-		"trustRevision", next.TrustBundle.Revision,
-		"certNotAfter", next.CertNotAfter)
+	watcher.cur.Store(next)
+	watcher.log.Info(
+		"Config reloaded",
+		slog.Any("policyRevision", next.PolicyRevision),
+		slog.String("release", next.Release.Version),
+		slog.Any("trustRevision", next.TrustBundle.Revision),
+		slog.Any("certNotAfter", next.CertNotAfter),
+	)
 
 	if onChange != nil {
 		onChange(old, next)
 	}
 }
 
+// Stale reports whether the loaded configuration has lagged the mounted one for
+// too long, with a human-readable reason.
+func (watcher *Watcher) Stale(now time.Time) (bool, string) {
+	cur := watcher.cur.Load()
+
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+
+	if !watcher.diffSince.IsZero() && now.Sub(watcher.diffSince) > StalePolicyAfter {
+		return true, fmt.Sprintf("mounted policy revision %s differs from loaded %s since %s",
+			watcher.diskPolicyRev, cur.PolicyRevision, watcher.diffSince.UTC().Format(time.RFC3339))
+	}
+
+	if now.Add(StaleCertWindow).After(cur.CertNotAfter) &&
+		watcher.diskCertEnd.After(cur.CertNotAfter) {
+		return true, fmt.Sprintf(
+			"serving certificate expires %s and a newer one (until %s) is mounted but not loaded",
+			cur.CertNotAfter.UTC().Format(time.RFC3339),
+			watcher.diskCertEnd.UTC().Format(time.RFC3339),
+		)
+	}
+
+	return false, ""
+}
+
 // observe records what is mounted on disk right now, independent of whether the
-// full load succeeded. loadErr is the result of the load attempt.
-func (w *Watcher) observe(loaded *Snapshot, loadErr error) {
+// full load succeeded. LoadErr is the result of the load attempt.
+func (watcher *Watcher) observe(loaded *Snapshot, loadErr error) {
 	diskRev := ""
 
-	if data, err := readFile(w.paths.ConfigDir, ConfigFile); err == nil {
-		if cfg, perr := parseConfig(data); perr == nil {
+	data, err := readFile(watcher.paths.ConfigDir, ConfigFile)
+	if err == nil {
+		cfg, perr := parseConfig(data)
+		if perr == nil {
 			diskRev = cfg.policyRevision()
 		} else {
 			diskRev = "invalid:" + shortHash(string(data))
@@ -189,52 +224,54 @@ func (w *Watcher) observe(loaded *Snapshot, loadErr error) {
 
 	var certEnd time.Time
 
-	if crt, err := readFile(w.paths.CertDir, CertFile); err == nil {
+	crt, err := readFile(watcher.paths.CertDir, CertFile)
+	if err == nil {
 		if b, _ := nextCert(crt); b != nil {
-			if c, perr := x509.ParseCertificate(b.Bytes); perr == nil {
+			c, perr := x509.ParseCertificate(b.Bytes)
+			if perr == nil {
 				certEnd = c.NotAfter
 			}
 		}
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
 
-	w.lastErr = loadErr
+	watcher.lastErr = loadErr
 
 	if diskRev != "" {
-		w.diskPolicyRev = diskRev
+		watcher.diskPolicyRev = diskRev
 	}
 
-	w.diskCertEnd = certEnd
+	watcher.diskCertEnd = certEnd
 
-	if w.diskPolicyRev == loaded.PolicyRevision {
-		w.diffSince = time.Time{}
-	} else if w.diffSince.IsZero() {
-		w.diffSince = w.now()
+	if watcher.diskPolicyRev == loaded.PolicyRevision {
+		watcher.diffSince = time.Time{}
+	} else if watcher.diffSince.IsZero() {
+		watcher.diffSince = watcher.now()
 	}
 }
 
-// Stale reports whether the loaded configuration has lagged the mounted one for
-// too long, with a human-readable reason.
-func (w *Watcher) Stale(now time.Time) (bool, string) {
-	cur := w.cur.Load()
+// watchDirs adds each distinct mounted directory to fw.
+func (watcher *Watcher) watchDirs(fw *fsnotify.Watcher) error {
+	seen := map[string]bool{}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	for _, dir := range []string{
+		watcher.paths.ConfigDir,
+		watcher.paths.TrustDir,
+		watcher.paths.CertDir,
+	} {
+		if seen[dir] {
+			continue
+		}
 
-	if !w.diffSince.IsZero() && now.Sub(w.diffSince) > StalePolicyAfter {
-		return true, fmt.Sprintf("mounted policy revision %s differs from loaded %s since %s",
-			w.diskPolicyRev, cur.PolicyRevision, w.diffSince.UTC().Format(time.RFC3339))
+		seen[dir] = true
+
+		err := fw.Add(dir)
+		if err != nil {
+			return fmt.Errorf("hubconfig: watch %s: %w", dir, err)
+		}
 	}
 
-	if now.Add(StaleCertWindow).After(cur.CertNotAfter) && w.diskCertEnd.After(cur.CertNotAfter) {
-		return true, fmt.Sprintf(
-			"serving certificate expires %s and a newer one (until %s) is mounted but not loaded",
-			cur.CertNotAfter.UTC().Format(time.RFC3339),
-			w.diskCertEnd.UTC().Format(time.RFC3339),
-		)
-	}
-
-	return false, ""
+	return nil
 }

@@ -8,16 +8,19 @@ import (
 
 // Limiter limits enrollment attempts per source address with a sliding window.
 type Limiter struct {
-	// Max attempts per Window per address; Window is the sliding window;
-	// MaxEntries bounds the number of tracked addresses.
+	Now        func() time.Time
+	entries    map[netip.Addr][]time.Time
 	Max        int
 	Window     time.Duration
 	MaxEntries int
-	Now        func() time.Time
-
-	mu      sync.Mutex
-	entries map[netip.Addr][]time.Time
+	mu         sync.Mutex
 }
+
+const (
+	defaultMaxAttempts = 5
+	defaultWindow      = 10 * time.Minute
+	defaultMaxEntries  = 4096
+)
 
 // NewLimiter returns a limiter allowing 5 attempts per 10 minutes per address.
 func NewLimiter(now func() time.Time) *Limiter {
@@ -25,45 +28,50 @@ func NewLimiter(now func() time.Time) *Limiter {
 		now = time.Now
 	}
 
-	return &Limiter{Max: 5, Window: 10 * time.Minute, MaxEntries: 4096, Now: now}
+	return &Limiter{
+		Max:        defaultMaxAttempts,
+		Window:     defaultWindow,
+		MaxEntries: defaultMaxEntries,
+		Now:        now,
+	}
 }
 
 // Allow records an attempt from addr and reports whether it is within the
 // limit. When the table is full of live entries, new addresses are refused.
-func (l *Limiter) Allow(addr netip.Addr) bool {
+func (limiter *Limiter) Allow(addr netip.Addr) bool {
 	addr = addr.Unmap()
-	now := l.Now()
+	now := limiter.Now()
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
 
-	if l.entries == nil {
-		l.entries = map[netip.Addr][]time.Time{}
+	if limiter.entries == nil {
+		limiter.entries = map[netip.Addr][]time.Time{}
 	}
 
-	hits := l.live(l.entries[addr], now)
+	hits := limiter.live(limiter.entries[addr], now)
 
-	if _, known := l.entries[addr]; !known && len(l.entries) >= l.MaxEntries {
-		l.cleanup(now)
+	if _, known := limiter.entries[addr]; !known && len(limiter.entries) >= limiter.MaxEntries {
+		limiter.cleanup(now)
 
-		if len(l.entries) >= l.MaxEntries {
+		if len(limiter.entries) >= limiter.MaxEntries {
 			return false
 		}
 	}
 
-	if len(hits) >= l.Max {
-		l.entries[addr] = hits
+	if len(hits) >= limiter.Max {
+		limiter.entries[addr] = hits
 
 		return false
 	}
 
-	l.entries[addr] = append(hits, now)
+	limiter.entries[addr] = append(hits, now)
 
 	return true
 }
 
-func (l *Limiter) live(hits []time.Time, now time.Time) []time.Time {
-	cutoff := now.Add(-l.Window)
+func (limiter *Limiter) live(hits []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-limiter.Window)
 	i := 0
 
 	for i < len(hits) && !hits[i].After(cutoff) {
@@ -73,10 +81,10 @@ func (l *Limiter) live(hits []time.Time, now time.Time) []time.Time {
 	return hits[i:]
 }
 
-func (l *Limiter) cleanup(now time.Time) {
-	for addr, hits := range l.entries {
-		if len(l.live(hits, now)) == 0 {
-			delete(l.entries, addr)
+func (limiter *Limiter) cleanup(now time.Time) {
+	for addr, hits := range limiter.entries {
+		if len(limiter.live(hits, now)) == 0 {
+			delete(limiter.entries, addr)
 		}
 	}
 }

@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/pki"
@@ -12,30 +14,47 @@ import (
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
-const renewTimeout = 2 * time.Minute
+const (
+	renewTimeout = 2 * time.Minute
 
-func (c *session) handleRenew(req proto.Renew) {
-	resp, err := c.renew(req)
+	// Maximum length of error detail text sent to agents.
+	maxDetailLen = 200
+)
+
+var (
+	errIssuedIdentity = errors.New("issued certificate identity differs")
+	errIssuedKey      = errors.New("issued certificate key differs from CSR key")
+)
+
+func (sess *session) handleRenew(req proto.Renew) {
+	resp, err := sess.renew(req)
 	if err != nil {
-		c.log.Warn("renewal failed", "error", err.Error())
-		c.s.warn(c.machine, "renewal failed: "+err.Error())
+		sess.log.Warn(
+			"Renewal failed",
+			slog.String("error", err.Error()),
+		)
+		sess.s.warn(sess.machine, "renewal failed: "+err.Error())
 
 		detail := err.Error()
 
-		var pub *publicError
-		if !errors.As(err, &pub) {
+		if _, ok := errors.AsType[*publicError](err); !ok {
 			detail = "issuance failed"
 		}
 
-		_ = c.ctrl.Send(
-			proto.Reject{Reason: proto.RejectRenewFailed, Detail: truncate(detail, 200)},
+		//nolint:errcheck // best-effort notice; the peer may already be gone
+		_ = sess.ctrl.Send(
+			proto.Reject{Reason: proto.RejectRenewFailed, Detail: truncate(detail, maxDetailLen)},
 		)
 
 		return
 	}
 
-	if err := c.ctrl.Send(resp); err != nil {
-		c.log.Warn("renewal reply failed", "error", err.Error())
+	err = sess.ctrl.Send(resp)
+	if err != nil {
+		sess.log.Warn(
+			"Renewal reply failed",
+			slog.String("error", err.Error()),
+		)
 	}
 }
 
@@ -48,14 +67,16 @@ func pubErr(format string, args ...any) error {
 	return &publicError{msg: fmt.Sprintf(format, args...)}
 }
 
-func (c *session) renew(req proto.Renew) (proto.Renewed, error) {
+// validateRenewRequest checks the CSR against the session and policy and
+// returns the CSR's public key and identity.
+func (sess *session) validateRenewRequest(req proto.Renew) (*ecdsa.PublicKey, string, error) {
 	csr, identity, err := pki.ValidateCSR([]byte(req.CSR))
 	if err != nil {
-		return proto.Renewed{}, pubErr("invalid CSR: %v", err)
+		return nil, "", pubErr("invalid CSR: %v", err)
 	}
 
-	if identity != c.identity {
-		return proto.Renewed{}, pubErr(
+	if identity != sess.identity {
+		return nil, "", pubErr(
 			"CSR identity %q does not match the session identity",
 			identity,
 		)
@@ -63,66 +84,92 @@ func (c *session) renew(req proto.Renew) (proto.Renewed, error) {
 
 	csrKey, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return proto.Renewed{}, pubErr("CSR key is not ECDSA")
+		return nil, "", pubErr("CSR key is not ECDSA")
 	}
 
-	if cur, ok := c.leaf.PublicKey.(*ecdsa.PublicKey); ok && cur.Equal(csrKey) {
-		return proto.Renewed{}, pubErr("CSR key must differ from the current key")
+	if cur, ok := sess.leaf.PublicKey.(*ecdsa.PublicKey); ok && cur.Equal(csrKey) {
+		return nil, "", pubErr("CSR key must differ from the current key")
 	}
 
-	snap := c.s.cfg.Current()
-	if m, ok := snap.MachineForIdentity(identity); !ok || m != c.machine {
-		return proto.Renewed{}, pubErr("identity is not configured")
+	snap := sess.s.cfg.Current()
+	if m, ok := snap.MachineForIdentity(identity); !ok || m != sess.machine {
+		return nil, "", pubErr("identity is not configured")
 	}
 
-	if err := policy.Revoked(snap.Revocations, identity, c.fingerprint); err != nil {
-		return proto.Renewed{}, pubErr("%v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(c.ctx, renewTimeout)
-	defer cancel()
-
-	certPEM, chainPEM, err := c.s.issuer.Issue(ctx, identity, []byte(req.CSR))
+	err = policy.Revoked(snap.Revocations, identity, sess.fingerprint)
 	if err != nil {
-		return proto.Renewed{}, fmt.Errorf("issue: %w", err)
+		return nil, "", pubErr("%v", err)
 	}
 
+	return csrKey, identity, nil
+}
+
+// verifyIssuedLeaf checks that the issuer returned a single certificate for the
+// requested identity and key.
+func verifyIssuedLeaf(
+	certPEM []byte,
+	identity string,
+	csrKey *ecdsa.PublicKey,
+) (*x509.Certificate, error) {
 	certs, err := pki.ParseCertsPEM(certPEM)
 	if err != nil || len(certs) != 1 {
-		return proto.Renewed{}, fmt.Errorf("issued certificate is unusable: %v", err)
+		return nil, fmt.Errorf("issued certificate is unusable: %w", err)
 	}
 
 	leaf := certs[0]
 
-	if got, err := pki.CertIdentity(leaf); err != nil || got != identity {
-		return proto.Renewed{}, fmt.Errorf("issued certificate identity %q, want %q", got, identity)
+	got, err := pki.CertIdentity(leaf)
+	if err != nil || got != identity {
+		return nil, fmt.Errorf("%w: got %q, want %q", errIssuedIdentity, got, identity)
 	}
 
 	if k, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !k.Equal(csrKey) {
-		return proto.Renewed{}, errors.New("issued certificate key differs from CSR key")
+		return nil, errIssuedKey
+	}
+
+	return leaf, nil
+}
+
+func (sess *session) renew(req proto.Renew) (proto.Renewed, error) {
+	csrKey, identity, err := sess.validateRenewRequest(req)
+	if err != nil {
+		return proto.Renewed{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(sess.ctx, renewTimeout)
+	defer cancel()
+
+	certPEM, chainPEM, err := sess.s.issuer.Issue(ctx, identity, []byte(req.CSR))
+	if err != nil {
+		return proto.Renewed{}, fmt.Errorf("issue: %w", err)
+	}
+
+	leaf, err := verifyIssuedLeaf(certPEM, identity, csrKey)
+	if err != nil {
+		return proto.Renewed{}, err
 	}
 
 	fp := pki.Fingerprint(leaf)
-	c.s.setNewest(identity, fp)
+	sess.s.setNewest(identity, fp)
 
-	c.s.mu.Lock()
-	if m := c.s.machines[c.machine]; m != nil && leaf.NotAfter.After(m.certNotAfter) {
+	sess.s.mu.Lock()
+	if m := sess.s.machines[sess.machine]; m != nil && leaf.NotAfter.After(m.certNotAfter) {
 		m.certNotAfter = leaf.NotAfter
 	}
-	c.s.mu.Unlock()
+	sess.s.mu.Unlock()
 
-	c.log.Info(
-		"certificate issued",
-		"identity",
-		identity,
-		"fingerprint",
-		fp,
-		"via",
-		"renewal",
-		"notAfter",
-		leaf.NotAfter.UTC().Format(time.RFC3339),
+	sess.log.Info(
+		"Certificate issued",
+		slog.Any("identity", identity),
+		slog.Any("fingerprint", fp),
+		slog.String("via", "renewal"),
+		slog.String("notAfter", leaf.NotAfter.UTC().Format(time.RFC3339)),
 	)
-	c.log.Info("renewal", "newFingerprint", fp, "oldFingerprint", c.fingerprint)
+	sess.log.Info(
+		"Renewal",
+		slog.Any("newFingerprint", fp),
+		slog.Any("oldFingerprint", sess.fingerprint),
+	)
 
 	return proto.Renewed{Certificate: string(certPEM), Chain: string(chainPEM)}, nil
 }

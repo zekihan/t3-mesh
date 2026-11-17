@@ -19,9 +19,14 @@ import (
 )
 
 type clock struct {
-	mu sync.Mutex
 	t  time.Time
+	mu sync.Mutex
 }
+
+var (
+	errDisabled      = errors.New("disabled")
+	errNotConfigured = errors.New("not configured")
+)
 
 func (c *clock) Now() time.Time {
 	c.mu.Lock()
@@ -41,8 +46,8 @@ type env struct {
 	clk    *clock
 	tokens *Tokens
 	h      *Handler
-	issued []string
 	fake   *issuertest.Fake
+	issued []string
 }
 
 func newEnv(t *testing.T) *env {
@@ -50,21 +55,21 @@ func newEnv(t *testing.T) *env {
 
 	ca := pkitest.NewCA(t, "test")
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
-	e := &env{clk: clk, tokens: NewTokens(clk.Now)}
-	e.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) {
+	harness := &env{clk: clk, tokens: NewTokens(clk.Now)}
+	harness.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) {
 		return ca.SignCSR(csr, time.Hour)
 	}}
 	lim := NewLimiter(clk.Now)
-	e.h = &Handler{
-		Tokens:   e.tokens,
-		Issuer:   e.fake,
+	harness.h = &Handler{
+		Tokens:   harness.tokens,
+		Issuer:   harness.fake,
 		Allowed:  func(string) error { return nil },
-		OnIssued: func(id, fp string) { e.issued = append(e.issued, id+" "+fp) },
+		OnIssued: func(id, fp string) { harness.issued = append(harness.issued, id+" "+fp) },
 		Limiter:  lim,
 		Now:      clk.Now,
 	}
 
-	return e
+	return harness
 }
 
 func csrFor(t *testing.T, identity string) []byte {
@@ -84,7 +89,9 @@ func csrFor(t *testing.T, identity string) []byte {
 }
 
 // run serves one exchange over a pipe, sending req (if non-nil) and returning the reply.
-func (e *env) run(t *testing.T, req proto.Message) proto.Message {
+//
+//nolint:ireturn // returns the decoded wire message, whose concrete type the caller inspects
+func (harness *env) run(t *testing.T, req proto.Message) proto.Message {
 	t.Helper()
 
 	client, server := net.Pipe()
@@ -92,7 +99,8 @@ func (e *env) run(t *testing.T, req proto.Message) proto.Message {
 
 	go func() {
 		defer close(done)
-		e.h.Serve(context.Background(), server, netip.MustParseAddr("192.0.2.1"))
+
+		harness.h.Serve(t.Context(), server, netip.MustParseAddr("192.0.2.1"))
 	}()
 
 	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
@@ -107,6 +115,7 @@ func (e *env) run(t *testing.T, req proto.Message) proto.Message {
 	}
 
 	_ = client.Close()
+
 	<-done
 
 	return msg
@@ -126,9 +135,9 @@ func wantReject(t *testing.T, msg proto.Message) {
 }
 
 func TestSuccess(t *testing.T) {
-	e := newEnv(t)
-	token, _, _ := e.tokens.Create("agent-a")
-	msg := e.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, "agent-a"))})
+	harness := newEnv(t)
+	token, _, _ := harness.tokens.Create("agent-a")
+	msg := harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, "agent-a"))})
 
 	en, ok := msg.(proto.Enrolled)
 	if !ok {
@@ -140,19 +149,24 @@ func TestSuccess(t *testing.T) {
 		t.Fatalf("certs: %v", err)
 	}
 
-	if len(e.issued) != 1 || e.issued[0] != "agent-a "+pki.Fingerprint(certs[0]) {
-		t.Fatalf("issued %v", e.issued)
+	if len(harness.issued) != 1 || harness.issued[0] != "agent-a "+pki.Fingerprint(certs[0]) {
+		t.Fatalf("issued %v", harness.issued)
 	}
 
-	if e.tokens.Outstanding() {
+	if harness.tokens.Outstanding() {
 		t.Fatal("token still outstanding")
 	}
 }
 
 func TestWrongToken(t *testing.T) {
-	e := newEnv(t)
-	_, _, _ = e.tokens.Create("agent-a")
-	wantReject(t, e.run(t, proto.Enroll{Token: "nope", CSR: string(csrFor(t, "agent-a"))}))
+	harness := newEnv(t)
+
+	_, _, err := harness.tokens.Create("agent-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantReject(t, harness.run(t, proto.Enroll{Token: "nope", CSR: string(csrFor(t, "agent-a"))}))
 }
 
 func TestExpiredToken(t *testing.T) {
@@ -163,15 +177,15 @@ func TestExpiredToken(t *testing.T) {
 }
 
 func TestReusedToken(t *testing.T) {
-	e := newEnv(t)
-	token, _, _ := e.tokens.Create("agent-a")
+	harness := newEnv(t)
+	token, _, _ := harness.tokens.Create("agent-a")
 	req := proto.Enroll{Token: token, CSR: string(csrFor(t, "agent-a"))}
 
-	if _, ok := e.run(t, req).(proto.Enrolled); !ok {
+	if _, ok := harness.run(t, req).(proto.Enrolled); !ok {
 		t.Fatal("first use failed")
 	}
 
-	wantReject(t, e.run(t, req))
+	wantReject(t, harness.run(t, req))
 }
 
 func TestIdentityMismatchBurnsToken(t *testing.T) {
@@ -196,7 +210,7 @@ func TestGarbageCSRKeepsToken(t *testing.T) {
 
 func TestDisabledIdentity(t *testing.T) {
 	e := newEnv(t)
-	e.h.Allowed = func(string) error { return errors.New("disabled") }
+	e.h.Allowed = func(string) error { return errDisabled }
 	token, _, _ := e.tokens.Create("agent-a")
 	wantReject(t, e.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, "agent-a"))}))
 
@@ -245,39 +259,40 @@ func TestIssuerWrongCert(t *testing.T) {
 }
 
 func TestRateLimit(t *testing.T) {
-	e := newEnv(t)
+	harness := newEnv(t)
 
 	for range 5 {
-		wantReject(t, e.run(t, proto.Enroll{Token: "x", CSR: "y"}))
+		wantReject(t, harness.run(t, proto.Enroll{Token: "x", CSR: "y"}))
 	}
 
 	// Sixth attempt is limited before anything is read: the reject arrives without a request.
-	wantReject(t, e.run(t, nil))
+	wantReject(t, harness.run(t, nil))
 
-	e.clk.Advance(11 * time.Minute)
-	wantReject(t, e.run(t, proto.Enroll{Token: "x", CSR: "y"}))
+	harness.clk.Advance(11 * time.Minute)
+	wantReject(t, harness.run(t, proto.Enroll{Token: "x", CSR: "y"}))
 
-	if !e.h.Limiter.Allow(netip.MustParseAddr("192.0.2.1")) {
+	if !harness.h.Limiter.Allow(netip.MustParseAddr("192.0.2.1")) {
 		t.Fatal("limiter did not recover")
 	}
 }
 
 func TestLimiterBounded(t *testing.T) {
 	clk := &clock{t: time.Unix(0, 0)}
-	l := NewLimiter(clk.Now)
-	l.MaxEntries = 2
+	limiter := NewLimiter(clk.Now)
+	limiter.MaxEntries = 2
 
-	if !l.Allow(netip.MustParseAddr("192.0.2.1")) || !l.Allow(netip.MustParseAddr("192.0.2.2")) {
+	if !limiter.Allow(netip.MustParseAddr("192.0.2.1")) ||
+		!limiter.Allow(netip.MustParseAddr("192.0.2.2")) {
 		t.Fatal("first two refused")
 	}
 
-	if l.Allow(netip.MustParseAddr("192.0.2.3")) {
+	if limiter.Allow(netip.MustParseAddr("192.0.2.3")) {
 		t.Fatal("third allowed with full table")
 	}
 
 	clk.Advance(time.Hour)
 
-	if !l.Allow(netip.MustParseAddr("192.0.2.3")) {
+	if !limiter.Allow(netip.MustParseAddr("192.0.2.3")) {
 		t.Fatal("not allowed after cleanup")
 	}
 }
@@ -287,11 +302,13 @@ func TestTokensReplace(t *testing.T) {
 	first, _, _ := tk.Create("agent-a")
 	second, _, _ := tk.Create("agent-a")
 
-	if _, err := tk.Redeem(first); err == nil {
+	_, err := tk.Redeem(first)
+	if err == nil {
 		t.Fatal("replaced token redeemable")
 	}
 
-	if id, err := tk.Redeem(second); err != nil || id != "agent-a" {
+	id, err := tk.Redeem(second)
+	if err != nil || id != "agent-a" {
 		t.Fatalf("redeem: %q %v", id, err)
 	}
 }
@@ -300,29 +317,30 @@ func TestAdminRoundTrip(t *testing.T) {
 	tk := NewTokens(time.Now)
 	path := filepath.Join(t.TempDir(), "admin.sock")
 	// Stale file must be replaced.
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
+	err := os.WriteFile(path, nil, 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	a := &Admin{Path: path, Tokens: tk, Allowed: func(id string) error {
+	admin := &Admin{Path: path, Tokens: tk, Allowed: func(id string) error {
 		if id == "bad" {
-			return errors.New("not configured")
+			return errNotConfigured
 		}
 
 		return nil
 	}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	errc := make(chan error, 1)
 
-	go func() { errc <- a.Serve(ctx) }()
+	go func() { errc <- admin.Serve(ctx) }()
 
 	var (
 		token   string
 		expires time.Time
-		err     error
 	)
 
 	deadline := time.Now().Add(5 * time.Second)
+
 	for {
 		token, expires, err = RequestToken(ctx, path, "agent-a")
 		if err == nil || time.Now().After(deadline) {
@@ -347,17 +365,20 @@ func TestAdminRoundTrip(t *testing.T) {
 		t.Fatalf("mode %v", fi.Mode())
 	}
 
-	if id, err := tk.Redeem(token); err != nil || id != "agent-a" {
+	id, err := tk.Redeem(token)
+	if err != nil || id != "agent-a" {
 		t.Fatalf("redeem: %q %v", id, err)
 	}
 
-	if _, _, err = RequestToken(ctx, path, "bad"); err == nil {
+	_, _, err = RequestToken(ctx, path, "bad")
+	if err == nil {
 		t.Fatal("disallowed identity got a token")
 	}
 
 	cancel()
 
-	if err := <-errc; err != nil {
+	err = <-errc
+	if err != nil {
 		t.Fatal(err)
 	}
 }
