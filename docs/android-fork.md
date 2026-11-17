@@ -75,6 +75,9 @@ the owner's own devices.
   the nightly servers. Upstream tags several nightlies a day, and preview tags share
   the build counter; only `-nightly.` tags are bases. The weekly phone check against
   the deployed servers catches incompatibilities.
+- **First base.** The stack starts on the nightly the servers ran when the
+  repository was set up, `v0.1.11-nightly.20261117.4814` on all three machines, not
+  the newest tag. The first weekly run moves it to the newest nightly.
 - **Upstream.** The client-certificate support stays in the fork. Discussion #17218
   has no maintainer response; no upstream PR is planned. (PR #27889, closed, was a
   desktop Cloudflare Access change, not client certificates.)
