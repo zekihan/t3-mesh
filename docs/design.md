@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design; implementation in progress (M0 and M1 done 2026-11-17). Date: 2026-11-16.
+Status: accepted design; implementation in progress (M0, M1 and M2 done 2026-11-17). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -708,6 +708,20 @@ answer these.
 `devbox.noqer.com` record, add `t3.devbox.mesh.noqer.com`, bind devbox's T3 to
 `127.0.0.1`, then re-pair the phone and tablet and re-link every environment that
 pointed at devbox. Clients on the old name break at the moment of the switch.
+
+**M2 rollout (2026-11-17):** devbox and z-arch run agents (self-updated with z-mac to
+v0.1.7), and every machine links to the other two through loopback link ports
+(devbox 27301, z-mac 27302, z-arch 27303), each link keeping its relay URL as a
+fallback. The loopback-link open item is resolved: T3 identifies the peer through a
+link port, and the desktop app's window reaches it once the guard trusts
+`t3code://app`. z-arch's and devbox's T3 listen on `127.0.0.1` only (`loopback-browser`
+policy); z-arch's `caddy-t3` and devbox's Caddy LAN proxy are disabled. A linked T3
+session reconnected after a hub restart and after z-mac slept, and the phone reached
+all three machines as a viewer, home and away. The devbox cutover removed
+`apps/devbox`, its `lanPeers` entry, the `devbox.noqer.com` public and LAN records, and
+the old host policy; the retired Argo CD Application, namespace and AppProject were
+deleted by hand because the ApplicationSet does not delete. T3 Connect stays on for
+now.
 
 After each machine moves, turn T3 Connect off on it (`t3 up`), bind T3 to
 `127.0.0.1`, turn LAN mode off, and remove any other proxy or listener that reaches
