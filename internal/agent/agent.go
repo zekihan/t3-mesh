@@ -584,7 +584,7 @@ func (agent *Agent) setupUpdater() {
 			NetworkUp:      agent.networkUp,
 			ServeTargets:   targets,
 		},
-		Log: agent.log,
+		Log: agent.baseLog, // the updater adds its own component
 		Now: agent.now,
 	})
 	if err != nil {
