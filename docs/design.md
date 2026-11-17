@@ -628,7 +628,7 @@ Data streams start with one header line of JSON, then raw bytes:
 | `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the `mtls-clients` TLS option, the policy middleware (agents excluded) and viewer headers, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy (ingress 8443/8080 from Traefik, 9090 from Gatus; egress to the API and DNS), ConfigMap, `clients-ca-bundle` ConfigMap, Gatus endpoints; chart tests that every viewer route uses `mtls-clients` and the policy middleware (without it, client-sent `X-Mtls-*` headers would reach the hub) and that no middleware lists an `agent-*` URI |
 | `apps/devbox` | removed at the M2 cutover |
 | `platform/traefik` | regenerate the backend-ports file for the hub's 8443 and 8080; at the M2 cutover, drop the `192.168.2.71:3773` devbox `lanPeers` entry in the same change |
-| `terraform/doppler` | minisign key synced to the `t3-mesh` repo |
+| `terraform/git` | minisign key published to the `t3-mesh` repo's `release` environment |
 | `terraform/technitium` | LAN A and AAAA records for `mesh.noqer.com` and each viewer host, pointing at the Traefik VIPs. A `mesh.noqer.com` zone is authoritative for its whole subtree, so every viewer record lives in it and the zone is created with all of them in one change; a missing record would be NXDOMAIN at home |
 | CI | regenerate `gitops_pr.yaml` and `renovate.json` for the new chart |
 
