@@ -174,7 +174,7 @@ func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 	}
 
 	tr := &tracked{kind: "relay", pol: pol, target: tgt, source: src}
-	tr.closeFn = func() { _ = st.Close(); _ = out.Close() }
+	tr.closeFn = func() { abortConn(st); abortConn(out) }
 
 	server.track(tr)
 	defer server.untrack(tr)
@@ -246,6 +246,15 @@ func openRelay(out *yamux.Stream, hdr proto.StreamHeader) (proto.StreamReply, er
 	_ = out.SetDeadline(time.Time{})
 
 	return reply, nil
+}
+
+// The abortConn helper ends a stream at once. A yamux Close only half-closes, so reads
+// would wait for the other end to hang up; a deadline in the past fails every
+// pending and later read and write first.
+func abortConn(c net.Conn) {
+	//nolint:errcheck // best-effort: the Close below ends the stream either way
+	_ = c.SetDeadline(time.Now())
+	_ = c.Close()
 }
 
 // trackedConn untracks its stream when closed.

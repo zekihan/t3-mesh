@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/policy"
@@ -89,10 +90,31 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Revocation cancels the request and aborts the viewer's connection, so a
+	// pending request or an upgraded WebSocket ends even if the machine's
+	// service never hangs up.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	r = r.WithContext(ctx)
+
+	var revoked atomic.Bool
+
+	rc := http.NewResponseController(w)
+
+	onRevoke := func() {
+		revoked.Store(true)
+		// Unblocks a pending read of the request body, which the upstream
+		// round trip waits for. Fails harmlessly once the connection is hijacked.
+		_ = rc.SetReadDeadline(time.Now()) //nolint:errcheck // fails once hijacked; nothing to do
+
+		cancel()
+	}
+
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			return server.dialViewer(&pol)
+			return server.dialViewer(&pol, onRevoke)
 		},
 	}
 
@@ -111,6 +133,19 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 			pr.Out.Host = pr.In.Host
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			if revoked.Load() {
+				// Closing the hijacked connection ends the request at once; an
+				// aborted handler would first drain the rest of the request body.
+				conn, _, herr := rc.Hijack()
+				if herr == nil {
+					_ = conn.Close()
+
+					return
+				}
+
+				panic(http.ErrAbortHandler)
+			}
+
 			server.log.DebugContext(
 				req.Context(),
 				"Viewer upstream error",
@@ -184,7 +219,7 @@ func (server *Server) writeOffline(w http.ResponseWriter, machine string) {
 }
 
 // dialViewer opens a tunnel stream for one viewer request and tracks it.
-func (server *Server) dialViewer(pol *policy.Session) (net.Conn, error) {
+func (server *Server) dialViewer(pol *policy.Session, onRevoke func()) (net.Conn, error) {
 	tgt := server.liveSession(pol.Machine)
 	if tgt == nil {
 		return nil, errNoSession
@@ -218,7 +253,10 @@ func (server *Server) dialViewer(pol *policy.Session) (net.Conn, error) {
 
 	entry := &tracked{kind: "viewer", pol: *pol, target: tgt}
 	conn := &trackedConn{Conn: st, onClose: func() { server.untrack(entry) }}
-	entry.closeFn = func() { _ = conn.Close() }
+	entry.closeFn = func() {
+		onRevoke()
+		abortConn(conn)
+	}
 
 	server.track(entry)
 

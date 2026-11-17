@@ -265,6 +265,29 @@ func backendHandler(body string) http.Handler {
 		case <-time.After(10 * time.Second):
 		}
 	})
+	// /sink and /ws-hold model a backend that ignores the hub closing its side:
+	// revocation must not depend on the backend hanging up.
+	mux.HandleFunc("/sink", func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		<-time.After(6 * time.Second)
+	})
+	mux.HandleFunc("/ws-hold", func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		_, _ = io.WriteString(
+			conn,
+			"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+		)
+		_, _ = io.Copy(io.Discard, conn)
+
+		<-time.After(6 * time.Second)
+	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
 		conn, _, err := http.NewResponseController(w).Hijack()
 		if err != nil {
@@ -1003,6 +1026,93 @@ func TestRevocationBlockedViewerLeaf(t *testing.T) {
 	); code != http.StatusForbidden {
 		t.Fatalf("blocked viewer got %d", code)
 	}
+}
+
+// rawViewer opens a viewer connection and sends head, returning the conn and
+// a reader on it.
+func rawViewer(t *testing.T, e *env, head string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(t.Context(), "tcp", e.viewer.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = conn.Close() })
+
+	hdr := http.Header{}
+	setViewerHeaders(hdr, "z-phone", viewerFP, farFuture)
+
+	var sb strings.Builder
+	sb.WriteString(head)
+	_ = hdr.Write(&sb)
+	sb.WriteString("\r\n")
+
+	_, err = io.WriteString(conn, sb.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return conn, bufio.NewReader(conn)
+}
+
+// expectViewerEnds waits until the viewer connection gets a response or is
+// closed, ignoring anything already read.
+func expectViewerEnds(t *testing.T, conn net.Conn, br *bufio.Reader) {
+	t.Helper()
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	_, err := br.ReadByte()
+
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("viewer connection still open after revocation")
+	}
+}
+
+func TestRevocationClosesUpgradedViewer(t *testing.T) {
+	harness := newEnv(t)
+	harness.connect("agent-devbox", "devbox-body")
+
+	conn, br := rawViewer(
+		t,
+		harness,
+		"GET /ws-hold HTTP/1.1\r\nHost: t3.devbox.mesh.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n",
+	)
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %v %v", resp, err)
+	}
+
+	_ = resp.Body.Close()
+
+	harness.setConfig(cfgOpts{blocked: []string{viewerFP}})
+	expectViewerEnds(t, conn, br)
+}
+
+func TestRevocationEndsPendingViewerRequest(t *testing.T) {
+	harness := newEnv(t)
+	harness.connect("agent-devbox", "devbox-body")
+
+	conn, br := rawViewer(t, harness,
+		"POST /sink HTTP/1.1\r\nHost: t3.devbox.mesh.test\r\nContent-Length: 100000\r\n")
+
+	// The body is still being uploaded when the leaf is blocked.
+	_, err := io.WriteString(conn, "partial body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	<-time.After(200 * time.Millisecond)
+
+	harness.setConfig(cfgOpts{blocked: []string{viewerFP}})
+	expectViewerEnds(t, conn, br)
 }
 
 func TestRevocationViewerRuleRemoved(t *testing.T) {
