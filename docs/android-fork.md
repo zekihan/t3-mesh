@@ -17,8 +17,9 @@ the owner's own devices.
 ## Non-goals
 
 - Publishing to Play, F-Droid or any other store.
-- Direct LAN connections from the phone. The direct listener trusts only agent
-  identities; viewer authorization stays in Traefik and the hub.
+- Direct LAN connections with the KeyChain identity. Viewer authorization for
+  that identity stays in Traefik and the hub; only the enrolled identity of item 3
+  may connect directly (item 4).
 - Push notifications, Clerk sign-in and the managed relay. They depend on
   upstream's cloud accounts, and T3 Connect is off on every machine.
 
@@ -120,6 +121,27 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 - **Renewal.** It follows the agent rules: renew with 90 days left, and the hub
   admits only the newest leaf.
 
+### 4. Direct connection at home (after item 3)
+
+At home the phone already stays on the LAN (Technitium answers the viewer hosts
+with the Traefik VIP), but every request still crosses the cluster, so a cluster
+outage cuts the phone off. This item lets an enrolled device reach a home machine
+directly.
+
+- **Identity.** Only the item 3 identity (`device-<name>-mesh`) may connect
+  directly. The KeyChain identity never does.
+- **Agent listener.** A new mTLS HTTP and WebSocket listener per agent, bound like
+  the direct listener to addresses inside `homeCIDRs`, proxying to `127.0.0.1:3773`.
+  It authorizes with the rules, revocations and live-session closing the agent
+  already applies to peers, strips client-sent `X-Mtls-*` headers and sends
+  `X-Forwarded-Proto: https`.
+- **Server trust.** The app verifies the agent's certificate against the clients CA
+  from enrollment and the expected `agent-<machine>` URI, not a hostname.
+- **Route.** The Mesh screen's machine list carries each machine's LAN address
+  while it is home. The app tries the direct address first and falls back to the
+  viewer host, keeping one paired environment at both URLs. This touches
+  upstream's connection code, the main source of rebase conflicts.
+
 ## Build and distribution
 
 - **CI.** A scheduled GitHub Actions job in the fork rebases onto the newest
@@ -172,8 +194,10 @@ tunnel uptime and alert state from the hub's `/status`. It is a read-only screen
 | A2 | Item 5: fleet screen | Versions and certificate expiry match `/status` |
 | A3 | Item 2: one declared preview service on z-arch | A Vite dev server on z-arch opens from the phone, home and away |
 | A4 | Item 3: Keystore enrollment | The phone enrolls with a token, its key is non-exportable, its identity reaches only `mesh-*` hosts, and a forced renewal works |
+| A5 | Item 4: direct connection at home | With the hub scaled to zero, the phone at home chats with z-arch directly; away it uses the viewer host; blocking its enrolled leaf closes the direct session; the KeyChain identity is refused on the direct listener |
 
 ## Open decisions
 
 - Whether to do item 3 at all, given the approver-policy widening it needs. Decided
-  after A2.
+  after A2. Item 4 depends on it.
+- Whether to do item 4, depending on how often the cluster is down while home.
