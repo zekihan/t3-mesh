@@ -326,7 +326,8 @@ fleet update is in progress or rolled back.
 
 - **Viewer request:** the `traefik-mtls-authz` middleware sets three headers from
   the verified client certificate, after stripping any client-sent `X-Mtls-*`
-  headers: `X-Mtls-Mesh-Viewer` (identity, via the existing `forwardIdentityHeader`),
+  headers: `X-Mtls-Mesh-Viewer` (the full identity URI SAN, via the existing
+  `forwardIdentityHeader`),
   `X-Mtls-Mesh-Fingerprint` (lowercase hex SHA-256 of the leaf DER, the same value
   the plugin matches against `blockedFingerprints`) and `X-Mtls-Mesh-Not-After`
   (leaf expiry, RFC 3339). The hub rejects a viewer request that lacks any of the

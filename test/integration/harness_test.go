@@ -891,7 +891,7 @@ func (msh *mesh) newPhone() phone {
 
 func (p *phone) headers() http.Header {
 	h := http.Header{}
-	h.Set("X-Mtls-Mesh-Viewer", "z-phone")
+	h.Set("X-Mtls-Mesh-Viewer", "urn:noqer:mtls:clients:z-phone")
 	h.Set("X-Mtls-Mesh-Fingerprint", p.fp)
 	h.Set("X-Mtls-Mesh-Not-After", p.cert.Leaf.NotAfter.UTC().Format(time.RFC3339))
 

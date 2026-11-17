@@ -135,12 +135,17 @@ func viewerIdentity(r *http.Request) (string, string, time.Time, bool) {
 		return strings.TrimSpace(v[0]), true
 	}
 
-	viewer, ok1 := get(HeaderViewer)
+	uri, ok1 := get(HeaderViewer)
 	fpRaw, ok2 := get(HeaderFingerprint)
 	naRaw, ok3 := get(HeaderNotAfter)
 
-	if !ok1 || !ok2 || !ok3 || strings.ContainsAny(viewer, " \t:/") || policy.IsAgent(viewer) ||
-		!fingerprintRe.MatchString(fpRaw) {
+	if !ok1 || !ok2 || !ok3 || !fingerprintRe.MatchString(fpRaw) {
+		return "", "", time.Time{}, false
+	}
+
+	// The traefik-mtls-authz plugin forwards the full URI SAN of the verified leaf.
+	viewer, err := policy.IdentityFromURI(uri)
+	if err != nil || policy.IsAgent(viewer) {
 		return "", "", time.Time{}, false
 	}
 

@@ -28,6 +28,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/hub/issuer/issuertest"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/pki/pkitest"
+	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
@@ -528,9 +529,13 @@ func (harness *env) get(
 	return resp.StatusCode, string(b)
 }
 
+// setViewerHeaders sets the headers traefik-mtls-authz forwards. viewer is an
+// identity name sent as its URI SAN; a leading "=" sends the rest verbatim.
 func setViewerHeaders(header http.Header, viewer, fp string, notAfter time.Time) {
-	if viewer != "" {
-		header.Set(HeaderViewer, viewer)
+	if raw, ok := strings.CutPrefix(viewer, "="); ok {
+		header.Set(HeaderViewer, raw)
+	} else if viewer != "" {
+		header.Set(HeaderViewer, policy.IdentityURI(viewer))
 	}
 
 	if fp != "" {
@@ -662,6 +667,22 @@ func TestViewerRejections(t *testing.T) {
 			host:     "t3.devbox.mesh.test",
 			viewer:   "z-phone",
 			fp:       "xyz",
+			notAfter: farFuture,
+			want:     403,
+		},
+		{
+			name:     "bare name",
+			host:     "t3.devbox.mesh.test",
+			viewer:   "=z-phone",
+			fp:       viewerFP,
+			notAfter: farFuture,
+			want:     403,
+		},
+		{
+			name:     "foreign URI",
+			host:     "t3.devbox.mesh.test",
+			viewer:   "=urn:other:z-phone",
+			fp:       viewerFP,
 			notAfter: farFuture,
 			want:     403,
 		},

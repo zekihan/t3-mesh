@@ -177,7 +177,7 @@ func TestViewerAndAdmission(t *testing.T) {
 	}
 
 	h := ph.headers()
-	h.Set("X-Mtls-Mesh-Viewer", "agent-a")
+	h.Set("X-Mtls-Mesh-Viewer", "urn:noqer:mtls:clients:agent-a")
 
 	if code, _ := get(
 		t,
