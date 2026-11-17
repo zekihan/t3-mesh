@@ -86,7 +86,7 @@ the owner's own devices.
   `onReceivedClientCertRequest` cannot keep one surface from using another's
   decision. At the pinned nightly six surfaces render local or inline content
   (source view, MCP apps through the native bridge, the natively downloaded PDF,
-  and file and HTML previews, which A0a confirms load a downloaded file). In the
+  and file and HTML previews, which A1 confirms load a downloaded file). In the
   main process every WebView cancels certificate requests.
 - **Stream process.** The device stream and the browser preview stream run a script
   inside the WebView that connects to the T3 server. They move into a native
@@ -97,7 +97,7 @@ the owner's own devices.
   alias kills the process. `MainApplication.onCreate` also runs in `:stream`, so it
   skips React Native and Expo start-up there and calls `setDataDirectorySuffix`
   before anything touches WebView. This is the largest rebase surface, so it is
-  its own milestone, A0c; until then the two streams are disabled.
+  its own milestone, A3; until then the two streams are disabled.
 - **Per-origin identity.** nickypro's transport stores the alias per exact origin
   and keeps OkHttp from coalescing connections across hosts; the fork keeps both.
   T3 credentials stay scoped to their environment.
@@ -109,7 +109,7 @@ the owner's own devices.
   pooled OkHttp connections, and restarts the stream process.
 - **Local network permission.** Android 17 requires a runtime local-network
   permission for apps targeting SDK 37 or newer, which covers the Traefik VIP at
-  home and item 5. A0a checks upstream's `targetSdkVersion`; a bump to 37 is
+  home and item 5. A1 checks upstream's `targetSdkVersion`; a bump to 37 is
   treated as a breaking change and tested on both devices before publishing.
 - **Separate app.** Application ID `com.noqer.t3mesh`, its own URL scheme and app
   name, so it installs next to the official app.
@@ -235,7 +235,7 @@ time:
   after enrollment. The key is created with `DIGEST_NONE` as well as `SHA-256`,
   because Conscrypt and Chromium sign TLS handshakes with `NONEwithECDSA`. Whether
   Chromium's `ClientCertRequest.proceed` signs with a Keystore key is checked first
-  in A4.
+  in A7.
 - **Approver-policy.** A second CertificateRequestPolicy for the hub's
   ServiceAccount allows only the enumerated device URIs (no wildcard), usages
   `client auth` and `digital signature` (no `server auth`), ECDSA P-256 and 8760h,
@@ -325,7 +325,7 @@ directly.
     only the agent check above, in place of system trust and hostname
     verification.
   - **Streams:** the device stream document's origin is `https://localhost/` on
-    Android, so its connections to the environment are cross-origin; A5 starts by
+    Android, so its connections to the environment are cross-origin; A8 starts by
     checking that `onReceivedSslError` and `onReceivedClientCertRequest` fire for
     them. The `:stream` process sets `ProxyController.setProxyOverride` to
     the same proxy for the direct attempt. For stream connections the proxy first
@@ -355,7 +355,7 @@ directly.
   `main`. The `release` environment's deployment policy is the branch `main`, not
   the `v*` tag pattern the t3-mesh repository uses. Nothing on `candidate` or
   `mesh` can reach the signing key. The repository's default `GITHUB_TOKEN` is
-  read-only. A0b tests that a workflow added on `candidate` cannot read the key.
+  read-only. A2 tests that a workflow added on `candidate` cannot read the key.
 - **Release workflow.** One workflow on `main`, dispatched with a `candidate`
   commit as input, under a workflow-level `release` concurrency group shared with
   rollback, so version assignment and publishing are serialized. It has two jobs:
@@ -389,12 +389,12 @@ directly.
   release job signs and publishes it. Android and Obtainium install only a higher
   `versionCode`, so republishing the old APK would not work. Release tags keep old
   commits reachable after force-pushes. A rollback can meet app state migrated by
-  the bad release; A0b tests an update, a rollback and a forward update over a
+  the bad release; A2 tests an update, a rollback and a forward update over a
   paired installation on both devices.
 - **Branch moves.** The workflows never push branches: upstream commits edit
   `.github/workflows`, and GitHub may refuse such ref updates from `GITHUB_TOKEN`.
   The weekly task moves `mesh` to the newest published release tag with devbox's
-  key. A0b checks that tag creation works on a base whose upstream commits changed
+  key. A2 checks that tag creation works on a base whose upstream commits changed
   workflows.
 - **Signing key.** It lives in the secrets repo and is published to the fork's
   `release` environment by homelab `terraform/git`, like the t3-mesh minisign key.
@@ -406,10 +406,10 @@ directly.
   refuses an update signed with a different key. No index, index key or hosting.
   The release tag is `v` followed by the `versionName`, so Obtainium's version
   detection can compare them; it offers any release whose tag differs from the
-  installed version, which also covers a rollback naming an older nightly. A0b
+  installed version, which also covers a rollback naming an older nightly. A2
   verifies both.
   The APK contains no secrets, but anyone can read the mesh hostnames from it.
-- **Sideload check.** Before A0b, confirm that Google's developer verification does
+- **Sideload check.** Before A2, confirm that Google's developer verification does
   not block Obtainium installs on the devices. `adb install -r` is the fallback.
 
 ## Versioning
@@ -473,17 +473,17 @@ directly.
 
 | | Scope | Done when |
 |---|---|---|
-| A0a | Fork, port of the mTLS commit, network inventory, WebView rule (streams disabled), per-origin identity, app identity, accounts off, network security config, expiry warning; local build installed with `adb` | Every inventoried feature has a disposition, and each supported one works against z-arch over `t3.z-arch.mesh.noqer.com` with the KeyChain identity: pair, chat, reconnect, attachment upload and download, PDF preparation, images, video and thumbnails, the widget refresh, and each WebView surface; the app survives a cold start; a main-process WebView loading a viewer host gets no certificate; replacing the alias while a WebSocket is open moves it to the new identity without an app restart; a short-lived test certificate shows the warning |
-| A0b | `main` workflows, build and release workflows, GitHub Releases, Obtainium | Both devices install the fork through Obtainium from a CI release and update over a paired installation; update, rollback and forward update work on both; the release checks pass; a simulated `targetSdkVersion` bump is held as a pre-release that Obtainium does not offer; a workflow added on `candidate` cannot read the signing key; one rebase conflict and one CI failure each go through a PR to a published release; a fix merged with no build is built by the daily check and not overwritten by the next weekly run; a release whose base changed upstream workflows is tagged and published; Obtainium offers a release and a rollback by tag; the A0a checks pass on that build on both devices |
-| A0c | Stream process for the device and browser preview streams | Both streams work against z-arch with the KeyChain identity; a main-process WebView loading a viewer host still gets no certificate after a stream has used it; replacing the alias while a stream is open moves it to the new identity; the stream process skips React Native start-up |
-| A1 | Item 1: `hub.mesh.noqer.com`, `/api/v1/machines`, the Mesh screen and one identity for mesh hosts | A fresh install opens the Mesh screen before any pairing, at home and on mobile data, and lists all three machines with online state; a viewer missing from one machine's policy does not see it in any `/api/v1` endpoint; a valid but unauthorized client with forged `X-Mtls-*` headers and a blocked leaf are refused; a second listed machine is added without a picker, and an unlisted mesh host still shows it |
-| A2 | Item 2: fleet screen and connection details | Versions, certificate expiry, tunnel uptime and alert state match `/status` for the machines the caller may see; on mobile data the hub-request path shows OCI while z-mac's tunnel at home shows LAN, both show LAN with the phone at home, and a network change updates the path; the round-trip time is shown |
-| A3 | Item 3: upstream's localhost preview tunnel through the fork, once PR #38045 is in a nightly the machines run | A Vite dev server on z-arch opens on the phone at its `localhost` origin with assets and HMR live reload, home and away; from a separate test app on the device, the SOCKS listener refuses any port other than the preview's and is closed once the preview is detached; the tunnel WebSocket uses the mTLS client; the preview WebView receives no T3 token, no client certificate and no foreign native bridge; the source, PDF and HTML WebViews work while the preview is open, and the streams are unaffected |
-| A4 | Item 4: Keystore enrollment | Both devices enroll with tokens under the deployed policy, their keys are non-exportable, their identities reach only `mesh-*` hosts and replace the KeyChain identity there, the hub logs the enrolled URI for both a chat socket and a stream, and a forced renewal works; a token for one device cannot enroll the other; a wrong-kind token, a replayed token and a disabled identity are refused; a superseded leaf is refused on viewer hosts and the API; a lost renewal reply recovers by re-enrollment, after which the old leaf is refused on the direct path at once; the renewal endpoint refuses a KeyChain identity; requests from the hub ServiceAccount are denied for `z-phone`, for agent and device URIs together, for a device with `server auth`, with an extra DNS SAN, and with `isCA` |
-| A5 | Item 5: direct connection at home | With the hub scaled to zero, the phone at home chats with z-arch directly and opens a device stream there, also after a cold start; a device renewed while z-mac stayed disconnected from before the renewal until after the hub was scaled to zero still reaches z-mac directly with its previous leaf; a direct server that performs a POST and withholds its response causes no second execution through the viewer host; away it uses the viewer host and makes no direct attempt; the previous key is deleted a week after renewal; a stalled TLS handshake and a peer that completes TLS but never answers both fall back within the deadlines; unpaired HTTP and WebSocket requests on the direct path match the viewer host; blocking the enrolled leaf, removing the device from the rule, a superseded leaf, leaf expiry and cache expiry each close an open WebSocket or refuse the session; an enrolled device not in the rule, the KeyChain identity and a wrong `Host` are refused; the app refuses an agent with the wrong identity or a blocked leaf; a CA rotation reaches the phone; an agent on a foreign network matching `homeCIDRs` during a hub outage does not open the listener (integration test, as in M3) |
+| A1 | Fork, port of the mTLS commit, network inventory, WebView rule (streams disabled), per-origin identity, app identity, accounts off, network security config, expiry warning; local build installed with `adb` | Every inventoried feature has a disposition, and each supported one works against z-arch over `t3.z-arch.mesh.noqer.com` with the KeyChain identity: pair, chat, reconnect, attachment upload and download, PDF preparation, images, video and thumbnails, the widget refresh, and each WebView surface; the app survives a cold start; a main-process WebView loading a viewer host gets no certificate; replacing the alias while a WebSocket is open moves it to the new identity without an app restart; a short-lived test certificate shows the warning |
+| A2 | `main` workflows, build and release workflows, GitHub Releases, Obtainium | Both devices install the fork through Obtainium from a CI release and update over a paired installation; update, rollback and forward update work on both; the release checks pass; a simulated `targetSdkVersion` bump is held as a pre-release that Obtainium does not offer; a workflow added on `candidate` cannot read the signing key; one rebase conflict and one CI failure each go through a PR to a published release; a fix merged with no build is built by the daily check and not overwritten by the next weekly run; a release whose base changed upstream workflows is tagged and published; Obtainium offers a release and a rollback by tag; the A1 checks pass on that build on both devices |
+| A3 | Stream process for the device and browser preview streams | Both streams work against z-arch with the KeyChain identity; a main-process WebView loading a viewer host still gets no certificate after a stream has used it; replacing the alias while a stream is open moves it to the new identity; the stream process skips React Native start-up |
+| A4 | Item 1: `hub.mesh.noqer.com`, `/api/v1/machines`, the Mesh screen and one identity for mesh hosts | A fresh install opens the Mesh screen before any pairing, at home and on mobile data, and lists all three machines with online state; a viewer missing from one machine's policy does not see it in any `/api/v1` endpoint; a valid but unauthorized client with forged `X-Mtls-*` headers and a blocked leaf are refused; a second listed machine is added without a picker, and an unlisted mesh host still shows it |
+| A5 | Item 2: fleet screen and connection details | Versions, certificate expiry, tunnel uptime and alert state match `/status` for the machines the caller may see; on mobile data the hub-request path shows OCI while z-mac's tunnel at home shows LAN, both show LAN with the phone at home, and a network change updates the path; the round-trip time is shown |
+| A6 | Item 3: upstream's localhost preview tunnel through the fork, once PR #38045 is in a nightly the machines run | A Vite dev server on z-arch opens on the phone at its `localhost` origin with assets and HMR live reload, home and away; from a separate test app on the device, the SOCKS listener refuses any port other than the preview's and is closed once the preview is detached; the tunnel WebSocket uses the mTLS client; the preview WebView receives no T3 token, no client certificate and no foreign native bridge; the source, PDF and HTML WebViews work while the preview is open, and the streams are unaffected |
+| A7 | Item 4: Keystore enrollment | Both devices enroll with tokens under the deployed policy, their keys are non-exportable, their identities reach only `mesh-*` hosts and replace the KeyChain identity there, the hub logs the enrolled URI for both a chat socket and a stream, and a forced renewal works; a token for one device cannot enroll the other; a wrong-kind token, a replayed token and a disabled identity are refused; a superseded leaf is refused on viewer hosts and the API; a lost renewal reply recovers by re-enrollment, after which the old leaf is refused on the direct path at once; the renewal endpoint refuses a KeyChain identity; requests from the hub ServiceAccount are denied for `z-phone`, for agent and device URIs together, for a device with `server auth`, with an extra DNS SAN, and with `isCA` |
+| A8 | Item 5: direct connection at home | With the hub scaled to zero, the phone at home chats with z-arch directly and opens a device stream there, also after a cold start; a device renewed while z-mac stayed disconnected from before the renewal until after the hub was scaled to zero still reaches z-mac directly with its previous leaf; a direct server that performs a POST and withholds its response causes no second execution through the viewer host; away it uses the viewer host and makes no direct attempt; the previous key is deleted a week after renewal; a stalled TLS handshake and a peer that completes TLS but never answers both fall back within the deadlines; unpaired HTTP and WebSocket requests on the direct path match the viewer host; blocking the enrolled leaf, removing the device from the rule, a superseded leaf, leaf expiry and cache expiry each close an open WebSocket or refuse the session; an enrolled device not in the rule, the KeyChain identity and a wrong `Host` are refused; the app refuses an agent with the wrong identity or a blocked leaf; a CA rotation reaches the phone; an agent on a foreign network matching `homeCIDRs` during a hub outage does not open the listener (integration test, as in M3) |
 
 ## Open decisions
 
 - Whether to do item 4 at all, given the approver-policy widening it needs. Decided
-  after A2. Item 5 depends on it.
+  after A5. Item 5 depends on it.
 - Whether to do item 5, depending on how often the cluster is down while home.
