@@ -102,6 +102,7 @@ type Agent struct {
 	curChanged   chan struct{}
 	kick         chan struct{}
 	log          *slog.Logger
+	baseLog      *slog.Logger
 	lookupHost   func(ctx context.Context, host string) ([]netip.Addr, error)
 	netEvents    <-chan netwatch.Event
 	hubTLS       *tls.Config
@@ -149,6 +150,7 @@ func New(
 	agent := &Agent{
 		cfg:         opts.Config,
 		log:         opts.Log.With(slog.String("component", "agent")),
+		baseLog:     opts.Log,
 		now:         opts.Now,
 		version:     opts.Version,
 		store:       pki.Store{Dir: opts.Config.Identity.Dir},
@@ -251,11 +253,12 @@ func (agent *Agent) Run(ctx context.Context) error {
 
 	if agent.cfg.Direct.Enabled {
 		agent.direct = direct.New(direct.Options{
-			Port:       agent.cfg.Direct.Port,
-			CacheTTL:   agent.cfg.Direct.CacheTTL,
-			Serve:      agent.cfg.Serve,
-			View:       agent.view,
-			Log:        agent.log,
+			Port:     agent.cfg.Direct.Port,
+			CacheTTL: agent.cfg.Direct.CacheTTL,
+			Serve:    agent.cfg.Serve,
+			View:     agent.view,
+			Log:      agent.baseLog, // direct adds its own component
+
 			Now:        agent.now,
 			GatewayMAC: agent.gatewayMAC,
 			LocalAddrs: agent.localAddrs,
