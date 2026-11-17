@@ -527,7 +527,7 @@ func TestRenewal(t *testing.T) {
 	withDirect := msh.direct.IsValid()
 
 	// Valid for 120 more days: not yet inside the 90 day renewal window.
-	nodeA, _ := msh.twoNodes(
+	nodeA, nodeB := msh.twoNodes(
 		&nodeOpts{
 			direct:   withDirect,
 			cacheTTL: 90 * 24 * time.Hour,
@@ -542,6 +542,7 @@ func TestRenewal(t *testing.T) {
 
 	if withDirect {
 		nodeA.waitDirectListening()
+		nodeB.waitDirectListening()
 		awaitDirect(t, msh, nodeA)
 
 		// A live direct session: it must outlive the renewal, since peers pin no leaf.
@@ -782,6 +783,13 @@ func TestTrustBundleRollover(t *testing.T) {
 
 	nodeB := msh.newNode("b", &nodeOpts{ca: ca2, direct: withDirect})
 
+	// A direct dial before b listens is remembered as failed for a minute, so
+	// the first link request must not race b's direct listener.
+	if withDirect {
+		nodeA.waitDirectListening()
+		nodeB.waitDirectListening()
+	}
+
 	if code, body := get(
 		t,
 		nodeA.linkURL("/"),
@@ -801,9 +809,6 @@ func TestTrustBundleRollover(t *testing.T) {
 
 		return
 	}
-
-	nodeA.waitDirectListening()
-	nodeB.waitDirectListening()
 
 	// a (old CA) and b (new CA) verify each other against the bundle.
 	awaitDirect(t, msh, nodeA)
