@@ -289,8 +289,11 @@ func (harness *env) dial(cert *tls.Certificate, alpn string) (*tls.Conn, error) 
 		RootCAs:    harness.pool,
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{alpn},
 	}
+	if alpn != "" {
+		cfg.NextProtos = []string{alpn}
+	}
+
 	if cert != nil {
 		cfg.Certificates = []tls.Certificate{*cert}
 	}
@@ -790,6 +793,45 @@ func TestNonAgentAndCertlessRefused(t *testing.T) {
 	}
 
 	_ = conn.Close()
+}
+
+func TestPlainTLSProbe(t *testing.T) {
+	harness := newEnv(t)
+
+	closed := func(cert *tls.Certificate) {
+		t.Helper()
+
+		conn, err := harness.dial(cert, "")
+		if err != nil {
+			t.Fatalf("probe handshake: %v", err)
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		if len(conn.ConnectionState().PeerCertificates) == 0 {
+			t.Fatal("probe saw no serving certificate")
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+		_, err = conn.Read(make([]byte, 1))
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("probe read = %v, want EOF", err)
+		}
+	}
+
+	closed(nil)
+
+	phone, _, _ := harness.ca.IssueIdentity(t, "z-phone", false, farFuture)
+	closed(&phone)
+
+	// A client that offers only an unknown protocol still fails the handshake.
+	conn, err := harness.dial(nil, "h2")
+	if err == nil {
+		_ = conn.Close()
+
+		t.Fatal("unknown ALPN completed the handshake")
+	}
 }
 
 func TestRelayAllowedAndDenied(t *testing.T) {

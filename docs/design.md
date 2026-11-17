@@ -171,7 +171,10 @@ Enrollment uses its own ALPN, `t3-mesh-enroll/1`, without yamux: one `Enroll`
 message of at most 4 KiB, one reply, then close, all within 30 s. The hub accepts a
 connection without a client certificate only on that ALPN and only while an
 enrollment token is outstanding; at all other times the handshake fails. Any other
-message on such a connection closes it. Enrollment is rate-limited per source
+message on such a connection closes it. The one exception is a client that offers no
+ALPN at all, such as the Gatus TLS check: its handshake completes, so it sees the
+public serving certificate, and the hub closes the connection without reading from
+it. Enrollment is rate-limited per source
 address, and every attempt is logged.
 
 Enrollment is also the recovery path for an agent whose certificate expired, for

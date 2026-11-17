@@ -285,6 +285,14 @@ func (server *Server) handleConn(ctx context.Context, raw net.Conn) {
 	_ = tc.SetDeadline(time.Time{})
 
 	state := tc.ConnectionState()
+	if state.NegotiatedProtocol == "" {
+		// A plain TLS probe (Gatus) that offered no ALPN: it has seen the serving
+		// certificate, and nothing is read from or served to it.
+		server.log.DebugContext(ctx, "TLS probe closed", slog.String("source", source.String()))
+
+		return
+	}
+
 	if state.NegotiatedProtocol == proto.ALPNEnroll {
 		server.enrollH.Serve(ctx, tc, source)
 
@@ -324,6 +332,10 @@ func (server *Server) tlsConfig(source netip.Addr) *tls.Config {
 
 func (server *Server) verifyPeer(cs *tls.ConnectionState) error {
 	switch {
+	case cs.NegotiatedProtocol == "":
+		// The client offered no ALPN; handleConn closes it after the handshake.
+		// A client offering only other protocols fails the handshake in crypto/tls.
+		return nil
 	case cs.NegotiatedProtocol == proto.ALPNEnroll:
 		if !server.tokens.Outstanding() {
 			return errNoEnrollment
