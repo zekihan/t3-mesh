@@ -4,6 +4,8 @@ A private mesh between machines running T3. A hub in the homelab
 cluster relays mTLS tunnels between per-machine agents, with a direct path while the
 machines share a LAN. Agents update themselves from signed GitHub releases. The
 design, threat model and rollout are in [docs/design.md](docs/design.md).
+The Android app that connects to the mesh with client certificates is planned in
+[zekihan/t3code](https://github.com/zekihan/t3code/blob/main/docs/android-fork.md).
 
 - `cmd/t3-mesh-hub`: the hub, shipped as a distroless container image.
 - `cmd/t3-mesh-agent`: the agent (`launcher`, `run`, `enroll`, `fallback`, `version`),
