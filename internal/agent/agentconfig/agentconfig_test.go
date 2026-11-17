@@ -35,22 +35,28 @@ func TestParseValid(t *testing.T) {
 	if cfg.Identity.Name != "agent-z-arch" || cfg.Identity.Dir != "/var/lib/t3-mesh/identity" {
 		t.Fatalf("identity = %+v", cfg.Identity)
 	}
+
 	if cfg.StateDir != "/var/lib/t3-mesh/state" || cfg.InstallDir != "/var/lib/t3-mesh/install" {
 		t.Fatalf("dirs = %q %q", cfg.StateDir, cfg.InstallDir)
 	}
+
 	if cfg.Serve["t3"] != "127.0.0.1:3773" {
 		t.Fatalf("serve = %v", cfg.Serve)
 	}
+
 	if len(cfg.Links) != 2 || cfg.Links["t3.devbox"] != "127.0.0.1:27301" {
 		t.Fatalf("links = %v", cfg.Links)
 	}
+
 	want := Direct{Enabled: true, Port: 27400, CacheTTL: 168 * time.Hour}
 	if cfg.Direct != want {
 		t.Fatalf("direct = %+v, want %+v", cfg.Direct, want)
 	}
+
 	if got := cfg.HubAddr(); got != "mesh.noqer.com:443" {
 		t.Fatalf("HubAddr = %q", got)
 	}
+
 	if got := cfg.HubHost(); got != "mesh.noqer.com" {
 		t.Fatalf("HubHost = %q", got)
 	}
@@ -63,6 +69,7 @@ identity:
   dir: /Library/Application Support/t3-mesh/identity
 hub: mesh.noqer.com:8443
 `
+
 	cfg, err := Parse([]byte(doc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -71,12 +78,15 @@ hub: mesh.noqer.com:8443
 	if cfg.StateDir != "/Library/Application Support/t3-mesh/state" {
 		t.Fatalf("StateDir = %q", cfg.StateDir)
 	}
+
 	if cfg.InstallDir != "/Library/Application Support/t3-mesh/install" {
 		t.Fatalf("InstallDir = %q", cfg.InstallDir)
 	}
+
 	if cfg.Direct.Enabled || cfg.Direct.CacheTTL != 168*time.Hour {
 		t.Fatalf("direct defaults = %+v", cfg.Direct)
 	}
+
 	if cfg.HubAddr() != "mesh.noqer.com:8443" || cfg.HubHost() != "mesh.noqer.com" {
 		t.Fatalf("hub = %q %q", cfg.HubAddr(), cfg.HubHost())
 	}
@@ -85,10 +95,12 @@ hub: mesh.noqer.com:8443
 func TestDefaultCacheTTLWhenOmitted(t *testing.T) {
 	doc := validDoc
 	doc = strings.Replace(doc, "  cacheTTL: 168h\n", "", 1)
+
 	cfg, err := Parse([]byte(doc))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+
 	if cfg.Direct.CacheTTL != 168*time.Hour {
 		t.Fatalf("CacheTTL = %v", cfg.Direct.CacheTTL)
 	}
@@ -111,14 +123,18 @@ func TestHubForms(t *testing.T) {
 		t.Run(tt.hub, func(t *testing.T) {
 			cfg := &Config{Hub: tt.hub}
 			if tt.wantAddr == "" {
-				if _, _, err := splitHub(tt.hub); err == nil {
+				_, _, err := splitHub(tt.hub)
+				if err == nil {
 					t.Fatalf("splitHub(%q) accepted", tt.hub)
 				}
+
 				return
 			}
+
 			if got := cfg.HubAddr(); got != tt.wantAddr {
 				t.Fatalf("HubAddr = %q, want %q", got, tt.wantAddr)
 			}
+
 			if got := cfg.HubHost(); got != tt.wantHost {
 				t.Fatalf("HubHost = %q, want %q", got, tt.wantHost)
 			}
@@ -221,11 +237,13 @@ func TestParseInvalid(t *testing.T) {
 		},
 		{
 			"direct port collides with link",
-			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: true\n  port: 27400\n",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\n" +
+				"direct:\n  enabled: true\n  port: 27400\n",
 		},
 		{
 			"direct disabled port collides",
-			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\ndirect:\n  enabled: false\n  port: 27400\n",
+			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\nlinks:\n  t3.z: 127.0.0.1:27400\n" +
+				"direct:\n  enabled: false\n  port: 27400\n",
 		},
 		{
 			"direct port out of range",
@@ -256,7 +274,8 @@ func TestParseInvalid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Parse([]byte(tt.doc)); err == nil {
+			_, err := Parse([]byte(tt.doc))
+			if err == nil {
 				t.Fatal("Parse accepted invalid config")
 			}
 		})
@@ -265,14 +284,18 @@ func TestParseInvalid(t *testing.T) {
 
 func TestParseDirectDisabledWithoutPort(t *testing.T) {
 	doc := "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: false\n"
-	if _, err := Parse([]byte(doc)); err != nil {
+
+	_, err := Parse([]byte(doc))
+	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 }
 
 func TestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.yaml")
-	if err := os.WriteFile(path, []byte(validDoc), 0o600); err != nil {
+
+	err := os.WriteFile(path, []byte(validDoc), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,21 +303,27 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+
 	if cfg.Identity.Name != "agent-z-arch" {
 		t.Fatalf("name = %q", cfg.Identity.Name)
 	}
 }
 
 func TestLoadErrors(t *testing.T) {
-	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err == nil {
 		t.Fatal("Load accepted missing file")
 	}
 
 	path := filepath.Join(t.TempDir(), "bad.yaml")
-	if err := os.WriteFile(path, []byte("identity:\n  name: x\n"), 0o600); err != nil {
+
+	err = os.WriteFile(path, []byte("identity:\n  name: x\n"), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil {
+
+	_, err = Load(path)
+	if err == nil {
 		t.Fatal("Load accepted invalid file")
 	}
 }

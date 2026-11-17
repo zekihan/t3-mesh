@@ -2,62 +2,64 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
-func (a *Agent) statusLoop(ctx context.Context) {
-	t := time.NewTicker(a.statusEvery)
-	defer t.Stop()
+func (agent *Agent) statusLoop(ctx context.Context) {
+	ticker := time.NewTicker(agent.statusEvery)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-		case <-a.statusNudge:
+		case <-ticker.C:
+		case <-agent.statusNudge:
 		}
 
-		a.sendStatus()
+		agent.sendStatus()
 	}
 }
 
-func (a *Agent) sendStatus() {
-	s := a.current()
+func (agent *Agent) sendStatus() {
+	s := agent.current()
 	if s == nil {
 		return
 	}
 
-	if err := s.ctrl.Send(a.buildStatus()); err != nil {
-		a.log.Debug("status send failed", "err", err)
+	err := s.ctrl.Send(agent.buildStatus())
+	if err != nil {
+		agent.log.Debug("Status send failed", slog.Any("err", err))
 	}
 }
 
-func (a *Agent) buildStatus() proto.Status {
-	a.mu.Lock()
+func (agent *Agent) buildStatus() proto.Status {
+	agent.mu.Lock()
 	st := proto.Status{
-		Version:             a.version,
-		Warnings:            append([]string(nil), a.warnings...),
-		ReleaseRevision:     a.cache.Release.Revision,
-		RulesRevision:       a.cache.Rules.Revision,
-		RevocationRevision:  a.cache.Revocations.Revision,
-		TrustBundleRevision: a.cache.TrustBundle.Revision,
+		Version:             agent.version,
+		Warnings:            append([]string(nil), agent.warnings...),
+		ReleaseRevision:     agent.cache.Release.Revision,
+		RulesRevision:       agent.cache.Rules.Revision,
+		RevocationRevision:  agent.cache.Revocations.Revision,
+		TrustBundleRevision: agent.cache.TrustBundle.Revision,
 	}
 
-	if a.ident.Leaf != nil {
-		st.CertNotAfter = a.ident.Leaf.NotAfter.UTC().Format(time.RFC3339)
+	if agent.ident.Leaf != nil {
+		st.CertNotAfter = agent.ident.Leaf.NotAfter.UTC().Format(time.RFC3339)
 	}
-	a.mu.Unlock()
+	agent.mu.Unlock()
 
-	if a.direct != nil {
-		st.DirectSessions = a.direct.Sessions()
+	if agent.direct != nil {
+		st.DirectSessions = agent.direct.Sessions()
 	}
 
-	if a.upd != nil {
-		st.FailedUpdates = a.upd.FailedUpdates()
+	if agent.upd != nil {
+		st.FailedUpdates = agent.upd.FailedUpdates()
 
-		if rev := a.upd.LastAppliedRelease(); rev != "" {
+		if rev := agent.upd.LastAppliedRelease(); rev != "" {
 			st.ReleaseRevision = rev
 		}
 	}

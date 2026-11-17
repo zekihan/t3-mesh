@@ -9,8 +9,10 @@ import (
 
 const port = 27301
 
-func newRequest(host string, headers map[string]string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+func newRequest(t *testing.T, host string, headers map[string]string) *http.Request {
+	t.Helper()
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	r.Host = host
 
 	for k, v := range headers {
@@ -22,9 +24,9 @@ func newRequest(host string, headers map[string]string) *http.Request {
 
 func TestCheck(t *testing.T) {
 	tests := []struct {
+		headers map[string]string
 		name    string
 		host    string
-		headers map[string]string
 		pass    bool
 	}{
 		{name: "native client, valid host, no headers", host: "127.0.0.1:27301", pass: true},
@@ -164,7 +166,7 @@ func TestCheck(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := Check(newRequest(tt.host, tt.headers), port)
+			err := Check(newRequest(t, tt.host, tt.headers), port)
 			if tt.pass && err != nil {
 				t.Fatalf("Check rejected: %v", err)
 			}
@@ -184,7 +186,7 @@ func TestCheck(t *testing.T) {
 
 func TestCheckWebSocketUpgrade(t *testing.T) {
 	upgrade := func(host, origin string) *http.Request {
-		r := newRequest(host, map[string]string{
+		r := newRequest(t, host, map[string]string{
 			"Connection": "Upgrade",
 			"Upgrade":    "websocket",
 		})
@@ -195,30 +197,37 @@ func TestCheckWebSocketUpgrade(t *testing.T) {
 		return r
 	}
 
-	if err := Check(upgrade("127.0.0.1:27301", ""), port); err != nil {
+	err := Check(upgrade("127.0.0.1:27301", ""), port)
+	if err != nil {
 		t.Fatalf("native websocket rejected: %v", err)
 	}
 
-	if err := Check(upgrade("localhost:27301", "http://localhost:27301"), port); err != nil {
+	err = Check(upgrade("localhost:27301", "http://localhost:27301"), port)
+	if err != nil {
 		t.Fatalf("local websocket rejected: %v", err)
 	}
 
-	if err := Check(upgrade("127.0.0.1:27301", "http://evil.example"), port); err == nil {
+	err = Check(upgrade("127.0.0.1:27301", "http://evil.example"), port)
+	if err == nil {
 		t.Fatal("foreign-origin websocket accepted")
 	}
 
-	if err := Check(upgrade("127.0.0.1:27301", "null"), port); err == nil {
+	err = Check(upgrade("127.0.0.1:27301", "null"), port)
+	if err == nil {
 		t.Fatal("null-origin websocket accepted")
 	}
 }
 
 func TestCheckPortIsPartOfHost(t *testing.T) {
-	r := newRequest("127.0.0.1:27302", nil)
-	if err := Check(r, 27302); err != nil {
+	r := newRequest(t, "127.0.0.1:27302", nil)
+
+	err := Check(r, 27302)
+	if err != nil {
 		t.Fatalf("port 27302 rejected: %v", err)
 	}
 
-	if err := Check(r, 27301); err == nil {
+	err = Check(r, 27301)
+	if err == nil {
 		t.Fatal("request for port 27302 accepted on port 27301")
 	}
 }
@@ -231,27 +240,39 @@ func TestMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	})
 
-	h := Middleware(port, next)
+	handler := Middleware(port, next)
 
 	tests := []struct {
+		headers    map[string]string
 		name       string
 		host       string
-		headers    map[string]string
 		wantStatus int
 		wantCalled bool
 	}{
-		{"native client passes", "127.0.0.1:27301", nil, http.StatusTeapot, true},
-		{"localhost passes", "localhost:27301", nil, http.StatusTeapot, true},
-		{"bad host gets 403", "evil.example:27301", nil, http.StatusForbidden, false},
 		{
-			"null origin gets 403", "127.0.0.1:27301",
-			map[string]string{"Origin": "null"},
-			http.StatusForbidden, false,
+			name:       "native client passes",
+			host:       "127.0.0.1:27301",
+			wantStatus: http.StatusTeapot,
+			wantCalled: true,
 		},
 		{
-			"cross-site gets 403", "127.0.0.1:27301",
-			map[string]string{"Sec-Fetch-Site": "cross-site"},
-			http.StatusForbidden, false,
+			name:       "localhost passes",
+			host:       "localhost:27301",
+			wantStatus: http.StatusTeapot,
+			wantCalled: true,
+		},
+		{name: "bad host gets 403", host: "evil.example:27301", wantStatus: http.StatusForbidden},
+		{
+			name:       "null origin gets 403",
+			host:       "127.0.0.1:27301",
+			headers:    map[string]string{"Origin": "null"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "cross-site gets 403",
+			host:       "127.0.0.1:27301",
+			headers:    map[string]string{"Sec-Fetch-Site": "cross-site"},
+			wantStatus: http.StatusForbidden,
 		},
 	}
 
@@ -260,7 +281,7 @@ func TestMiddleware(t *testing.T) {
 			called = false
 			rec := httptest.NewRecorder()
 
-			h.ServeHTTP(rec, newRequest(tt.host, tt.headers))
+			handler.ServeHTTP(rec, newRequest(t, tt.host, tt.headers))
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)

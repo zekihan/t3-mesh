@@ -16,6 +16,8 @@ import (
 // FormatVersion is the cache file format written by this package.
 const FormatVersion = 1
 
+var errUnsupportedFormat = errors.New("state: unsupported cache format version")
+
 const (
 	fileName = "cache.json"
 	dirMode  = 0o700
@@ -24,17 +26,17 @@ const (
 
 // Cache is the agent's on-disk copy of state last received from the hub.
 type Cache struct {
-	FormatVersion  int               `json:"formatVersion"`
-	Machine        string            `json:"machine"`
-	Home           bool              `json:"home"`
 	Rules          proto.Rules       `json:"rules"`
-	Peers          proto.PeerTable   `json:"peers"`
-	Revocations    proto.Revocations `json:"revocations"`
-	TrustBundle    proto.TrustBundle `json:"trustBundle"`
-	Release        proto.Release     `json:"release"`
 	LastHubContact time.Time         `json:"lastHubContact"`
-	HomeGatewayMAC string            `json:"homeGatewayMAC,omitempty"`
-	HomeCIDRs      []string          `json:"homeCIDRs,omitempty"`
+	Release        proto.Release     `json:"release"`
+	TrustBundle    proto.TrustBundle `json:"trustBundle"`
+	Machine        string            `json:"machine"`
+	HomeGatewayMAC string            `json:"homeGatewayMAC,omitempty"` //nolint:tagliatelle // persisted key
+	Revocations    proto.Revocations `json:"revocations"`
+	Peers          proto.PeerTable   `json:"peers"`
+	HomeCIDRs      []string          `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // persisted key
+	FormatVersion  int               `json:"formatVersion"`
+	Home           bool              `json:"home"`
 }
 
 // Load reads the cache in dir. A missing file yields an empty cache. A file written
@@ -49,22 +51,25 @@ func Load(dir string) (*Cache, error) {
 		return nil, fmt.Errorf("state: read cache: %w", err)
 	}
 
-	var c Cache
-	if err := json.Unmarshal(data, &c); err != nil {
+	var cache Cache
+
+	err = json.Unmarshal(data, &cache)
+	if err != nil {
 		return nil, fmt.Errorf("state: decode cache: %w", err)
 	}
 
-	if c.FormatVersion < 1 || c.FormatVersion > FormatVersion {
-		return nil, fmt.Errorf("state: unsupported cache format version %d", c.FormatVersion)
+	if cache.FormatVersion < 1 || cache.FormatVersion > FormatVersion {
+		return nil, fmt.Errorf("%w %d", errUnsupportedFormat, cache.FormatVersion)
 	}
 
-	return &c, nil
+	return &cache, nil
 }
 
 // Save writes c to dir atomically: a temporary file in dir is fsynced and renamed
 // over cache.json, so readers see either the old or the new file, never a partial one.
 func Save(dir string, c *Cache) error {
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	err := os.MkdirAll(dir, dirMode)
+	if err != nil {
 		return fmt.Errorf("state: create dir: %w", err)
 	}
 
@@ -82,14 +87,17 @@ func Save(dir string, c *Cache) error {
 	}
 
 	tmpName := tmp.Name()
-	if err := writeSync(tmp, data); err != nil {
+
+	err = writeSync(tmp, data)
+	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 
 		return err
 	}
 
-	if err := os.Rename(tmpName, filepath.Join(dir, fileName)); err != nil {
+	err = os.Rename(tmpName, filepath.Join(dir, fileName))
+	if err != nil {
 		_ = os.Remove(tmpName)
 
 		return fmt.Errorf("state: rename cache: %w", err)
@@ -98,20 +106,24 @@ func Save(dir string, c *Cache) error {
 	return syncDir(dir)
 }
 
-func writeSync(f *os.File, data []byte) error {
-	if err := f.Chmod(fileMode); err != nil {
+func writeSync(file *os.File, data []byte) error {
+	err := file.Chmod(fileMode)
+	if err != nil {
 		return fmt.Errorf("state: chmod temp file: %w", err)
 	}
 
-	if _, err := f.Write(data); err != nil {
+	_, err = file.Write(data)
+	if err != nil {
 		return fmt.Errorf("state: write temp file: %w", err)
 	}
 
-	if err := f.Sync(); err != nil {
+	err = file.Sync()
+	if err != nil {
 		return fmt.Errorf("state: sync temp file: %w", err)
 	}
 
-	if err := f.Close(); err != nil {
+	err = file.Close()
+	if err != nil {
 		return fmt.Errorf("state: close temp file: %w", err)
 	}
 
@@ -119,14 +131,15 @@ func writeSync(f *os.File, data []byte) error {
 }
 
 func syncDir(dir string) error {
-	d, err := os.Open(dir) //nolint:gosec // dir is the agent's own state directory
+	dirFile, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("state: open dir: %w", err)
 	}
 
-	defer func() { _ = d.Close() }()
+	defer func() { _ = dirFile.Close() }()
 
-	if err := d.Sync(); err != nil {
+	err = dirFile.Sync()
+	if err != nil {
 		return fmt.Errorf("state: sync dir: %w", err)
 	}
 
@@ -135,15 +148,15 @@ func syncDir(dir string) error {
 
 // WithinWindow reports whether the hub was last contacted no more than ttl before now.
 // A cache that has never seen the hub is never within the window.
-// maxClockSkew is how far now may lag LastHubContact before the window closes.
+// MaxClockSkew is how far now may lag LastHubContact before the window closes.
 const maxClockSkew = 5 * time.Minute
 
-func (c *Cache) WithinWindow(now time.Time, ttl time.Duration) bool {
-	if c.LastHubContact.IsZero() {
+func (cache *Cache) WithinWindow(now time.Time, ttl time.Duration) bool {
+	if cache.LastHubContact.IsZero() {
 		return false
 	}
 
-	age := now.Sub(c.LastHubContact)
+	age := now.Sub(cache.LastHubContact)
 
 	// A clock that moved back past the last contact must not keep the window
 	// open indefinitely; tolerate only small skew.
@@ -151,28 +164,28 @@ func (c *Cache) WithinWindow(now time.Time, ttl time.Duration) bool {
 }
 
 // Apply copies every non-nil field of u into the cache.
-func (c *Cache) Apply(u proto.Update) {
-	if u.Home != nil {
-		c.Home = *u.Home
+func (cache *Cache) Apply(update proto.Update) {
+	if update.Home != nil {
+		cache.Home = *update.Home
 	}
 
-	if u.Rules != nil {
-		c.Rules = *u.Rules
+	if update.Rules != nil {
+		cache.Rules = *update.Rules
 	}
 
-	if u.Peers != nil {
-		c.Peers = *u.Peers
+	if update.Peers != nil {
+		cache.Peers = *update.Peers
 	}
 
-	if u.Revocations != nil {
-		c.Revocations = *u.Revocations
+	if update.Revocations != nil {
+		cache.Revocations = *update.Revocations
 	}
 
-	if u.TrustBundle != nil {
-		c.TrustBundle = *u.TrustBundle
+	if update.TrustBundle != nil {
+		cache.TrustBundle = *update.TrustBundle
 	}
 
-	if u.HomeCIDRs != nil {
-		c.HomeCIDRs = u.HomeCIDRs
+	if update.HomeCIDRs != nil {
+		cache.HomeCIDRs = update.HomeCIDRs
 	}
 }

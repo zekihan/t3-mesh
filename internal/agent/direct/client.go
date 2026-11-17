@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"strconv"
@@ -19,6 +19,7 @@ import (
 // sessionConn is the connection Dial returns. Closing it ends the session.
 type sessionConn struct {
 	net.Conn
+
 	s *session
 }
 
@@ -33,67 +34,88 @@ func (c *sessionConn) CloseWrite() error {
 	return nil
 }
 
-func (m *Manager) failed(machine string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (mgr *Manager) failed(machine string) bool {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
 
-	until, ok := m.failures[machine]
+	until, ok := mgr.failures[machine]
 	if !ok {
 		return false
 	}
 
-	if m.now().Before(until) {
+	if mgr.now().Before(until) {
 		return true
 	}
 
-	delete(m.failures, machine)
+	delete(mgr.failures, machine)
 
 	return false
 }
 
-func (m *Manager) remember(machine string) {
-	m.mu.Lock()
-	m.failures[machine] = m.now().Add(FailureMemory)
-	m.mu.Unlock()
+func (mgr *Manager) remember(machine string) {
+	mgr.mu.Lock()
+	mgr.failures[machine] = mgr.now().Add(FailureMemory)
+	mgr.mu.Unlock()
 }
 
 // Dial returns a ready byte stream to svc on machine over the direct path, or
 // an error meaning the caller should use the tunnel.
-func (m *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, error) {
-	v := m.view()
+func (mgr *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, error) {
+	view := mgr.view()
 
-	if ok, reason := m.active(v, true); !ok {
+	if ok, reason := mgr.active(view, true); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrInactive, reason)
 	}
 
-	var peer *proto.Peer
-
-	for i := range v.Peers {
-		if v.Peers[i].Machine == machine {
-			peer = &v.Peers[i]
-
-			break
-		}
-	}
-
+	peer := findPeer(view, machine)
 	if peer == nil || len(peer.LANAddrs) == 0 || peer.DirectPort == 0 ||
-		(v.HubConnected && !peer.Home) {
+		(view.HubConnected && !peer.Home) {
 		return nil, fmt.Errorf("%w: %s", ErrNoPeer, machine)
 	}
 
-	if m.failed(machine) {
+	if mgr.failed(machine) {
 		return nil, fmt.Errorf("%w: %s", ErrRecentFail, machine)
 	}
 
-	if _, err := leafOf(v.Identity); err != nil {
+	_, err := leafOf(&view.Identity)
+	if err != nil {
 		return nil, err
 	}
 
+	conn, err := mgr.dialAny(ctx, view, peer, svc)
+	if err != nil {
+		if ctx.Err() == nil {
+			mgr.remember(machine)
+		}
+
+		return nil, fmt.Errorf("direct dial %s: %w", machine, err)
+	}
+
+	return conn, nil
+}
+
+func findPeer(view *View, machine string) *proto.Peer {
+	for i := range view.Peers {
+		if view.Peers[i].Machine == machine {
+			return &view.Peers[i]
+		}
+	}
+
+	return nil
+}
+
+// dialAny tries the peer's LAN addresses in turn within SetupTimeout.
+func (mgr *Manager) dialAny(
+	ctx context.Context,
+	view *View,
+	peer *proto.Peer,
+	svc string,
+) (net.Conn, error) {
 	deadline := time.Now().Add(SetupTimeout)
 
 	var lastErr error
 
-	for i, a := range peer.LANAddrs {
+	for i, addr := range peer.LANAddrs {
 		if ctx.Err() != nil {
 			lastErr = ctx.Err()
 
@@ -107,36 +129,39 @@ func (m *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, erro
 
 		attempt := time.Now().Add(remaining / time.Duration(len(peer.LANAddrs)-i))
 
-		conn, err := m.dialOne(ctx, v, peer, a, svc, attempt)
+		conn, err := mgr.dialOne(ctx, view, peer, addr, svc, attempt)
 		if err == nil {
 			return conn, nil
 		}
 
 		lastErr = err
 
-		m.log.Debug("direct dial failed", "machine", machine, "addr", a, "err", err)
+		mgr.log.DebugContext(
+			ctx,
+			"Direct dial failed",
+			slog.String("machine", peer.Machine),
+			slog.String("addr", addr),
+			slog.Any("err", err),
+		)
 	}
 
 	if lastErr == nil {
-		lastErr = errors.New("setup deadline exceeded")
+		lastErr = errSetupDeadline
 	}
 
-	if ctx.Err() == nil {
-		m.remember(machine)
-	}
-
-	return nil, fmt.Errorf("direct dial %s: %w", machine, lastErr)
+	return nil, lastErr
 }
 
 func hostPort(addr string, port int) string {
-	if a, err := netip.ParseAddr(addr); err == nil {
+	a, err := netip.ParseAddr(addr)
+	if err == nil {
 		return netip.AddrPortFrom(a, uint16(port)).String() //nolint:gosec // port from hub table
 	}
 
 	return net.JoinHostPort(addr, strconv.Itoa(port))
 }
 
-func (m *Manager) clientTLS(v View, machine string) *tls.Config {
+func (mgr *Manager) clientTLS(v *View, machine string) *tls.Config {
 	identity := v.Identity
 	want := policy.AgentIdentity(machine)
 
@@ -147,13 +172,14 @@ func (m *Manager) clientTLS(v View, machine string) *tls.Config {
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return &identity, nil
 		},
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error { //nolint:gosec // no client session cache, so no resumption
-			cur := m.view()
+		// No client session cache, so there is no resumption to bypass this check.
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error { //nolint:gosec // see above
+			cur := mgr.view()
 			if cur.Roots == nil {
-				return errors.New("direct: no trust bundle")
+				return errNoTrustBundle
 			}
 
-			leaf, err := pki.VerifyPeer(raw, cur.Roots, x509.ExtKeyUsageServerAuth, m.now())
+			leaf, err := pki.VerifyPeer(raw, cur.Roots, x509.ExtKeyUsageServerAuth, mgr.now())
 			if err != nil {
 				return fmt.Errorf("verify server: %w", err)
 			}
@@ -164,10 +190,11 @@ func (m *Manager) clientTLS(v View, machine string) *tls.Config {
 			}
 
 			if id != want {
-				return fmt.Errorf("direct: server identity %q, want %q", id, want)
+				return fmt.Errorf("%w: got %q, want %q", errIdentityMismatch, id, want)
 			}
 
-			if err := policy.Revoked(cur.Revocations, id, pki.Fingerprint(leaf)); err != nil {
+			err = policy.Revoked(cur.Revocations, id, pki.Fingerprint(leaf))
+			if err != nil {
 				return fmt.Errorf("server: %w", err)
 			}
 
@@ -176,9 +203,9 @@ func (m *Manager) clientTLS(v View, machine string) *tls.Config {
 	}
 }
 
-func (m *Manager) dialOne(
+func (mgr *Manager) dialOne(
 	ctx context.Context,
-	v View,
+	view *View,
 	peer *proto.Peer,
 	addr, svc string,
 	deadline time.Time,
@@ -186,7 +213,7 @@ func (m *Manager) dialOne(
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
-	raw, err := m.opts.Dial(dctx, "tcp", hostPort(addr, peer.DirectPort))
+	raw, err := mgr.opts.Dial(dctx, "tcp", hostPort(addr, peer.DirectPort))
 	if err != nil {
 		return nil, err
 	}
@@ -199,24 +226,29 @@ func (m *Manager) dialOne(
 		}
 	}()
 
-	_ = raw.SetDeadline(deadline)
+	setDeadline(raw.SetDeadline, deadline)
 
-	tc := tls.Client(raw, m.clientTLS(v, peer.Machine))
-	if err := tc.HandshakeContext(dctx); err != nil {
+	tc := tls.Client(raw, mgr.clientTLS(view, peer.Machine))
+
+	err = tc.HandshakeContext(dctx)
+	if err != nil {
 		return nil, fmt.Errorf("handshake: %w", err)
 	}
 
 	cs := tc.ConnectionState()
 	if cs.NegotiatedProtocol != proto.ALPNDirect || len(cs.PeerCertificates) == 0 {
-		return nil, errors.New("direct: bad alpn")
+		return nil, errBadALPN
 	}
 
-	if err := proto.WriteLine(tc, proto.StreamHeader{Svc: svc}); err != nil {
+	err = proto.WriteLine(tc, proto.StreamHeader{Svc: svc})
+	if err != nil {
 		return nil, fmt.Errorf("write header: %w", err)
 	}
 
 	var reply proto.StreamReply
-	if err := proto.ReadLine(tc, &reply); err != nil {
+
+	err = proto.ReadLine(tc, &reply)
+	if err != nil {
 		return nil, fmt.Errorf("read accept: %w", err)
 	}
 
@@ -224,14 +256,22 @@ func (m *Manager) dialOne(
 		return nil, ErrRefused
 	}
 
-	_ = raw.SetDeadline(time.Time{})
+	setDeadline(raw.SetDeadline, time.Time{})
 
 	peerLeaf := cs.PeerCertificates[0]
-	self, _ := leafOf(v.Identity)
-	selfID, _ := pki.CertIdentity(self)
 
-	s := &session{
-		m:            m,
+	self, err := leafOf(&view.Identity)
+	if err != nil {
+		return nil, fmt.Errorf("own certificate: %w", err)
+	}
+
+	selfID, err := pki.CertIdentity(self)
+	if err != nil {
+		return nil, fmt.Errorf("own identity: %w", err)
+	}
+
+	sess := &session{
+		m:            mgr,
 		dir:          "out",
 		conn:         tc,
 		local:        localAddrOf(raw),
@@ -244,12 +284,13 @@ func (m *Manager) dialOne(
 		},
 	}
 
-	if !m.register(s) {
-		return nil, errors.New("direct: closed")
+	if !mgr.register(sess) {
+		return nil, errClosed
 	}
 
-	if err := m.allowed(s, m.view(), m.now()); err != nil {
-		_ = s.close()
+	err = mgr.allowed(sess, mgr.view(), mgr.now())
+	if err != nil {
+		_ = sess.close()
 		ok = true // s.close closed raw
 
 		return nil, err
@@ -257,7 +298,10 @@ func (m *Manager) dialOne(
 
 	ok = true
 
-	m.log.Info("direct session open", "dir", "out", "peer", s.peerID, "svc", svc)
+	mgr.log.InfoContext(ctx, "Direct session open", slog.String("dir", "out"),
+		slog.String("peer", sess.peerID),
+		slog.String("svc", svc),
+	)
 
-	return &sessionConn{Conn: tc, s: s}, nil
+	return &sessionConn{Conn: tc, s: sess}, nil
 }

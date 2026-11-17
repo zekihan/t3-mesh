@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -27,24 +28,21 @@ var (
 
 // linkServer is one loopback link port.
 type linkServer struct {
-	a       *Agent
-	key     string
-	svc     string
-	machine string
-	port    int
-	ln      net.Listener
-	srv     *http.Server
-
-	// hostRewrite, when set, replaces the Host header sent upstream. It is
-	// unused today: T3 gets the link port's own Host (open item in the design).
+	ln          net.Listener
+	a           *Agent
+	srv         *http.Server
+	key         string
+	svc         string
+	machine     string
 	hostRewrite string
+	port        int
 }
 
 // bindLinks binds every configured link port. A failure is a startup failure,
 // so the launcher's local startup check catches a port that cannot be bound.
-func (a *Agent) bindLinks() ([]*linkServer, error) {
-	keys := make([]string, 0, len(a.cfg.Links))
-	for k := range a.cfg.Links {
+func (agent *Agent) bindLinks(ctx context.Context) ([]*linkServer, error) {
+	keys := make([]string, 0, len(agent.cfg.Links))
+	for k := range agent.cfg.Links {
 		keys = append(keys, k)
 	}
 
@@ -53,71 +51,76 @@ func (a *Agent) bindLinks() ([]*linkServer, error) {
 	for _, key := range keys {
 		svc, machine, _ := strings.Cut(key, ".")
 
-		addr := a.cfg.Links[key]
+		addr := agent.cfg.Links[key]
 
 		_, portStr, err := net.SplitHostPort(addr)
 		if err != nil {
-			a.closeLinks(out)
+			agent.closeLinks(out)
 
 			return nil, fmt.Errorf("agent: link %s: %w", key, err)
 		}
 
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
-			a.closeLinks(out)
+			agent.closeLinks(out)
 
 			return nil, fmt.Errorf("agent: link %s: bad port: %w", key, err)
 		}
 
 		var lc net.ListenConfig
 
-		ln, err := lc.Listen(context.Background(), "tcp", addr)
+		ln, err := lc.Listen(ctx, "tcp", addr)
 		if err != nil {
-			a.closeLinks(out)
+			agent.closeLinks(out)
 
 			return nil, fmt.Errorf("agent: bind link %s on %s: %w", key, addr, err)
 		}
 
-		l := &linkServer{a: a, key: key, svc: svc, machine: machine, port: port, ln: ln}
-		l.srv = &http.Server{
-			Handler:           linkguard.Middleware(port, l.proxy()),
+		srv := &linkServer{a: agent, key: key, svc: svc, machine: machine, port: port, ln: ln}
+		srv.srv = &http.Server{
+			Handler:           linkguard.Middleware(port, srv.proxy()),
 			ReadHeaderTimeout: linkHeaderTimeout,
 		}
 
-		a.log.Info("link port bound", "link", key, "addr", ln.Addr().String())
+		agent.log.InfoContext(ctx, "Link port bound", slog.String("link", key),
+			slog.String("addr", ln.Addr().String()),
+		)
 
-		out = append(out, l)
+		out = append(out, srv)
 	}
 
 	return out, nil
 }
 
-func (a *Agent) closeLinks(ls []*linkServer) {
+func (agent *Agent) closeLinks(ls []*linkServer) {
 	for _, l := range ls {
 		l.close()
 	}
 }
 
-func (l *linkServer) serve() {
-	if err := l.srv.Serve(l.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		l.a.log.Error("link server stopped", "link", l.key, "err", err)
+func (srv *linkServer) serve() {
+	err := srv.srv.Serve(srv.ln)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		srv.a.log.Error("Link server stopped", slog.String("link", srv.key),
+			slog.Any("err", err),
+		)
 	}
 }
 
-func (l *linkServer) close() {
-	_ = l.srv.Close()
-	_ = l.ln.Close()
+func (srv *linkServer) close() {
+	_ = srv.srv.Close()
+	_ = srv.ln.Close()
 }
 
 // proxy returns the reverse proxy for the link. Keep-alives are off, so every
 // request dials afresh and takes the current path (direct or tunnel); nothing
 // pooled can outlive a path switch. Host, Origin and paths pass unchanged;
 // httputil.ReverseProxy carries WebSocket upgrades.
-func (l *linkServer) proxy() http.Handler {
+func (srv *linkServer) proxy() http.Handler {
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return l.a.dialLink(ctx, l.machine, l.svc)
+			return srv.a.dialLink(ctx, srv.machine, srv.svc)
 		},
 	}
 
@@ -125,70 +128,75 @@ func (l *linkServer) proxy() http.Handler {
 		Transport: tr,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = l.key
+			pr.Out.URL.Host = srv.key
 
-			if l.hostRewrite != "" {
-				pr.Out.Host = l.hostRewrite
+			if srv.hostRewrite != "" {
+				pr.Out.Host = srv.hostRewrite
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			l.a.log.Warn("link request failed", "link", l.key, "err", err)
-			http.Error(w, "mesh: "+l.key+" unreachable", http.StatusBadGateway)
+			srv.a.log.WarnContext(r.Context(), "Link request failed", slog.String("link", srv.key),
+				slog.Any("err", err),
+			)
+			http.Error(w, "mesh: "+srv.key+" unreachable", http.StatusBadGateway)
 		},
 	}
 }
 
 // dialLink opens a byte stream to svc on machine: direct when the manager can,
 // otherwise through the hub tunnel.
-func (a *Agent) dialLink(ctx context.Context, machine, svc string) (net.Conn, error) {
-	if a.direct != nil {
-		c, err := a.direct.Dial(ctx, machine, svc)
+func (agent *Agent) dialLink(ctx context.Context, machine, svc string) (net.Conn, error) {
+	if agent.direct != nil {
+		c, err := agent.direct.Dial(ctx, machine, svc)
 		if err == nil {
 			return c, nil
 		}
 
-		a.log.Debug(
-			"direct dial unavailable, using tunnel",
-			"machine",
-			machine,
-			"svc",
-			svc,
-			"err",
-			err,
+		agent.log.DebugContext(ctx,
+			"Direct dial unavailable, using tunnel",
+			slog.String("machine", machine),
+			slog.String("svc", svc),
+			slog.Any("err", err),
 		)
 	}
 
-	return a.dialTunnel(ctx, machine, svc)
+	return agent.dialTunnel(ctx, machine, svc)
 }
 
-func (a *Agent) dialTunnel(ctx context.Context, machine, svc string) (net.Conn, error) {
-	s := a.current()
-	if s == nil {
+func (agent *Agent) dialTunnel(ctx context.Context, machine, svc string) (net.Conn, error) {
+	sess := agent.current()
+	if sess == nil {
 		return nil, errNoTunnel
 	}
 
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("open stream: %w", err)
-	}
-
-	st, err := s.ymx.OpenStream()
+	err := ctx.Err()
 	if err != nil {
 		return nil, fmt.Errorf("open stream: %w", err)
 	}
 
-	stop := context.AfterFunc(ctx, func() { _ = st.SetDeadline(time.Unix(1, 0)) })
+	st, err := sess.ymx.OpenStream()
+	if err != nil {
+		return nil, fmt.Errorf("open stream: %w", err)
+	}
+
+	stop := context.AfterFunc(ctx, func() {
+		setDeadline(st.SetDeadline, time.Unix(1, 0))
+	})
 	defer stop()
 
-	_ = st.SetDeadline(time.Now().Add(streamReplyWait))
+	setDeadline(st.SetDeadline, time.Now().Add(streamReplyWait))
 
-	if err = proto.WriteLine(st, proto.StreamHeader{To: svc + "." + machine}); err != nil {
+	err = proto.WriteLine(st, proto.StreamHeader{To: svc + "." + machine})
+	if err != nil {
 		_ = st.Close()
 
 		return nil, fmt.Errorf("write stream header: %w", err)
 	}
 
 	var reply proto.StreamReply
-	if err = proto.ReadLine(st, &reply); err != nil {
+
+	err = proto.ReadLine(st, &reply)
+	if err != nil {
 		_ = st.Close()
 
 		return nil, fmt.Errorf("read stream reply: %w", err)
@@ -206,7 +214,7 @@ func (a *Agent) dialTunnel(ctx context.Context, machine, svc string) (net.Conn, 
 		return nil, fmt.Errorf("open stream: %w", ctx.Err())
 	}
 
-	_ = st.SetDeadline(time.Time{})
+	setDeadline(st.SetDeadline, time.Time{})
 
 	return st, nil
 }

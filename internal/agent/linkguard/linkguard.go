@@ -20,14 +20,14 @@ var ErrForbidden = errors.New("linkguard: forbidden")
 // Sec-Fetch-Site (native clients) pass when Host is valid. WebSocket upgrades are
 // checked the same way.
 func Check(r *http.Request, port int) error {
-	p := strconv.Itoa(port)
+	portStr := strconv.Itoa(port)
 
-	if !matchesAny(r.Host, "127.0.0.1:"+p, "localhost:"+p) {
+	if !matchesAny(r.Host, "127.0.0.1:"+portStr, "localhost:"+portStr) {
 		return fmt.Errorf("%w: host %q", ErrForbidden, r.Host)
 	}
 
 	for _, origin := range r.Header.Values("Origin") {
-		if !matchesAny(origin, "http://127.0.0.1:"+p, "http://localhost:"+p) {
+		if !matchesAny(origin, "http://127.0.0.1:"+portStr, "http://localhost:"+portStr) {
 			return fmt.Errorf("%w: origin %q", ErrForbidden, origin)
 		}
 	}
@@ -42,15 +42,16 @@ func Check(r *http.Request, port int) error {
 }
 
 // Middleware wraps h, answering 403 without calling h when Check fails for port.
-func Middleware(port int, h http.Handler) http.Handler {
+func Middleware(port int, handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := Check(r, port); err != nil {
+		err := Check(r, port)
+		if err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 
 			return
 		}
 
-		h.ServeHTTP(w, r)
+		handler.ServeHTTP(w, r)
 	})
 }
 

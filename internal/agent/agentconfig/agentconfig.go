@@ -26,15 +26,37 @@ const (
 	defaultInstall   = "install"
 )
 
+var (
+	errMustBeAbsolute      = errors.New("must be absolute")
+	errServiceNameInvalid  = errors.New("service name must be [A-Za-z0-9_-]+")
+	errAgentNamePrefix     = errors.New("identity.name has the wrong prefix")
+	errPortAboveRange      = errors.New("port above the loopback range")
+	errPortShared          = errors.New("share a port")
+	errCacheTTLNotPositive = errors.New("must be positive")
+	errDirectPortRequired  = errors.New(
+		"agentconfig: direct.port is required when direct is enabled",
+	)
+	errDirectPortRange     = errors.New("direct.port out of range")
+	errDirectPortCollision = errors.New("collides with a link port")
+	errKeyFormat           = errors.New("key must be <svc>.<machine>")
+	errNotLoopback         = errors.New("must be a loopback address")
+	errHostNotLoopbackIP   = errors.New("must use host 127.0.0.1")
+	errInvalidPort         = errors.New("invalid port")
+	errHubRequired         = errors.New("agentconfig: hub is required")
+	errHubFormat           = errors.New("must be host or host:port")
+	errHubIPv6Brackets     = errors.New("IPv6 literals must be bracketed")
+	errHubNoHost           = errors.New("has no host")
+)
+
 // Config is a validated agent configuration.
 type Config struct {
 	Serve      map[string]string
 	Links      map[string]string
 	Identity   Identity
-	Direct     Direct
 	StateDir   string
 	InstallDir string
 	Hub        string
+	Direct     Direct
 }
 
 // Identity names the agent and locates its key material.
@@ -73,7 +95,7 @@ type direct struct {
 
 // Load reads and validates the configuration file at path.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("agentconfig: read %s: %w", path, err)
 	}
@@ -88,87 +110,97 @@ func Load(path string) (*Config, error) {
 
 // Parse decodes and validates a configuration document. Unknown fields are errors.
 func Parse(data []byte) (*Config, error) {
-	var f file
+	var doc file
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&f); err != nil && !errors.Is(err, io.EOF) {
+	err := dec.Decode(&doc)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("agentconfig: decode: %w", err)
 	}
 
-	return f.build()
+	return doc.build()
 }
 
-func (f *file) build() (*Config, error) {
-	if err := validateAgentName(f.Identity.Name); err != nil {
+func (doc *file) build() (*Config, error) {
+	err := validateAgentName(doc.Identity.Name)
+	if err != nil {
 		return nil, err
 	}
 
-	if !filepath.IsAbs(f.Identity.Dir) {
-		return nil, fmt.Errorf("agentconfig: identity.dir %q must be absolute", f.Identity.Dir)
+	if !filepath.IsAbs(doc.Identity.Dir) {
+		return nil, fmt.Errorf(
+			"agentconfig: identity.dir %q %w",
+			doc.Identity.Dir,
+			errMustBeAbsolute,
+		)
 	}
 
-	parent := filepath.Dir(filepath.Clean(f.Identity.Dir))
+	parent := filepath.Dir(filepath.Clean(doc.Identity.Dir))
 
-	stateDir, err := absOrDefault("stateDir", f.StateDir, filepath.Join(parent, defaultStateName))
+	stateDir, err := absOrDefault("stateDir", doc.StateDir, filepath.Join(parent, defaultStateName))
 	if err != nil {
 		return nil, err
 	}
 
 	installDir, err := absOrDefault(
 		"installDir",
-		f.InstallDir,
+		doc.InstallDir,
 		filepath.Join(parent, defaultInstall),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, _, err = splitHub(f.Hub); err != nil {
-		return nil, err
-	}
-
-	for key, target := range f.Serve {
-		if !validLabel(key) {
-			return nil, fmt.Errorf(
-				"agentconfig: serve %q: service name must be [A-Za-z0-9_-]+",
-				key,
-			)
-		}
-
-		if err = validateLoopbackAddr(target); err != nil {
-			return nil, fmt.Errorf("agentconfig: serve %q: %w", key, err)
-		}
-	}
-
-	linkPorts, err := f.validateLinks()
+	_, _, err = splitHub(doc.Hub)
 	if err != nil {
 		return nil, err
 	}
 
-	direct, err := f.validateDirect(linkPorts)
+	for key, target := range doc.Serve {
+		if !validLabel(key) {
+			return nil, fmt.Errorf("agentconfig: serve %q: %w", key, errServiceNameInvalid)
+		}
+
+		err = validateLoopbackAddr(target)
+		if err != nil {
+			return nil, fmt.Errorf("agentconfig: serve %q: %w", key, err)
+		}
+	}
+
+	linkPorts, err := doc.validateLinks()
+	if err != nil {
+		return nil, err
+	}
+
+	direct, err := doc.validateDirect(linkPorts)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Config{
 		Identity: Identity{
-			Name: f.Identity.Name,
-			Dir:  filepath.Clean(f.Identity.Dir),
+			Name: doc.Identity.Name,
+			Dir:  filepath.Clean(doc.Identity.Dir),
 		},
 		StateDir:   stateDir,
 		InstallDir: installDir,
-		Hub:        f.Hub,
-		Serve:      f.Serve,
-		Links:      f.Links,
+		Hub:        doc.Hub,
+		Serve:      doc.Serve,
+		Links:      doc.Links,
 		Direct:     direct,
 	}, nil
 }
 
 func validateAgentName(name string) error {
 	if !strings.HasPrefix(name, agentNamePrefix) || len(name) == len(agentNamePrefix) {
-		return fmt.Errorf("agentconfig: identity.name %q must start with %q", name, agentNamePrefix)
+		return fmt.Errorf(
+			"agentconfig: identity.name %q must start with %q: %w",
+			name,
+			agentNamePrefix,
+			errAgentNamePrefix,
+		)
 	}
 
 	return nil
@@ -180,19 +212,20 @@ func absOrDefault(field, value, def string) (string, error) {
 	}
 
 	if !filepath.IsAbs(value) {
-		return "", fmt.Errorf("agentconfig: %s %q must be absolute", field, value)
+		return "", fmt.Errorf("agentconfig: %s %q %w", field, value, errMustBeAbsolute)
 	}
 
 	return filepath.Clean(value), nil
 }
 
 // validateLinks checks link keys and values and returns the set of link ports.
-func (f *file) validateLinks() (map[int]bool, error) {
-	ports := make(map[int]bool, len(f.Links))
-	owners := make(map[int]string, len(f.Links))
+func (doc *file) validateLinks() (map[int]bool, error) {
+	ports := make(map[int]bool, len(doc.Links))
+	owners := make(map[int]string, len(doc.Links))
 
-	for key, value := range f.Links {
-		if err := validateKey(key); err != nil {
+	for key, value := range doc.Links {
+		err := validateKey(key)
+		if err != nil {
 			return nil, fmt.Errorf("agentconfig: links %q: %w", key, err)
 		}
 
@@ -202,12 +235,18 @@ func (f *file) validateLinks() (map[int]bool, error) {
 		}
 
 		if port > maxLoopbackPort {
-			return nil, fmt.Errorf("agentconfig: links %q: port %d must be below %d",
-				key, port, maxLoopbackPort+1)
+			return nil, fmt.Errorf("agentconfig: links %q: port %d must be below %d: %w",
+				key, port, maxLoopbackPort+1, errPortAboveRange)
 		}
 
 		if other, dup := owners[port]; dup {
-			return nil, fmt.Errorf("agentconfig: links %q and %q share port %d", key, other, port)
+			return nil, fmt.Errorf(
+				"agentconfig: links %q and %q %w %d",
+				key,
+				other,
+				errPortShared,
+				port,
+			)
 		}
 
 		owners[port] = key
@@ -217,48 +256,53 @@ func (f *file) validateLinks() (map[int]bool, error) {
 	return ports, nil
 }
 
-func (f *file) validateDirect(linkPorts map[int]bool) (Direct, error) {
-	if f.Direct == nil {
+func (doc *file) validateDirect(linkPorts map[int]bool) (Direct, error) {
+	if doc.Direct == nil {
 		return Direct{CacheTTL: defaultCacheTTL}, nil
 	}
 
-	d := Direct{Enabled: f.Direct.Enabled, Port: f.Direct.Port, CacheTTL: defaultCacheTTL}
-
-	if f.Direct.CacheTTL != nil {
-		if *f.Direct.CacheTTL <= 0 {
-			return Direct{}, fmt.Errorf("agentconfig: direct.cacheTTL %s must be positive",
-				*f.Direct.CacheTTL)
-		}
-
-		d.CacheTTL = *f.Direct.CacheTTL
+	directCfg := Direct{
+		Enabled:  doc.Direct.Enabled,
+		Port:     doc.Direct.Port,
+		CacheTTL: defaultCacheTTL,
 	}
 
-	if d.Enabled && d.Port == 0 {
-		return Direct{}, errors.New("agentconfig: direct.port is required when direct is enabled")
-	}
-
-	if d.Port != 0 {
-		if d.Port < 1 || d.Port > maxLoopbackPort {
-			return Direct{}, fmt.Errorf("agentconfig: direct.port %d must be between 1 and %d",
-				d.Port, maxLoopbackPort)
+	if doc.Direct.CacheTTL != nil {
+		if *doc.Direct.CacheTTL <= 0 {
+			return Direct{}, fmt.Errorf("agentconfig: direct.cacheTTL %s %w",
+				*doc.Direct.CacheTTL, errCacheTTLNotPositive)
 		}
 
-		if linkPorts[d.Port] {
+		directCfg.CacheTTL = *doc.Direct.CacheTTL
+	}
+
+	if directCfg.Enabled && directCfg.Port == 0 {
+		return Direct{}, errDirectPortRequired
+	}
+
+	if directCfg.Port != 0 {
+		if directCfg.Port < 1 || directCfg.Port > maxLoopbackPort {
+			return Direct{}, fmt.Errorf("agentconfig: direct.port %d must be between 1 and %d: %w",
+				directCfg.Port, maxLoopbackPort, errDirectPortRange)
+		}
+
+		if linkPorts[directCfg.Port] {
 			return Direct{}, fmt.Errorf(
-				"agentconfig: direct.port %d collides with a link port",
-				d.Port,
+				"agentconfig: direct.port %d %w",
+				directCfg.Port,
+				errDirectPortCollision,
 			)
 		}
 	}
 
-	return d, nil
+	return directCfg, nil
 }
 
 // validateKey checks a "<svc>.<machine>" link or serve key.
 func validateKey(key string) error {
 	svc, machine, ok := strings.Cut(key, ".")
 	if !ok || !validLabel(svc) || !validLabel(machine) {
-		return fmt.Errorf("key must be <svc>.<machine>")
+		return errKeyFormat
 	}
 
 	return nil
@@ -288,7 +332,8 @@ func validateLoopbackAddr(addr string) error {
 		return fmt.Errorf("address %q must be host:port: %w", addr, err)
 	}
 
-	if _, err = parsePort(portStr); err != nil {
+	_, err = parsePort(portStr)
+	if err != nil {
 		return err
 	}
 
@@ -298,7 +343,7 @@ func validateLoopbackAddr(addr string) error {
 
 	ip, err := netip.ParseAddr(host)
 	if err != nil || !ip.IsLoopback() {
-		return fmt.Errorf("address %q must be a loopback address", addr)
+		return fmt.Errorf("address %q %w", addr, errNotLoopback)
 	}
 
 	return nil
@@ -312,7 +357,7 @@ func loopbackPort(value string) (int, error) {
 	}
 
 	if host != "127.0.0.1" {
-		return 0, fmt.Errorf("value %q must use host 127.0.0.1", value)
+		return 0, fmt.Errorf("value %q %w", value, errHostNotLoopbackIP)
 	}
 
 	port, err := parsePort(portStr)
@@ -326,7 +371,7 @@ func loopbackPort(value string) (int, error) {
 func parsePort(s string) (int, error) {
 	port, err := strconv.Atoi(s)
 	if err != nil || port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port %q", s)
+		return 0, fmt.Errorf("%w %q", errInvalidPort, s)
 	}
 
 	return port, nil
@@ -335,33 +380,33 @@ func parsePort(s string) (int, error) {
 // splitHub parses the hub setting, host or host:port, defaulting the port to 443.
 func splitHub(hub string) (string, int, error) {
 	if hub == "" {
-		return "", 0, errors.New("agentconfig: hub is required")
+		return "", 0, errHubRequired
 	}
 
 	if strings.ContainsAny(hub, "/ ") {
-		return "", 0, fmt.Errorf("agentconfig: hub %q must be host or host:port", hub)
+		return "", 0, fmt.Errorf("agentconfig: hub %q %w", hub, errHubFormat)
 	}
 
 	host, port := hub, defaultHubPort
 
 	if strings.HasPrefix(hub, "[") || strings.Count(hub, ":") == 1 {
-		h, p, err := net.SplitHostPort(hub)
+		splitHost, portStr, err := net.SplitHostPort(hub)
 		if err != nil {
 			return "", 0, fmt.Errorf("agentconfig: hub %q: %w", hub, err)
 		}
 
-		n, err := parsePort(p)
+		splitPort, err := parsePort(portStr)
 		if err != nil {
 			return "", 0, fmt.Errorf("agentconfig: hub %q: %w", hub, err)
 		}
 
-		host, port = h, n
+		host, port = splitHost, splitPort
 	} else if strings.Contains(hub, ":") {
-		return "", 0, fmt.Errorf("agentconfig: hub %q: IPv6 literals must be bracketed", hub)
+		return "", 0, fmt.Errorf("agentconfig: hub %q: %w", hub, errHubIPv6Brackets)
 	}
 
 	if host == "" {
-		return "", 0, fmt.Errorf("agentconfig: hub %q has no host", hub)
+		return "", 0, fmt.Errorf("agentconfig: hub %q %w", hub, errHubNoHost)
 	}
 
 	return host, port, nil

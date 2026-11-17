@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"time"
 
@@ -20,54 +22,67 @@ const (
 // agent-to-agent stream. The agent trusts the hub's authorization. Relayed
 // streams get a StreamReply once the local dial settles; viewer streams carry
 // raw HTTP straight away and get none.
-func (a *Agent) handleHubStream(st *yamux.Stream) {
-	_ = st.SetReadDeadline(time.Now().Add(hubHeaderTimeout))
+func (agent *Agent) handleHubStream(st *yamux.Stream) {
+	setDeadline(st.SetReadDeadline, time.Now().Add(hubHeaderTimeout))
 
 	var hdr proto.StreamHeader
-	if err := proto.ReadLine(st, &hdr); err != nil {
-		a.log.Debug("hub stream header unreadable", "err", err)
+
+	err := proto.ReadLine(st, &hdr)
+	if err != nil {
+		agent.log.Debug("Hub stream header unreadable", slog.Any("err", err))
+
 		_ = st.Close()
 
 		return
 	}
 
-	_ = st.SetReadDeadline(time.Time{})
+	setDeadline(st.SetReadDeadline, time.Time{})
 
 	relayed := hdr.From != ""
 
 	if !relayed && hdr.Viewer == "" {
-		a.log.Warn("hub stream refused", "reason", "no viewer or source", "svc", hdr.Svc)
+		agent.log.Warn("Hub stream refused", slog.String("reason", "no viewer or source"),
+			slog.String("svc", hdr.Svc),
+		)
+
 		_ = st.Close()
 
 		return
 	}
 
-	target, ok := a.cfg.Serve[hdr.Svc]
+	target, ok := agent.cfg.Serve[hdr.Svc]
 	if !ok {
-		a.log.Warn("hub stream refused", "reason", "service not served", "svc", hdr.Svc,
-			"viewer", hdr.Viewer, "from", hdr.From)
-		a.replyIf(relayed, st, proto.StreamReply{OK: false, Error: "service not served"})
+		agent.log.Warn("Hub stream refused", slog.String("reason", "service not served"),
+			slog.String("svc", hdr.Svc),
+			slog.String("viewer", hdr.Viewer),
+			slog.String("from", hdr.From),
+		)
+		agent.replyIf(relayed, st, proto.StreamReply{OK: false, Error: "service not served"})
 		_ = st.Close()
 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(a.ctx, localDialTimeout)
+	ctx, cancel := context.WithTimeout(agent.ctx, localDialTimeout)
 	defer cancel()
 
 	d := net.Dialer{}
 
 	conn, err := d.DialContext(ctx, "tcp", target)
 	if err != nil {
-		a.log.Warn("local dial failed", "svc", hdr.Svc, "target", target, "err", err)
-		a.replyIf(relayed, st, proto.StreamReply{OK: false, Error: "service unavailable"})
+		agent.log.Warn("Local dial failed", slog.String("svc", hdr.Svc),
+			slog.String("target", target),
+			slog.Any("err", err),
+		)
+		agent.replyIf(relayed, st, proto.StreamReply{OK: false, Error: "service unavailable"})
 		_ = st.Close()
 
 		return
 	}
 
 	if relayed {
-		if err = proto.WriteLine(st, proto.StreamReply{OK: true}); err != nil {
+		err = proto.WriteLine(st, proto.StreamReply{OK: true})
+		if err != nil {
 			_ = conn.Close()
 			_ = st.Close()
 
@@ -78,8 +93,18 @@ func (a *Agent) handleHubStream(st *yamux.Stream) {
 	tunnel.Join(st, conn)
 }
 
-func (a *Agent) replyIf(cond bool, st *yamux.Stream, r proto.StreamReply) {
+func (agent *Agent) replyIf(cond bool, st *yamux.Stream, r proto.StreamReply) {
 	if cond {
-		_ = proto.WriteLine(st, r)
+		replyQuietly(st, r)
 	}
+}
+
+// setDeadline is best effort: a dead connection fails the next I/O call anyway.
+func setDeadline(set func(time.Time) error, deadline time.Time) {
+	_ = set(deadline) //nolint:errcheck // a dead conn fails the next I/O call anyway
+}
+
+// replyQuietly writes a reply nobody is obliged to receive; the peer may be gone.
+func replyQuietly(w io.Writer, reply proto.StreamReply) {
+	_ = proto.WriteLine(w, reply) //nolint:errcheck // best-effort reply to a dropped peer
 }

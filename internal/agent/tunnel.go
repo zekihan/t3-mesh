@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -36,34 +37,32 @@ func (e *rejectError) Error() string {
 
 // session is one tunnel session to the hub.
 type session struct {
-	a       *Agent
-	conn    net.Conn
-	ymx     *yamux.Session
-	ctrl    *tunnel.Control
 	peer    netip.Addr
 	local   netip.Addr
-	ack     proto.HelloAck
 	started time.Time
-
-	done chan struct{}
-	once sync.Once
-
+	conn    net.Conn
+	a       *Agent
+	ymx     *yamux.Session
+	ctrl    *tunnel.Control
+	done    chan struct{}
 	renewCh chan proto.Message
+	ack     proto.HelloAck
+	once    sync.Once
 }
 
-func (s *session) close() {
-	s.once.Do(func() {
-		_ = s.ctrl.Close()
-		_ = s.ymx.Close()
-		_ = s.conn.Close()
+func (sess *session) close() {
+	sess.once.Do(func() {
+		_ = sess.ctrl.Close()
+		_ = sess.ymx.Close()
+		_ = sess.conn.Close()
 
-		close(s.done)
+		close(sess.done)
 	})
 }
 
 // openStreams is the number of open streams excluding the control stream.
-func (s *session) openStreams() int {
-	return max(s.ymx.NumStreams()-1, 0)
+func (sess *session) openStreams() int {
+	return max(sess.ymx.NumStreams()-1, 0)
 }
 
 func addrOf(a net.Addr) netip.Addr {
@@ -74,59 +73,59 @@ func addrOf(a net.Addr) netip.Addr {
 	return netip.Addr{}
 }
 
-func (a *Agent) tunnelTLS(ident tls.Certificate) *tls.Config {
+func (agent *Agent) tunnelTLS(ident *tls.Certificate) *tls.Config {
 	cfg := &tls.Config{}
-	if a.hubTLS != nil {
-		cfg = a.hubTLS.Clone()
+	if agent.hubTLS != nil {
+		cfg = agent.hubTLS.Clone()
 	}
 
 	cfg.MinVersion = tls.VersionTLS13
 	cfg.NextProtos = []string{proto.TunnelALPN(proto.ProtocolVersion)}
-	cfg.Certificates = []tls.Certificate{ident}
+	cfg.Certificates = []tls.Certificate{*ident}
 
 	if cfg.ServerName == "" {
-		cfg.ServerName = a.cfg.HubHost()
+		cfg.ServerName = agent.cfg.HubHost()
 	}
 
 	return cfg
 }
 
 // hello builds the Hello for ident.
-func (a *Agent) hello(ident tls.Certificate) proto.Hello {
-	services := make([]string, 0, len(a.cfg.Serve))
-	for svc := range a.cfg.Serve {
+func (agent *Agent) hello(ident *tls.Certificate) proto.Hello {
+	services := make([]string, 0, len(agent.cfg.Serve))
+	for svc := range agent.cfg.Serve {
 		services = append(services, svc)
 	}
 
 	slices.Sort(services)
 
-	h := proto.Hello{Version: a.version, Services: services}
+	hello := proto.Hello{Version: agent.version, Services: services}
 	if ident.Leaf != nil {
-		h.CertFingerprint = pki.Fingerprint(ident.Leaf)
+		hello.CertFingerprint = pki.Fingerprint(ident.Leaf)
 	}
 
-	if a.cfg.Direct.Enabled {
-		h.DirectPort = a.cfg.Direct.Port
-		h.LANAddrs = a.lanAddrs()
+	if agent.cfg.Direct.Enabled {
+		hello.DirectPort = agent.cfg.Direct.Port
+		hello.LANAddrs = agent.lanAddrs()
 	}
 
-	return h
+	return hello
 }
 
 // lanAddrs returns the local addresses inside the cached home CIDRs. Before the
 // hub has ever sent them, it falls back to every private, non-link-local
 // address, so the first Hello still lets the hub build a peer table.
-func (a *Agent) lanAddrs() []string {
-	local, err := a.localAddrs()
+func (agent *Agent) lanAddrs() []string {
+	local, err := agent.localAddrs()
 	if err != nil {
-		a.log.Warn("list local addresses", "err", err)
+		agent.log.Warn("List local addresses", slog.Any("err", err))
 
 		return nil
 	}
 
-	a.mu.Lock()
-	prefixes := a.prefixes
-	a.mu.Unlock()
+	agent.mu.Lock()
+	prefixes := agent.prefixes
+	agent.mu.Unlock()
 
 	var picked []netip.Addr
 
@@ -164,10 +163,10 @@ func (a *Agent) lanAddrs() []string {
 
 // connect dials the hub with ident, opens the control stream and completes the
 // Hello/HelloAck exchange. The returned session is not yet adopted.
-func (a *Agent) connect(ctx context.Context, ident tls.Certificate) (*session, error) {
+func (agent *Agent) connect(ctx context.Context, ident *tls.Certificate) (*session, error) {
 	d := net.Dialer{Timeout: dialTimeout}
 
-	raw, err := d.DialContext(ctx, "tcp", a.cfg.HubAddr())
+	raw, err := d.DialContext(ctx, "tcp", agent.cfg.HubAddr())
 	if err != nil {
 		return nil, fmt.Errorf("dial hub: %w", err)
 	}
@@ -175,8 +174,10 @@ func (a *Agent) connect(ctx context.Context, ident tls.Certificate) (*session, e
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 
-	tc := tls.Client(raw, a.tunnelTLS(ident))
-	if err = tc.HandshakeContext(hctx); err != nil {
+	tc := tls.Client(raw, agent.tunnelTLS(ident))
+
+	err = tc.HandshakeContext(hctx)
+	if err != nil {
 		_ = raw.Close()
 
 		return nil, fmt.Errorf("tls handshake with hub: %w", err)
@@ -198,29 +199,30 @@ func (a *Agent) connect(ctx context.Context, ident tls.Certificate) (*session, e
 
 	ctrl := tunnel.NewControl(stream)
 
-	s := &session{
-		a: a, conn: tc, ymx: ymx, ctrl: ctrl,
+	sess := &session{
+		a: agent, conn: tc, ymx: ymx, ctrl: ctrl,
 		peer: addrOf(raw.RemoteAddr()), local: addrOf(raw.LocalAddr()),
-		started: a.now(), done: make(chan struct{}),
+		started: agent.now(), done: make(chan struct{}),
 		renewCh: make(chan proto.Message, 1),
 	}
 
-	if err = ctrl.Send(a.hello(ident)); err != nil {
-		s.close()
+	err = ctrl.Send(agent.hello(ident))
+	if err != nil {
+		sess.close()
 
 		return nil, fmt.Errorf("send hello: %w", err)
 	}
 
 	ack, err := awaitAck(ctx, ctrl)
 	if err != nil {
-		s.close()
+		sess.close()
 
 		return nil, err
 	}
 
-	s.ack = ack
+	sess.ack = ack
 
-	return s, nil
+	return sess, nil
 }
 
 func awaitAck(ctx context.Context, ctrl *tunnel.Control) (proto.HelloAck, error) {
@@ -242,60 +244,69 @@ func awaitAck(ctx context.Context, ctrl *tunnel.Control) (proto.HelloAck, error)
 		case proto.Reject:
 			return proto.HelloAck{}, &rejectError{rej: m}
 		default:
-			return proto.HelloAck{}, fmt.Errorf("unexpected %s before HelloAck", msg.MessageType())
+			return proto.HelloAck{}, fmt.Errorf(
+				"%s before HelloAck: %w",
+				msg.MessageType(),
+				errUnexpectedReply,
+			)
 		}
 	case <-timer.C:
-		return proto.HelloAck{}, errors.New("no HelloAck from hub")
+		return proto.HelloAck{}, errNoHelloAck
 	case <-ctx.Done():
 		return proto.HelloAck{}, fmt.Errorf("waiting for HelloAck: %w", ctx.Err())
 	}
 }
 
 // handleConnectErr logs a failed connect and feeds a Reject to the updater.
-func (a *Agent) handleConnectErr(err error) {
+func (agent *Agent) handleConnectErr(err error) {
 	if rej, ok := errors.AsType[*rejectError](err); ok {
-		a.log.Warn(
-			"hub rejected session",
-			"reason",
-			rej.rej.Reason,
-			"detail",
-			rej.rej.Detail,
-			"version",
-			rej.rej.Version,
+		agent.log.Warn(
+			"Hub rejected session",
+			slog.Any("reason", rej.rej.Reason),
+			slog.Any("detail", rej.rej.Detail),
+			slog.Any("version", rej.rej.Version),
 		)
-		a.warn("hub rejected session: " + rej.rej.Reason)
+		agent.warn("hub rejected session: " + rej.rej.Reason)
 
-		if a.upd != nil {
-			a.upd.OnReject(rej.rej)
+		if agent.upd != nil {
+			agent.upd.OnReject(rej.rej)
 		}
 
 		return
 	}
 
-	a.log.Warn("tunnel connect failed", "err", err)
+	agent.log.Warn("Tunnel connect failed", slog.Any("err", err))
 }
 
 // connectNewest connects with the pending renewed identity when one is on
 // disk, promoting it on success, and otherwise with the current identity. The
 // hub admits only the newest issued leaf, which is the renewed one from the
 // moment the hub issued it, so a renewal whose first tunnel failed must not
-// leave the agent dialling with the old certificate.
-func (a *Agent) connectNewest(ctx context.Context) (*session, error) {
-	next, _, err := a.store.LoadNext()
+// leave the agent dialing with the old certificate.
+func (agent *Agent) connectNewest(ctx context.Context) (*session, error) {
+	next, _, err := agent.store.LoadNext()
 	if err != nil {
-		return a.connect(ctx, a.identity())
+		current := agent.identity()
+
+		return agent.connect(ctx, &current)
 	}
 
-	s, nerr := a.connect(ctx, next)
+	sess, nerr := agent.connect(ctx, &next)
 	if nerr == nil {
-		a.promote(next)
+		agent.promote(&next)
 
-		return s, nil
+		return sess, nil
 	}
 
-	a.log.Warn("tunnel with pending renewed certificate failed", "err", nerr)
+	agent.log.WarnContext(
+		ctx,
+		"Tunnel with pending renewed certificate failed",
+		slog.Any("err", nerr),
+	)
 
-	s, err = a.connect(ctx, a.identity())
+	current := agent.identity()
+
+	sess, err = agent.connect(ctx, &current)
 	if err != nil {
 		return nil, err
 	}
@@ -303,193 +314,195 @@ func (a *Agent) connectNewest(ctx context.Context) (*session, error) {
 	// The hub admitted the current leaf and refused the pending one, so the
 	// pending one was superseded or never became the newest.
 	if _, rejected := errors.AsType[*rejectError](nerr); rejected {
-		a.discardNext()
+		agent.discardNext()
 	}
 
-	return s, nil
+	return sess, nil
 }
 
 // establish connects when no session is current.
-func (a *Agent) establish(ctx context.Context) error {
-	a.dialMu.Lock()
-	defer a.dialMu.Unlock()
+func (agent *Agent) establish(ctx context.Context) error {
+	agent.dialMu.Lock()
+	defer agent.dialMu.Unlock()
 
-	if a.current() != nil {
+	if agent.current() != nil {
 		return nil
 	}
 
-	s, err := a.connectNewest(ctx)
+	sess, err := agent.connectNewest(ctx)
 	if err != nil {
-		a.handleConnectErr(err)
+		agent.handleConnectErr(err)
 
 		return err
 	}
 
-	a.adopt(s)
+	agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
 
 	return nil
 }
 
 // adopt makes s the current session, applies its HelloAck and starts its
 // goroutines. It returns the previous current session, if any.
-func (a *Agent) adopt(s *session) *session {
-	a.mu.Lock()
-	a.applyAckLocked(s.ack)
-	old := a.cur
-	a.cur = s
-	a.live[s] = struct{}{}
-	a.lastHelloAck = a.now()
-	a.mu.Unlock()
+func (agent *Agent) adopt(sess *session) *session {
+	agent.mu.Lock()
+	agent.applyAckLocked(&sess.ack)
+	old := agent.cur
+	agent.cur = sess
+	agent.live[sess] = struct{}{}
+	agent.lastHelloAck = agent.now()
+	agent.mu.Unlock()
 
-	a.saveCache()
+	agent.saveCache()
 
-	a.log.Info("tunnel connected", "machine", s.ack.Machine, "home", s.ack.Home,
-		"peer", s.peer.String(), "release", s.ack.Release.Version)
+	agent.log.Info("Tunnel connected", slog.String("machine", sess.ack.Machine),
+		slog.Bool("home", sess.ack.Home),
+		slog.String("peer", sess.peer.String()),
+		slog.String("release", sess.ack.Release.Version),
+	)
 
-	if a.upd != nil {
-		a.upd.HelloAckReceived()
+	if agent.upd != nil {
+		agent.upd.HelloAckReceived()
 
-		if s.ack.Release.Version != "" {
-			a.upd.OnRelease(s.ack.Release)
+		if sess.ack.Release.Version != "" {
+			agent.upd.OnRelease(sess.ack.Release)
 		}
 	}
 
-	s.start()
-	a.reconcileDirect()
-	signal(a.curChanged)
-	signal(a.statusNudge)
-	signal(a.renewKick)
+	sess.start()
+	agent.reconcileDirect()
+	signal(agent.curChanged)
+	signal(agent.statusNudge)
+	signal(agent.renewKick)
 
 	return old
 }
 
-func (a *Agent) applyAckLocked(ack proto.HelloAck) {
-	c := a.cache
-	c.Machine = ack.Machine
-	c.Home = ack.Home
-	c.Release = ack.Release
-	c.Rules = ack.Rules
-	c.Peers = ack.Peers
-	c.Revocations = ack.Revocations
-	c.TrustBundle = ack.TrustBundle
+func (agent *Agent) applyAckLocked(ack *proto.HelloAck) {
+	cache := agent.cache
+	cache.Machine = ack.Machine
+	cache.Home = ack.Home
+	cache.Release = ack.Release
+	cache.Rules = ack.Rules
+	cache.Peers = ack.Peers
+	cache.Revocations = ack.Revocations
+	cache.TrustBundle = ack.TrustBundle
 
 	if len(ack.HomeCIDRs) > 0 {
-		c.HomeCIDRs = ack.HomeCIDRs
+		cache.HomeCIDRs = ack.HomeCIDRs
 	}
 
-	c.LastHubContact = a.now()
+	cache.LastHubContact = agent.now()
 
 	if ack.Home {
-		a.cacheGatewayLocked()
+		agent.cacheGatewayLocked()
 	}
 
-	a.deriveLocked()
+	agent.deriveLocked()
 }
 
 // cacheGatewayLocked records the default gateway MAC of a hub-confirmed home
 // session.
-func (a *Agent) cacheGatewayLocked() {
-	mac, err := a.gatewayMAC()
+func (agent *Agent) cacheGatewayLocked() {
+	mac, err := agent.gatewayMAC()
 	if err != nil {
-		a.log.Warn("home gateway unknown", "err", err)
+		agent.log.Warn("Home gateway unknown", slog.Any("err", err))
 
 		return
 	}
 
-	a.cache.HomeGatewayMAC = mac
+	agent.cache.HomeGatewayMAC = mac
 }
 
-func (s *session) start() {
-	a := s.a
+func (sess *session) start() {
+	agent := sess.a
 
-	a.wg.Go(func() {
+	agent.wg.Go(func() {
 		select {
-		case <-a.ctx.Done():
-			s.close()
-		case <-s.done:
+		case <-agent.ctx.Done():
+			sess.close()
+		case <-sess.done:
 		}
 	})
-	a.wg.Go(func() {
-		defer s.close()
+	agent.wg.Go(func() {
+		defer sess.close()
 
-		for msg := range s.ctrl.Messages() {
-			a.handleMessage(s, msg)
+		for msg := range sess.ctrl.Messages() {
+			agent.handleMessage(sess, msg)
 		}
 	})
-	a.wg.Go(func() {
-		defer s.close()
+	agent.wg.Go(func() {
+		defer sess.close()
 
 		for {
-			st, err := s.ymx.AcceptStream()
+			st, err := sess.ymx.AcceptStream()
 			if err != nil {
 				return
 			}
 
-			go a.handleHubStream(st)
+			go agent.handleHubStream(st)
 		}
 	})
-	a.wg.Go(func() {
-		err := s.ctrl.RunLiveness(a.ctx, tunnel.PingInterval, tunnel.MaxMissed)
+	agent.wg.Go(func() {
+		err := sess.ctrl.RunLiveness(agent.ctx, tunnel.PingInterval, tunnel.MaxMissed)
 		if errors.Is(err, tunnel.ErrDead) {
-			a.log.Warn("tunnel liveness lost", "peer", s.peer.String())
+			agent.log.Warn("Tunnel liveness lost", slog.String("peer", sess.peer.String()))
 		}
 
-		s.close()
+		sess.close()
 	})
-	a.wg.Go(func() {
-		t := time.NewTicker(touchPoll)
-		defer t.Stop()
+	agent.wg.Go(func() {
+		ticker := time.NewTicker(touchPoll)
+		defer ticker.Stop()
 
 		for {
 			select {
-			case <-s.done:
-				a.sessionEnded(s)
+			case <-sess.done:
+				agent.sessionEnded(sess)
 
 				return
-			case <-t.C:
-				if time.Since(s.ctrl.LastPong()) < 2*tunnel.PingInterval {
-					a.touchHub()
+			case <-ticker.C:
+				if time.Since(sess.ctrl.LastPong()) < 2*tunnel.PingInterval {
+					agent.touchHub()
 				}
 			}
 		}
 	})
 }
 
-func (a *Agent) sessionEnded(s *session) {
-	a.mu.Lock()
-	delete(a.live, s)
+func (agent *Agent) sessionEnded(sess *session) {
+	agent.mu.Lock()
+	delete(agent.live, sess)
 
-	wasCur := a.cur == s
+	wasCur := agent.cur == sess
 	if wasCur {
-		a.cur = nil
+		agent.cur = nil
 	}
-	a.mu.Unlock()
+	agent.mu.Unlock()
 
-	a.log.Info(
-		"tunnel closed",
-		"peer",
-		s.peer.String(),
-		"current",
-		wasCur,
-		"err",
-		fmt.Sprint(s.ctrl.Err()),
+	agent.log.Info(
+		"Tunnel closed",
+		slog.String("peer", sess.peer.String()),
+		slog.Bool("current", wasCur),
+		slog.Any("err", sess.ctrl.Err()),
 	)
 
 	if wasCur {
-		a.saveCache()
-		a.reconcileDirect()
+		agent.saveCache()
+		agent.reconcileDirect()
 	}
 
-	signal(a.curChanged)
+	signal(agent.curChanged)
 }
 
 // retire closes a replaced session once its streams have ended. A session that
 // stops answering pings is closed by its own liveness loop.
-func (a *Agent) retire(old *session) {
-	a.log.Info("tunnel retiring", "peer", old.peer.String(), "streams", old.openStreams())
+func (agent *Agent) retire(old *session) {
+	agent.log.Info("Tunnel retiring", slog.String("peer", old.peer.String()),
+		slog.Int("streams", old.openStreams()),
+	)
 
-	t := time.NewTicker(retirePoll)
-	defer t.Stop()
+	ticker := time.NewTicker(retirePoll)
+	defer ticker.Stop()
 
 	for {
 		if old.openStreams() == 0 {
@@ -501,17 +514,17 @@ func (a *Agent) retire(old *session) {
 		select {
 		case <-old.done:
 			return
-		case <-a.ctx.Done():
+		case <-agent.ctx.Done():
 			return
-		case <-t.C:
+		case <-ticker.C:
 		}
 	}
 }
 
-func (a *Agent) delay(attempt int) time.Duration {
-	limit := a.backoffMax
-	if attempt < 30 {
-		limit = min(limit, a.backoffBase<<attempt)
+func (agent *Agent) delay(attempt int) time.Duration {
+	limit := agent.backoffMax
+	if attempt < maxBackoffShift {
+		limit = min(limit, agent.backoffBase<<attempt)
 	}
 
 	if limit <= 0 {
@@ -521,7 +534,7 @@ func (a *Agent) delay(attempt int) time.Duration {
 	return time.Duration(rand.Int64N(int64(limit) + 1)) //nolint:gosec // jitter, not security
 }
 
-func (a *Agent) sleep(ctx context.Context, d time.Duration) {
+func (agent *Agent) sleep(ctx context.Context, d time.Duration) {
 	if d <= 0 {
 		return
 	}
@@ -531,21 +544,21 @@ func (a *Agent) sleep(ctx context.Context, d time.Duration) {
 
 	select {
 	case <-ctx.Done():
-	case <-a.kick:
+	case <-agent.kick:
 	case <-t.C:
 	}
 }
 
 // tunnelLoop keeps a current session, reconnecting with exponential backoff and
 // full jitter capped at backoffMax.
-func (a *Agent) tunnelLoop(ctx context.Context) {
+func (agent *Agent) tunnelLoop(ctx context.Context) {
 	attempt := 0
 	wasUp := false
 
 	var connectedAt time.Time
 
 	for ctx.Err() == nil {
-		if a.current() != nil {
+		if agent.current() != nil {
 			if connectedAt.IsZero() {
 				connectedAt = time.Now()
 			}
@@ -553,7 +566,7 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-a.curChanged:
+			case <-agent.curChanged:
 			}
 
 			continue
@@ -571,7 +584,7 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 		}
 
 		if wasUp {
-			a.sleep(ctx, a.delay(attempt))
+			agent.sleep(ctx, agent.delay(attempt))
 
 			wasUp = false
 
@@ -580,10 +593,11 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 			}
 		}
 
-		if err := a.establish(ctx); err != nil {
+		err := agent.establish(ctx)
+		if err != nil {
 			attempt++
 
-			a.sleep(ctx, a.delay(attempt))
+			agent.sleep(ctx, agent.delay(attempt))
 		}
 	}
 }
@@ -591,69 +605,69 @@ func (a *Agent) tunnelLoop(ctx context.Context) {
 // replaceSession opens a new session with the current identity. On success the
 // new session becomes current and the old one is retired; on failure nothing
 // changes.
-func (a *Agent) replaceSession(ctx context.Context, reason string) bool {
-	a.dialMu.Lock()
-	defer a.dialMu.Unlock()
+func (agent *Agent) replaceSession(ctx context.Context, reason string) bool {
+	agent.dialMu.Lock()
+	defer agent.dialMu.Unlock()
 
-	a.log.Info("tunnel replacing", "reason", reason)
+	agent.log.InfoContext(ctx, "Tunnel replacing", slog.String("reason", reason))
 
-	s, err := a.connectNewest(ctx)
+	sess, err := agent.connectNewest(ctx)
 	if err != nil {
-		a.handleConnectErr(err)
+		agent.handleConnectErr(err)
 
 		return false
 	}
 
-	if old := a.adopt(s); old != nil {
-		a.wg.Go(func() { a.retire(old) })
+	old := agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	if old != nil {
+		agent.wg.Go(func() { agent.retire(old) })
 	}
 
 	return true
 }
 
-func (a *Agent) handleMessage(s *session, msg proto.Message) {
-	switch m := msg.(type) {
+func (agent *Agent) handleMessage(sess *session, msg proto.Message) {
+	switch typed := msg.(type) {
 	case proto.Update:
-		a.applyUpdate(m)
+		agent.applyUpdate(typed)
 	case proto.Release:
-		a.mu.Lock()
-		a.cache.Release = m
-		a.mu.Unlock()
+		agent.mu.Lock()
+		agent.cache.Release = typed
+		agent.mu.Unlock()
 
-		a.log.Info("release advertised", "version", m.Version, "revision", m.Revision)
+		agent.log.Info("Release advertised", slog.String("version", typed.Version),
+			slog.String("revision", typed.Revision),
+		)
 
-		if a.upd != nil {
-			a.upd.OnRelease(m)
+		if agent.upd != nil {
+			agent.upd.OnRelease(typed)
 		}
 
-		signal(a.statusNudge)
+		signal(agent.statusNudge)
 	case proto.Renewed:
-		deliver(s.renewCh, m)
+		deliver(sess.renewCh, typed)
 	case proto.Reject:
-		if m.Reason == proto.RejectRenewFailed {
-			deliver(s.renewCh, m)
+		if typed.Reason == proto.RejectRenewFailed {
+			deliver(sess.renewCh, typed)
 
 			return
 		}
 
-		a.log.Warn(
-			"hub rejected session",
-			"reason",
-			m.Reason,
-			"detail",
-			m.Detail,
-			"version",
-			m.Version,
+		agent.log.Warn(
+			"Hub rejected session",
+			slog.String("reason", typed.Reason),
+			slog.String("detail", typed.Detail),
+			slog.String("version", typed.Version),
 		)
-		a.warn("hub rejected session: " + m.Reason)
+		agent.warn("hub rejected session: " + typed.Reason)
 
-		if a.upd != nil {
-			a.upd.OnReject(m)
+		if agent.upd != nil {
+			agent.upd.OnReject(typed)
 		}
 
-		s.close()
+		sess.close()
 	default:
-		a.log.Debug("unexpected control message", "type", msg.MessageType())
+		agent.log.Debug("Unexpected control message", slog.String("type", msg.MessageType()))
 	}
 }
 
@@ -664,29 +678,33 @@ func deliver(ch chan proto.Message, m proto.Message) {
 	}
 }
 
-func (a *Agent) applyUpdate(u proto.Update) {
+func (agent *Agent) applyUpdate(update proto.Update) {
 	var mac string
 
-	if u.Home != nil && *u.Home {
-		mac, _ = a.gatewayMAC() //nolint:errcheck // best effort, keeps the previous MAC
+	if update.Home != nil && *update.Home {
+		mac, _ = agent.gatewayMAC() //nolint:errcheck // best effort, keeps the previous MAC
 	}
 
-	a.mu.Lock()
-	a.cache.Apply(u)
-	a.cache.LastHubContact = a.now()
+	agent.mu.Lock()
+	agent.cache.Apply(update)
+	agent.cache.LastHubContact = agent.now()
 
 	if mac != "" {
-		a.cache.HomeGatewayMAC = mac
+		agent.cache.HomeGatewayMAC = mac
 	}
 
-	a.deriveLocked()
-	a.mu.Unlock()
+	agent.deriveLocked()
+	agent.mu.Unlock()
 
-	a.saveCache()
-	a.log.Info("update applied",
-		"home", u.Home != nil, "rules", u.Rules != nil, "peers", u.Peers != nil,
-		"revocations", u.Revocations != nil, "trust_bundle", u.TrustBundle != nil)
+	agent.saveCache()
+	agent.log.Info("Update applied",
+		slog.Bool("home", update.Home != nil),
+		slog.Bool("rules", update.Rules != nil),
+		slog.Bool("peers", update.Peers != nil),
+		slog.Bool("revocations", update.Revocations != nil),
+		slog.Bool("trustBundle", update.TrustBundle != nil),
+	)
 
-	a.reconcileDirect()
-	signal(a.statusNudge)
+	agent.reconcileDirect()
+	signal(agent.statusNudge)
 }

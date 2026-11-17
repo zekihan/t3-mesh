@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -16,16 +18,16 @@ import (
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
 
-func (m *Manager) serverTLS() *tls.Config {
+func (mgr *Manager) serverTLS() *tls.Config {
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
 		NextProtos:             []string{proto.ALPNDirect},
 		ClientAuth:             tls.RequireAnyClientCert,
 		SessionTicketsDisabled: true,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			v := m.view()
+			v := mgr.view()
 			if len(v.Identity.Certificate) == 0 {
-				return nil, errors.New("direct: no identity")
+				return nil, errNoIdentity
 			}
 
 			c := v.Identity
@@ -33,17 +35,13 @@ func (m *Manager) serverTLS() *tls.Config {
 			return &c, nil
 		},
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			v := m.view()
+			v := mgr.view()
 			if v.Roots == nil {
-				return errors.New("direct: no trust bundle")
+				return errNoTrustBundle
 			}
 
-			if _, err := pki.VerifyPeer(
-				raw,
-				v.Roots,
-				x509.ExtKeyUsageClientAuth,
-				m.now(),
-			); err != nil {
+			_, err := pki.VerifyPeer(raw, v.Roots, x509.ExtKeyUsageClientAuth, mgr.now())
+			if err != nil {
 				return fmt.Errorf("verify caller: %w", err)
 			}
 
@@ -52,128 +50,154 @@ func (m *Manager) serverTLS() *tls.Config {
 	}
 }
 
-func (m *Manager) acceptLoop(ln net.Listener) {
-	defer m.wg.Done()
+func (mgr *Manager) acceptLoop(ln net.Listener) {
+	defer mgr.wg.Done()
 
 	for {
-		c, err := ln.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 
-			m.log.Warn("direct accept", "err", err)
+			mgr.log.Warn("Direct accept", slog.Any("err", err))
 
 			select {
-			case <-m.ctx.Done():
+			case <-mgr.ctx.Done():
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(acceptRetryDelay):
 			}
 
 			continue
 		}
 
-		m.mu.Lock()
-		if m.closed {
-			m.mu.Unlock()
+		mgr.mu.Lock()
+		if mgr.closed {
+			mgr.mu.Unlock()
 
-			_ = c.Close()
+			_ = conn.Close()
 
 			return
 		}
 
-		m.pending[c] = struct{}{}
-		m.wg.Add(1)
-		m.mu.Unlock()
+		mgr.pending[conn] = struct{}{}
+		mgr.wg.Add(1)
+		mgr.mu.Unlock()
 
-		go m.serve(c)
+		go mgr.serve(conn)
 	}
 }
 
-func (m *Manager) refuse(tc net.Conn, why string, args ...any) {
-	m.log.Info("direct caller refused", append([]any{"reason", why}, args...)...)
+func (mgr *Manager) refuse(tc net.Conn, why string, attrs ...slog.Attr) {
+	mgr.log.LogAttrs(
+		mgr.ctx,
+		slog.LevelInfo,
+		"Direct caller refused",
+		append([]slog.Attr{slog.String("reason", why)}, attrs...)...,
+	)
 
-	_ = tc.SetWriteDeadline(time.Now().Add(time.Second))
-	_ = proto.WriteLine(tc, proto.StreamReply{OK: false, Error: "refused"})
+	setDeadline(tc.SetWriteDeadline, time.Now().Add(time.Second))
+	replyQuietly(tc, proto.StreamReply{OK: false, Error: "refused"})
 	_ = tc.Close()
 }
 
-func (m *Manager) serve(raw net.Conn) {
-	defer m.wg.Done()
+// handshake completes the TLS handshake with a caller and checks that it is an
+// agent. It refuses the connection and returns ok=false otherwise.
+func (mgr *Manager) handshake(raw net.Conn) (*tls.Conn, string, *x509.Certificate, bool) {
+	tc := tls.Server(raw, mgr.serverTLS())
 
-	defer func() {
-		m.mu.Lock()
-		delete(m.pending, raw)
-		m.mu.Unlock()
-	}()
-
-	if ok, reason := m.Active(); !ok {
-		m.log.Debug("direct connection refused", "reason", reason)
-
-		_ = raw.Close()
-
-		return
-	}
-
-	_ = raw.SetDeadline(time.Now().Add(serverSetupLimit))
-
-	tc := tls.Server(raw, m.serverTLS())
-
-	ctx, cancel := context.WithTimeout(m.ctx, serverSetupLimit)
+	ctx, cancel := context.WithTimeout(mgr.ctx, serverSetupLimit)
 	defer cancel()
 
-	if err := tc.HandshakeContext(ctx); err != nil {
-		m.log.Info("direct handshake failed", "remote", raw.RemoteAddr().String(), "err", err)
+	err := tc.HandshakeContext(ctx)
+	if err != nil {
+		mgr.log.Info("Direct handshake failed", slog.String("remote", raw.RemoteAddr().String()),
+			slog.Any("err", err),
+		)
 
 		_ = raw.Close()
 
-		return
+		return nil, "", nil, false
 	}
 
 	cs := tc.ConnectionState()
 	if cs.NegotiatedProtocol != proto.ALPNDirect || len(cs.PeerCertificates) == 0 {
-		m.refuse(tc, "bad alpn or no certificate")
+		mgr.refuse(tc, "bad alpn or no certificate")
 
-		return
+		return nil, "", nil, false
 	}
 
 	leaf := cs.PeerCertificates[0]
 
 	identity, err := pki.CertIdentity(leaf)
 	if err != nil || !policy.IsAgent(identity) {
-		m.refuse(tc, "caller is not an agent identity", "err", err)
+		mgr.refuse(tc, "caller is not an agent identity", slog.Any("err", err))
 
+		return nil, "", nil, false
+	}
+
+	return tc, identity, leaf, true
+}
+
+func (mgr *Manager) serve(raw net.Conn) {
+	defer mgr.wg.Done()
+
+	defer func() {
+		mgr.mu.Lock()
+		delete(mgr.pending, raw)
+		mgr.mu.Unlock()
+	}()
+
+	if ok, reason := mgr.Active(); !ok {
+		mgr.log.Debug("Direct connection refused", slog.String("reason", reason))
+
+		_ = raw.Close()
+
+		return
+	}
+
+	setDeadline(raw.SetDeadline, time.Now().Add(serverSetupLimit))
+
+	tc, identity, leaf, ok := mgr.handshake(raw)
+	if !ok {
 		return
 	}
 
 	var hdr proto.StreamHeader
-	if err := proto.ReadLine(tc, &hdr); err != nil {
-		m.refuse(tc, "read header", "err", err)
+
+	err := proto.ReadLine(tc, &hdr)
+	if err != nil {
+		mgr.refuse(tc, "read header", slog.Any("err", err))
 
 		return
 	}
 
-	v := m.view()
+	view := mgr.view()
 	machine := strings.TrimPrefix(identity, policy.AgentPrefix)
 
 	// Authorization comes from the rules checked below. The peer table lists
 	// machines this agent may reach, not those that may reach it, so it is not
 	// consulted here.
-	if !policy.IsAgent(identity) || machine == "" || machine == v.Self {
-		m.refuse(tc, "caller is not another agent", "identity", identity)
+	if !policy.IsAgent(identity) || machine == "" || machine == view.Self {
+		mgr.refuse(tc, "caller is not another agent", slog.String("identity", identity))
 
 		return
 	}
 
-	target, ok := m.opts.Serve[hdr.Svc]
+	target, ok := mgr.opts.Serve[hdr.Svc]
 	if !ok || hdr.Svc == "" {
-		m.refuse(tc, "service not served", "identity", identity, "svc", hdr.Svc)
+		mgr.refuse(
+			tc,
+			"service not served",
+			slog.String("identity", identity),
+			slog.String("svc", hdr.Svc),
+		)
 
 		return
 	}
 
-	s := &session{
-		m:            m,
+	sess := &session{
+		m:            mgr,
 		dir:          "in",
 		conn:         tc,
 		local:        localAddrOf(raw),
@@ -182,54 +206,72 @@ func (m *Manager) serve(raw net.Conn) {
 		peerNotAfter: leaf.NotAfter,
 		rule: policy.Session{
 			Identity: identity, Fingerprint: pki.Fingerprint(leaf), NotAfter: leaf.NotAfter,
-			Svc: hdr.Svc, Machine: v.Self,
+			Svc: hdr.Svc, Machine: view.Self,
 		},
 	}
 
-	if err := m.allowed(s, v, m.now()); err != nil {
-		m.refuse(tc, "policy", "err", err)
+	err = mgr.allowed(sess, view, mgr.now())
+	if err != nil {
+		mgr.refuse(tc, "policy", slog.Any("err", err))
 
 		return
 	}
 
-	dctx, dcancel := context.WithTimeout(m.ctx, serverSetupLimit)
-	backend, err := m.opts.Dial(dctx, "tcp", target)
+	dctx, dcancel := context.WithTimeout(mgr.ctx, serverSetupLimit)
+	backend, err := mgr.opts.Dial(dctx, "tcp", target)
 
 	dcancel()
 
 	if err != nil {
-		m.log.Warn("direct serve target unreachable", "svc", hdr.Svc, "err", err)
-		m.refuse(tc, "target unreachable")
+		mgr.log.Warn("Direct serve target unreachable", slog.String("svc", hdr.Svc),
+			slog.Any("err", err),
+		)
+		mgr.refuse(tc, "target unreachable")
 
 		return
 	}
 
-	if !m.register(s) {
+	if !mgr.register(sess) {
 		_ = backend.Close()
 		_ = tc.Close()
 
 		return
 	}
 
-	if err := m.allowed(s, m.view(), m.now()); err != nil {
+	err = mgr.allowed(sess, mgr.view(), mgr.now())
+	if err != nil {
 		_ = backend.Close()
-		_ = s.close()
+		_ = sess.close()
 
 		return
 	}
 
-	if err := proto.WriteLine(tc, proto.StreamReply{OK: true}); err != nil {
+	err = proto.WriteLine(tc, proto.StreamReply{OK: true})
+	if err != nil {
 		_ = backend.Close()
-		_ = s.close()
+		_ = sess.close()
 
 		return
 	}
 
-	_ = raw.SetDeadline(time.Time{})
+	setDeadline(raw.SetDeadline, time.Time{})
 
-	m.log.Info("direct session open", "dir", "in", "peer", identity, "svc", hdr.Svc)
+	mgr.log.Info("Direct session open", slog.String("dir", "in"),
+		slog.String("peer", identity),
+		slog.String("svc", hdr.Svc),
+	)
 
 	tunnel.Join(tc, backend)
 
-	_ = s.close()
+	_ = sess.close()
+}
+
+// setDeadline is best effort: a dead connection fails the next I/O call anyway.
+func setDeadline(set func(time.Time) error, deadline time.Time) {
+	_ = set(deadline) //nolint:errcheck // a dead conn fails the next I/O call anyway
+}
+
+// replyQuietly writes a reply nobody is obliged to receive; the peer may be gone.
+func replyQuietly(w io.Writer, reply proto.StreamReply) {
+	_ = proto.WriteLine(w, reply) //nolint:errcheck // best-effort reply to a dropped peer
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -9,8 +10,8 @@ import (
 )
 
 // netLoop reacts to network changes, wake from sleep and a 30 s DNS backstop.
-func (a *Agent) netLoop(ctx context.Context) {
-	events := netwatch.Watch(ctx, a.log)
+func (agent *Agent) netLoop(ctx context.Context) {
+	events := netwatch.Watch(ctx, agent.log)
 	tick := time.NewTicker(dnsRecheckInterval)
 
 	defer tick.Stop()
@@ -26,10 +27,10 @@ func (a *Agent) netLoop(ctx context.Context) {
 				continue
 			}
 
-			a.log.Debug("network event", "kind", ev.Kind.String())
-			a.pathCheck(ctx, ev.Kind.String())
+			agent.log.DebugContext(ctx, "Network event", slog.String("kind", ev.Kind.String()))
+			agent.pathCheck(ctx, ev.Kind.String())
 		case <-tick.C:
-			a.pathCheck(ctx, "dns-recheck")
+			agent.pathCheck(ctx, "dns-recheck")
 		}
 	}
 }
@@ -38,27 +39,29 @@ func (a *Agent) netLoop(ctx context.Context) {
 // alone never replaces it: only a vanished local address, a failed ping, or a
 // successful non-empty lookup that no longer contains the current peer does. A
 // failed or empty lookup never does.
-func (a *Agent) pathCheck(ctx context.Context, reason string) {
-	a.reconcileDirect()
+func (agent *Agent) pathCheck(ctx context.Context, reason string) {
+	agent.reconcileDirect()
 
-	cur := a.current()
+	cur := agent.current()
 	if cur == nil {
-		signal(a.kick)
+		signal(agent.kick)
 
 		return
 	}
 
-	if why := a.pathProblem(ctx, cur); why != "" {
-		a.log.Info("tunnel path changed", "trigger", reason, "why", why)
+	if why := agent.pathProblem(ctx, cur); why != "" {
+		agent.log.InfoContext(ctx, "Tunnel path changed", slog.String("trigger", reason),
+			slog.String("why", why),
+		)
 
-		if a.current() == cur {
-			a.replaceSession(ctx, why)
+		if agent.current() == cur {
+			agent.replaceSession(ctx, why)
 		}
 	}
 }
 
-func (a *Agent) pathProblem(ctx context.Context, cur *session) string {
-	if cur.local.IsValid() && !a.addrPresent(cur.local) {
+func (agent *Agent) pathProblem(ctx context.Context, cur *session) string {
+	if cur.local.IsValid() && !agent.addrPresent(cur.local) {
 		return "local address gone"
 	}
 
@@ -71,18 +74,20 @@ func (a *Agent) pathProblem(ctx context.Context, cur *session) string {
 		return "ping failed"
 	}
 
-	host := a.cfg.HubHost()
-	if _, perr := netip.ParseAddr(host); perr == nil {
+	host := agent.cfg.HubHost()
+
+	_, perr := netip.ParseAddr(host)
+	if perr == nil {
 		return ""
 	}
 
 	lctx, lcancel := context.WithTimeout(ctx, lookupTimeout)
-	addrs, err := a.lookupHost(lctx, host)
+	addrs, err := agent.lookupHost(lctx, host)
 
 	lcancel()
 
 	if err != nil {
-		a.log.Debug("hub lookup failed, keeping session", "err", err)
+		agent.log.DebugContext(ctx, "Hub lookup failed, keeping session", slog.Any("err", err))
 
 		return ""
 	}

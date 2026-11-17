@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/pki"
@@ -15,73 +15,82 @@ const renewReplyTimeout = 2 * time.Minute
 
 // renewLoop renews the certificate when less than renewWindow remains. It checks
 // hourly and whenever a session is adopted; a failed attempt waits renewRetry.
-func (a *Agent) renewLoop(ctx context.Context) {
-	t := time.NewTicker(a.renewEvery)
-	defer t.Stop()
+func (agent *Agent) renewLoop(ctx context.Context) {
+	ticker := time.NewTicker(agent.renewEvery)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-		case <-a.renewKick:
+		case <-ticker.C:
+		case <-agent.renewKick:
 		}
 
-		a.renewOnce(ctx)
+		agent.renewOnce(ctx)
 	}
 }
 
-func (a *Agent) renewOnce(ctx context.Context) {
-	if !a.renewing.CompareAndSwap(false, true) {
+func (agent *Agent) renewOnce(ctx context.Context) {
+	if !agent.renewing.CompareAndSwap(false, true) {
 		return
 	}
 
-	defer a.renewing.Store(false)
+	defer agent.renewing.Store(false)
 
-	a.mu.Lock()
-	leaf := a.ident.Leaf
-	notBefore := a.renewAfter
-	a.mu.Unlock()
+	agent.mu.Lock()
+	leaf := agent.ident.Leaf
+	notBefore := agent.renewAfter
+	agent.mu.Unlock()
 
-	now := a.now()
+	now := agent.now()
 
-	if leaf == nil || leaf.NotAfter.Sub(now) >= a.renewWindow || now.Before(notBefore) {
+	if leaf == nil || leaf.NotAfter.Sub(now) >= agent.renewWindow || now.Before(notBefore) {
 		return
 	}
 
-	if a.upd != nil && a.upd.OnProbation() {
-		a.log.Info("renewal deferred", "reason", "release on probation")
+	if agent.upd != nil && agent.upd.OnProbation() {
+		agent.log.InfoContext(
+			ctx,
+			"Renewal deferred",
+			slog.String("reason", "release on probation"),
+		)
 
 		return
 	}
 
-	cur := a.current()
+	cur := agent.current()
 	if cur == nil {
 		return
 	}
 
-	a.log.Info("renewal starting", "not_after", leaf.NotAfter.Format(time.RFC3339))
+	agent.log.InfoContext(
+		ctx,
+		"Renewal starting",
+		slog.String("notAfter", leaf.NotAfter.Format(time.RFC3339)),
+	)
 
-	if err := a.renew(ctx, cur); err != nil {
-		a.log.Warn("renewal failed", "err", err)
-		a.warn("certificate renewal failed")
+	err := agent.renew(ctx, cur)
+	if err != nil {
+		agent.log.WarnContext(ctx, "Renewal failed", slog.Any("err", err))
+		agent.warn("certificate renewal failed")
 
-		a.mu.Lock()
-		a.renewAfter = a.now().Add(a.renewRetry)
-		a.mu.Unlock()
+		agent.mu.Lock()
+		agent.renewAfter = agent.now().Add(agent.renewRetry)
+		agent.mu.Unlock()
 	}
 }
 
 // renew gets a new certificate over cur's control stream, proves it with a new
 // tunnel session, then promotes it. The old key and certificate stay until the
 // new session's HelloAck arrived.
-func (a *Agent) renew(ctx context.Context, cur *session) error {
+func (agent *Agent) renew(ctx context.Context, cur *session) error {
 	key, err := pki.GenerateKey()
 	if err != nil {
 		return fmt.Errorf("generate key: %w", err)
 	}
 
-	csr, err := pki.CreateCSR(key, a.cfg.Identity.Name)
+	csr, err := pki.CreateCSR(key, agent.cfg.Identity.Name)
 	if err != nil {
 		return fmt.Errorf("create csr: %w", err)
 	}
@@ -91,7 +100,8 @@ func (a *Agent) renew(ctx context.Context, cur *session) error {
 	default:
 	}
 
-	if err = cur.ctrl.Send(proto.Renew{CSR: string(csr)}); err != nil {
+	err = cur.ctrl.Send(proto.Renew{CSR: string(csr)})
+	if err != nil {
 		return fmt.Errorf("send renew: %w", err)
 	}
 
@@ -106,74 +116,81 @@ func (a *Agent) renew(ctx context.Context, cur *session) error {
 		case proto.Renewed:
 			renewed = m
 		case proto.Reject:
-			return fmt.Errorf("hub refused renewal (%s): %s", m.Reason, m.Detail)
+			return fmt.Errorf("%w (%s): %s", errRenewRefused, m.Reason, m.Detail)
 		}
 	case <-cur.done:
-		return errors.New("session closed during renewal")
+		return errRenewSessionDone
 	case <-timer.C:
-		return errors.New("no renewal reply from hub")
+		return errNoRenewReply
 	case <-ctx.Done():
 		return fmt.Errorf("renewal: %w", ctx.Err())
 	}
 
-	if err = a.store.SaveNext(key, []byte(renewed.Certificate), []byte(renewed.Chain)); err != nil {
-		a.discardNext()
+	err = agent.store.SaveNext(key, []byte(renewed.Certificate), []byte(renewed.Chain))
+	if err != nil {
+		agent.discardNext()
 
 		return fmt.Errorf("save next identity: %w", err)
 	}
 
-	next, _, err := a.store.LoadNext()
+	next, _, err := agent.store.LoadNext()
 	if err != nil {
-		a.discardNext()
+		agent.discardNext()
 
 		return fmt.Errorf("load next identity: %w", err)
 	}
 
-	return a.switchIdentity(ctx, next)
+	return agent.switchIdentity(ctx, &next)
 }
 
-func (a *Agent) switchIdentity(ctx context.Context, next tls.Certificate) error {
-	a.dialMu.Lock()
-	defer a.dialMu.Unlock()
+func (agent *Agent) switchIdentity(ctx context.Context, next *tls.Certificate) error {
+	agent.dialMu.Lock()
+	defer agent.dialMu.Unlock()
 
-	s, err := a.connect(ctx, next)
+	sess, err := agent.connect(ctx, next)
 	if err != nil {
-		a.handleConnectErr(err)
+		agent.handleConnectErr(err)
 
 		// Keep next-* on disk: the hub already treats the new leaf as the
 		// newest, so later connects (connectNewest) must try it first.
 		return fmt.Errorf("tunnel with new certificate: %w", err)
 	}
 
-	a.promote(next)
+	agent.promote(next)
 
-	old := a.adopt(s)
+	old := agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
 
-	a.log.Info("renewal complete", "fingerprint", pki.Fingerprint(next.Leaf),
-		"not_after", next.Leaf.NotAfter.Format(time.RFC3339))
+	agent.log.InfoContext(
+		ctx,
+		"Renewal complete",
+		slog.String("fingerprint", pki.Fingerprint(next.Leaf)),
+		slog.String("notAfter", next.Leaf.NotAfter.Format(time.RFC3339)),
+	)
 
 	if old != nil {
-		a.wg.Go(func() { a.retire(old) })
+		agent.wg.Go(func() { agent.retire(old) })
 	}
 
 	return nil
 }
 
 // promote makes next the current identity on disk and in memory.
-func (a *Agent) promote(next tls.Certificate) {
-	if err := a.store.PromoteNext(); err != nil {
+func (agent *Agent) promote(next *tls.Certificate) {
+	err := agent.store.PromoteNext()
+	if err != nil {
 		// Keep using it in memory; next-* stays on disk and connectNewest
 		// retries the promotion on the next connect.
-		a.log.Error("promote next identity failed", "err", err)
+		agent.log.Error("Promote next identity failed", slog.Any("err", err))
 	}
 
-	a.mu.Lock()
-	a.ident = next
-	a.mu.Unlock()
+	agent.mu.Lock()
+	agent.ident = *next
+	agent.mu.Unlock()
 }
 
-func (a *Agent) discardNext() {
-	if err := a.store.DiscardNext(); err != nil {
-		a.log.Warn("discard next identity failed", "err", err)
+func (agent *Agent) discardNext() {
+	err := agent.store.DiscardNext()
+	if err != nil {
+		agent.log.Warn("Discard next identity failed", slog.Any("err", err))
 	}
 }

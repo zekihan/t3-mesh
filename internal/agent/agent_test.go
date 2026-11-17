@@ -32,40 +32,42 @@ import (
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
 
+var errNXDomain = errors.New("nxdomain")
+
 // ---- fake hub ----
 
 type hubConn struct {
-	h     *fakeHub
-	ymx   *yamux.Session
-	ctrl  *tunnel.Control
-	hello proto.Hello
-	fp    string
-
-	mu       sync.Mutex
+	h        *fakeHub
+	ymx      *yamux.Session
+	ctrl     *tunnel.Control
+	hello    proto.Hello
+	fp       string
 	statuses []proto.Status
+	mu       sync.Mutex
 }
 
-func (c *hubConn) lastStatus() (proto.Status, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (conn *hubConn) lastStatus() (proto.Status, bool) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 
-	if len(c.statuses) == 0 {
+	if len(conn.statuses) == 0 {
 		return proto.Status{}, false
 	}
 
-	return c.statuses[len(c.statuses)-1], true
+	return conn.statuses[len(conn.statuses)-1], true
 }
 
 // openStream opens a hub -> agent data stream with the given header.
-func (c *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
+func (conn *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
 	t.Helper()
 
-	st, err := c.ymx.OpenStream()
+	st, err := conn.ymx.OpenStream()
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
 
-	if err = proto.WriteLine(st, hdr); err != nil {
+	err = proto.WriteLine(st, hdr)
+	if err != nil {
 		t.Fatalf("write header: %v", err)
 	}
 
@@ -73,17 +75,16 @@ func (c *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
 }
 
 type fakeHub struct {
-	t    *testing.T
-	ca   *pkitest.CA
-	ln   net.Listener
-	addr string
-	pool *x509.CertPool
-
-	mu          sync.Mutex
+	ln          net.Listener
+	t           *testing.T
+	ca          *pkitest.CA
+	pool        *x509.CertPool
+	linkTargets map[string]string
+	addr        string
+	enrollToken string
 	conns       []*hubConn
 	ack         proto.HelloAck
-	linkTargets map[string]string
-	enrollToken string
+	mu          sync.Mutex
 	noRenew     bool
 }
 
@@ -104,7 +105,7 @@ func newFakeHub(t *testing.T, ca *pkitest.CA) *fakeHub {
 		t.Fatal(err)
 	}
 
-	h := &fakeHub{
+	hubSrv := &fakeHub{
 		t: t, ca: ca, ln: ln, addr: ln.Addr().String(), pool: pool,
 		linkTargets: map[string]string{},
 		ack: proto.HelloAck{
@@ -121,37 +122,38 @@ func newFakeHub(t *testing.T, ca *pkitest.CA) *fakeHub {
 		},
 	}
 
-	t.Cleanup(h.close)
+	t.Cleanup(hubSrv.close)
 
-	go h.loop()
+	go hubSrv.loop()
 
-	return h
+	return hubSrv
 }
 
-func (h *fakeHub) close() {
-	_ = h.ln.Close()
+func (hubSrv *fakeHub) close() {
+	_ = hubSrv.ln.Close()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hubSrv.mu.Lock()
+	defer hubSrv.mu.Unlock()
 
-	for _, c := range h.conns {
+	for _, c := range hubSrv.conns {
 		_ = c.ymx.Close()
 	}
 }
 
-func (h *fakeHub) loop() {
+func (hubSrv *fakeHub) loop() {
 	for {
-		c, err := h.ln.Accept()
+		c, err := hubSrv.ln.Accept()
 		if err != nil {
 			return
 		}
 
-		go h.handle(c.(*tls.Conn)) //nolint:errcheck,forcetypeassert // tls listener
+		go hubSrv.handle(c.(*tls.Conn)) //nolint:forcetypeassert // tls listener
 	}
 }
 
-func (h *fakeHub) handle(tc *tls.Conn) {
-	if err := tc.Handshake(); err != nil {
+func (hubSrv *fakeHub) handle(tc *tls.Conn) {
+	err := tc.HandshakeContext(hubSrv.t.Context())
+	if err != nil {
 		_ = tc.Close()
 
 		return
@@ -161,15 +163,15 @@ func (h *fakeHub) handle(tc *tls.Conn) {
 
 	switch st.NegotiatedProtocol {
 	case proto.ALPNEnroll:
-		h.enroll(tc)
+		hubSrv.enroll(tc)
 	case proto.TunnelALPN(proto.ProtocolVersion):
-		h.tunnel(tc, st)
+		hubSrv.tunnel(tc, &st)
 	default:
 		_ = tc.Close()
 	}
 }
 
-func (h *fakeHub) enroll(tc *tls.Conn) {
+func (hubSrv *fakeHub) enroll(tc *tls.Conn) {
 	defer func() { _ = tc.Close() }()
 
 	_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
@@ -184,9 +186,9 @@ func (h *fakeHub) enroll(tc *tls.Conn) {
 		return
 	}
 
-	h.mu.Lock()
-	want := h.enrollToken
-	h.mu.Unlock()
+	hubSrv.mu.Lock()
+	want := hubSrv.enrollToken
+	hubSrv.mu.Unlock()
 
 	if req.Token != want {
 		_ = proto.WriteMessage(
@@ -197,7 +199,8 @@ func (h *fakeHub) enroll(tc *tls.Conn) {
 		return
 	}
 
-	if _, _, err = pki.ValidateCSR([]byte(req.CSR)); err != nil {
+	_, _, err = pki.ValidateCSR([]byte(req.CSR))
+	if err != nil {
 		_ = proto.WriteMessage(
 			tc,
 			proto.Reject{Reason: proto.RejectEnrollFailed, Detail: err.Error()},
@@ -206,7 +209,7 @@ func (h *fakeHub) enroll(tc *tls.Conn) {
 		return
 	}
 
-	cert, chain, err := h.ca.SignCSR([]byte(req.CSR), 365*24*time.Hour)
+	cert, chain, err := hubSrv.ca.SignCSR([]byte(req.CSR), 365*24*time.Hour)
 	if err != nil {
 		return
 	}
@@ -214,7 +217,7 @@ func (h *fakeHub) enroll(tc *tls.Conn) {
 	_ = proto.WriteMessage(tc, proto.Enrolled{Certificate: string(cert), Chain: string(chain)})
 }
 
-func (h *fakeHub) tunnel(tc *tls.Conn, st tls.ConnectionState) {
+func (hubSrv *fakeHub) tunnel(tc *tls.Conn, st *tls.ConnectionState) {
 	if len(st.PeerCertificates) == 0 {
 		_ = tc.Close()
 
@@ -226,7 +229,7 @@ func (h *fakeHub) tunnel(tc *tls.Conn, st tls.ConnectionState) {
 		raw = append(raw, c.Raw)
 	}
 
-	leaf, err := pki.VerifyPeer(raw, h.pool, x509.ExtKeyUsageClientAuth, time.Now())
+	leaf, err := pki.VerifyPeer(raw, hubSrv.pool, x509.ExtKeyUsageClientAuth, time.Now())
 	if err != nil {
 		_ = tc.Close()
 
@@ -267,32 +270,33 @@ func (h *fakeHub) tunnel(tc *tls.Conn, st tls.ConnectionState) {
 		return
 	}
 
-	hc := &hubConn{h: h, ymx: ymx, ctrl: ctrl, hello: hello, fp: pki.Fingerprint(leaf)}
+	hc := &hubConn{h: hubSrv, ymx: ymx, ctrl: ctrl, hello: hello, fp: pki.Fingerprint(leaf)}
 
-	h.mu.Lock()
-	ack := h.ack
-	h.conns = append(h.conns, hc)
-	h.mu.Unlock()
+	hubSrv.mu.Lock()
+	ack := hubSrv.ack
+	hubSrv.conns = append(hubSrv.conns, hc)
+	hubSrv.mu.Unlock()
 
-	if err = ctrl.Send(ack); err != nil {
+	err = ctrl.Send(ack)
+	if err != nil {
 		return
 	}
 
-	go h.control(hc)
-	go h.streams(hc)
+	go hubSrv.control(hc)
+	go hubSrv.streams(hc)
 }
 
-func (h *fakeHub) control(hc *hubConn) {
+func (hubSrv *fakeHub) control(hc *hubConn) {
 	for msg := range hc.ctrl.Messages() {
-		switch m := msg.(type) {
+		switch typed := msg.(type) {
 		case proto.Status:
 			hc.mu.Lock()
-			hc.statuses = append(hc.statuses, m)
+			hc.statuses = append(hc.statuses, typed)
 			hc.mu.Unlock()
 		case proto.Renew:
-			h.mu.Lock()
-			deny := h.noRenew
-			h.mu.Unlock()
+			hubSrv.mu.Lock()
+			deny := hubSrv.noRenew
+			hubSrv.mu.Unlock()
 
 			if deny {
 				_ = hc.ctrl.Send(proto.Reject{Reason: proto.RejectRenewFailed, Detail: "denied"})
@@ -300,13 +304,14 @@ func (h *fakeHub) control(hc *hubConn) {
 				continue
 			}
 
-			if _, _, err := pki.ValidateCSR([]byte(m.CSR)); err != nil {
+			_, _, err := pki.ValidateCSR([]byte(typed.CSR))
+			if err != nil {
 				_ = hc.ctrl.Send(proto.Reject{Reason: proto.RejectRenewFailed, Detail: err.Error()})
 
 				continue
 			}
 
-			cert, chain, err := h.ca.SignCSR([]byte(m.CSR), 365*24*time.Hour)
+			cert, chain, err := hubSrv.ca.SignCSR([]byte(typed.CSR), 365*24*time.Hour)
 			if err != nil {
 				continue
 			}
@@ -316,28 +321,30 @@ func (h *fakeHub) control(hc *hubConn) {
 	}
 }
 
-func (h *fakeHub) streams(hc *hubConn) {
+func (hubSrv *fakeHub) streams(hc *hubConn) {
 	for {
 		st, err := hc.ymx.AcceptStream()
 		if err != nil {
 			return
 		}
 
-		go h.link(st)
+		go hubSrv.link(st)
 	}
 }
 
-func (h *fakeHub) link(st *yamux.Stream) {
+func (hubSrv *fakeHub) link(st *yamux.Stream) {
 	var hdr proto.StreamHeader
-	if err := proto.ReadLine(st, &hdr); err != nil {
+
+	err := proto.ReadLine(st, &hdr)
+	if err != nil {
 		_ = st.Close()
 
 		return
 	}
 
-	h.mu.Lock()
-	target, ok := h.linkTargets[hdr.To]
-	h.mu.Unlock()
+	hubSrv.mu.Lock()
+	target, ok := hubSrv.linkTargets[hdr.To]
+	hubSrv.mu.Unlock()
 
 	if !ok {
 		_ = proto.WriteLine(st, proto.StreamReply{OK: false, Error: "no such target"})
@@ -346,7 +353,7 @@ func (h *fakeHub) link(st *yamux.Stream) {
 		return
 	}
 
-	conn, err := net.Dial("tcp", target)
+	conn, err := (&net.Dialer{}).DialContext(hubSrv.t.Context(), "tcp", target)
 	if err != nil {
 		_ = proto.WriteLine(st, proto.StreamReply{OK: false, Error: "dial failed"})
 		_ = st.Close()
@@ -359,22 +366,26 @@ func (h *fakeHub) link(st *yamux.Stream) {
 	tunnel.Join(st, conn)
 }
 
-func (h *fakeHub) connCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (hubSrv *fakeHub) connCount() int {
+	hubSrv.mu.Lock()
+	defer hubSrv.mu.Unlock()
 
-	return len(h.conns)
+	return len(hubSrv.conns)
 }
 
-func (h *fakeHub) waitConn(t *testing.T, n int) *hubConn {
+func (hubSrv *fakeHub) waitConn(t *testing.T, count int) *hubConn {
 	t.Helper()
 
-	waitFor(t, fmt.Sprintf("hub connection %d", n), func() bool { return h.connCount() >= n })
+	waitFor(
+		t,
+		fmt.Sprintf("hub connection %d", count),
+		func() bool { return hubSrv.connCount() >= count },
+	)
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	hubSrv.mu.Lock()
+	defer hubSrv.mu.Unlock()
 
-	return h.conns[n-1]
+	return hubSrv.conns[count-1]
 }
 
 // ---- helpers ----
@@ -388,20 +399,27 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 			return
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		<-time.After(10 * time.Millisecond)
 	}
 
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+const (
+	portBase = 20000
+	portSpan = 12000
+)
 
 func freePort(t *testing.T) int {
 	t.Helper()
 
 	// Config requires link and direct ports below the ephemeral range.
 	for range 200 {
-		port := 20000 + rand.IntN(12000)
+		port := portBase + rand.IntN(portSpan) //nolint:gosec // test port picking
 
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		ln, err := (&net.ListenConfig{}).Listen(
+			t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port),
+		)
 		if err != nil {
 			continue
 		}
@@ -421,9 +439,21 @@ type fakeHealth struct {
 	ready, alive int
 }
 
-func (f *fakeHealth) Ready() error { f.mu.Lock(); f.ready++; f.mu.Unlock(); return nil }
+func (f *fakeHealth) Ready() error {
+	f.mu.Lock()
+	f.ready++
+	f.mu.Unlock()
 
-func (f *fakeHealth) Alive() error              { f.mu.Lock(); f.alive++; f.mu.Unlock(); return nil }
+	return nil
+}
+
+func (f *fakeHealth) Alive() error {
+	f.mu.Lock()
+	f.alive++
+	f.mu.Unlock()
+
+	return nil
+}
 func (f *fakeHealth) Promote() error            { return nil }
 func (f *fakeHealth) Fail(string, string) error { return nil }
 func (f *fakeHealth) Restart() error            { return nil }
@@ -436,50 +466,61 @@ func (f *fakeHealth) readyCount() int {
 }
 
 type harness struct {
-	t        *testing.T
-	ca       *pkitest.CA
-	hub      *fakeHub
+	ident    tls.Certificate
 	cfg      *agentconfig.Config
+	hub      *fakeHub
+	t        *testing.T
 	agent    *Agent
 	health   *fakeHealth
-	ident    tls.Certificate
-	linkPort int
-	local    *httptest.Server // stand-in for the local T3
-	remote   *httptest.Server // stand-in for a peer's T3 reached through the hub
+	ca       *pkitest.CA
+	local    *httptest.Server
+	remote   *httptest.Server
 	hostSeen chan string
 	cancel   context.CancelFunc
 	done     chan error
+	linkPort int
 }
 
 type hopts struct {
-	notAfter  time.Duration
 	hubHost   string
+	notAfter  time.Duration
+	directPrt int
 	noHub     bool
 	noIdent   bool
 	noStart   bool
 	direct    bool
-	directPrt int
+}
+
+func ecdsaKey(t *testing.T, cert *tls.Certificate) *ecdsa.PrivateKey {
+	t.Helper()
+
+	key, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatal("identity key is not ECDSA")
+	}
+
+	return key
 }
 
 func newHarness(t *testing.T, mod func(*hopts)) *harness {
 	t.Helper()
 
-	o := hopts{notAfter: 365 * 24 * time.Hour}
+	opts := hopts{notAfter: 365 * 24 * time.Hour}
 	if mod != nil {
-		mod(&o)
+		mod(&opts)
 	}
 
 	ca := pkitest.NewCA(t, "test clients CA")
-	h := &harness{t: t, ca: ca, health: &fakeHealth{}, hostSeen: make(chan string, 16)}
+	rig := &harness{t: t, ca: ca, health: &fakeHealth{}, hostSeen: make(chan string, 16)}
 
-	h.local = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, "local:%s", r.URL.Path)
+	rig.local = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "local:"+r.URL.Path) //nolint:gosec // test echo
 	}))
-	t.Cleanup(h.local.Close)
+	t.Cleanup(rig.local.Close)
 
-	h.remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rig.remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
-		case h.hostSeen <- r.Host:
+		case rig.hostSeen <- r.Host:
 		default:
 		}
 
@@ -500,24 +541,24 @@ func newHarness(t *testing.T, mod func(*hopts)) *harness {
 			return
 		}
 
-		_, _ = fmt.Fprintf(w, "remote:%s", r.URL.Path)
+		_, _ = io.WriteString(w, "remote:"+r.URL.Path) //nolint:gosec // test echo
 	}))
-	t.Cleanup(h.remote.Close)
+	t.Cleanup(rig.remote.Close)
 
-	h.hub = newFakeHub(t, ca)
-	h.hub.linkTargets["t3.z-arch"] = h.remote.Listener.Addr().String()
+	rig.hub = newFakeHub(t, ca)
+	rig.hub.linkTargets["t3.z-arch"] = rig.remote.Listener.Addr().String()
 
-	hubAddr := h.hub.addr
-	if o.noHub {
+	hubAddr := rig.hub.addr
+	if opts.noHub {
 		hubAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	}
 
-	if o.hubHost != "" {
+	if opts.hubHost != "" {
 		_, port, _ := net.SplitHostPort(hubAddr)
-		hubAddr = net.JoinHostPort(o.hubHost, port)
+		hubAddr = net.JoinHostPort(opts.hubHost, port)
 	}
 
-	h.linkPort = freePort(t)
+	rig.linkPort = freePort(t)
 	dir := t.TempDir()
 
 	yaml := fmt.Sprintf(`
@@ -529,10 +570,10 @@ serve:
   t3: %s
 links:
   t3.z-arch: 127.0.0.1:%d
-`, dir, hubAddr, h.local.Listener.Addr().String(), h.linkPort)
+`, dir, hubAddr, rig.local.Listener.Addr().String(), rig.linkPort)
 
-	if o.direct {
-		yaml += fmt.Sprintf("direct:\n  enabled: true\n  port: %d\n", o.directPrt)
+	if opts.direct {
+		yaml += fmt.Sprintf("direct:\n  enabled: true\n  port: %d\n", opts.directPrt)
 	}
 
 	cfg, err := agentconfig.Parse([]byte(yaml))
@@ -540,73 +581,74 @@ links:
 		t.Fatal(err)
 	}
 
-	h.cfg = cfg
+	rig.cfg = cfg
 
-	tc, certPEM, _ := ca.IssueIdentity(t, "agent-devbox", true, time.Now().Add(o.notAfter))
-	h.ident = tc
+	tc, certPEM, _ := ca.IssueIdentity(t, "agent-devbox", true, time.Now().Add(opts.notAfter))
+	rig.ident = tc
 
-	if !o.noIdent {
+	if !opts.noIdent {
 		store := pki.Store{Dir: cfg.Identity.Dir}
-		if err = store.SaveKey(
-			tc.PrivateKey.(*ecdsa.PrivateKey),
-		); err != nil { //nolint:forcetypeassert // ecdsa
+
+		err = store.SaveKey(ecdsaKey(t, &tc))
+		if err != nil {
 			t.Fatal(err)
 		}
 
-		if err = store.SaveCert(certPEM, nil); err != nil {
+		err = store.SaveCert(certPEM, nil)
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	a, err := New(Options{
+	agent, err := New(Options{
 		Config:  cfg,
 		Version: "dev",
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:     slog.New(slog.DiscardHandler),
 		HubTLS: &tls.Config{
-			RootCAs:    h.hub.pool,
+			RootCAs:    rig.hub.pool,
 			ServerName: "127.0.0.1",
 			MinVersion: tls.VersionTLS13,
 		},
-		Health: h.health,
+		Health: rig.health,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	a.backoffBase = 10 * time.Millisecond
-	a.backoffMax = 50 * time.Millisecond
-	a.statusEvery = 100 * time.Millisecond
-	a.gatewayMAC = func() (string, error) { return "aa:bb:cc:dd:ee:ff", nil }
-	a.localAddrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.5")}, nil }
-	h.agent = a
+	agent.backoffBase = 10 * time.Millisecond
+	agent.backoffMax = 50 * time.Millisecond
+	agent.statusEvery = 100 * time.Millisecond
+	agent.gatewayMAC = func() (string, error) { return "aa:bb:cc:dd:ee:ff", nil }
+	agent.localAddrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.5")}, nil }
+	rig.agent = agent
 
-	if !o.noStart {
-		h.start()
+	if !opts.noStart {
+		rig.start()
 	}
 
-	return h
+	return rig
 }
 
-func (h *harness) start() {
+func (rig *harness) start() {
 	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	h.done = make(chan error, 1)
+	rig.cancel = cancel
+	rig.done = make(chan error, 1)
 
-	go func() { h.done <- h.agent.Run(ctx) }()
+	go func() { rig.done <- rig.agent.Run(ctx) }()
 
-	h.t.Cleanup(func() {
+	rig.t.Cleanup(func() {
 		cancel()
 
 		select {
-		case <-h.done:
+		case <-rig.done:
 		case <-time.After(10 * time.Second):
-			h.t.Error("agent did not stop")
+			rig.t.Error("agent did not stop")
 		}
 	})
 }
 
-func (h *harness) linkURL(path string) string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", h.linkPort, path)
+func (rig *harness) linkURL(path string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", rig.linkPort, path)
 }
 
 func httpGet(t *testing.T, req *http.Request) (int, string) {
@@ -632,7 +674,7 @@ func httpGet(t *testing.T, req *http.Request) (int, string) {
 func get(t *testing.T, url string) (int, string) {
 	t.Helper()
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,9 +684,22 @@ func get(t *testing.T, url string) (int, string) {
 
 // ---- tests ----
 
+func checkCachedRevisions(t *testing.T, rig *harness) {
+	t.Helper()
+
+	c, _ := state.Load(rig.cfg.StateDir)
+	if c.Rules.Revision != "rules1" || c.TrustBundle.Revision != "tb1" ||
+		c.Release.Version != "v1.0.0" ||
+		len(c.HomeCIDRs) != 1 ||
+		c.LastHubContact.IsZero() ||
+		c.Revocations.Revision != "rev1" {
+		t.Errorf("cache = %+v", c)
+	}
+}
+
 func TestHelloAndAckCached(t *testing.T) {
-	h := newHarness(t, nil)
-	hc := h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	hc := rig.hub.waitConn(t, 1)
 
 	if hc.hello.Version != "dev" {
 		t.Errorf("version = %q", hc.hello.Version)
@@ -654,7 +709,7 @@ func TestHelloAndAckCached(t *testing.T) {
 		t.Errorf("services = %v", hc.hello.Services)
 	}
 
-	if hc.hello.CertFingerprint != pki.Fingerprint(h.ident.Leaf) {
+	if hc.hello.CertFingerprint != pki.Fingerprint(rig.ident.Leaf) {
 		t.Errorf("fingerprint = %q", hc.hello.CertFingerprint)
 	}
 
@@ -663,18 +718,12 @@ func TestHelloAndAckCached(t *testing.T) {
 	}
 
 	waitFor(t, "cache on disk", func() bool {
-		c, err := state.Load(h.cfg.StateDir)
+		c, err := state.Load(rig.cfg.StateDir)
 
 		return err == nil && c.Machine == "devbox"
 	})
 
-	c, _ := state.Load(h.cfg.StateDir)
-	if c.Rules.Revision != "rules1" || c.TrustBundle.Revision != "tb1" || c.Release.Version != "v1.0.0" ||
-		len(c.HomeCIDRs) != 1 ||
-		c.LastHubContact.IsZero() ||
-		c.Revocations.Revision != "rev1" {
-		t.Errorf("cache = %+v", c)
-	}
+	checkCachedRevisions(t, rig)
 
 	waitFor(t, "status", func() bool {
 		st, ok := hc.lastStatus()
@@ -685,20 +734,20 @@ func TestHelloAndAckCached(t *testing.T) {
 }
 
 func TestHelloLANAddrs(t *testing.T) {
-	h := newHarness(
+	rig := newHarness(
 		t,
 		func(o *hopts) { o.noStart = true; o.direct = true; o.directPrt = freePort(t) },
 	)
-	h.agent.localAddrs = func() ([]netip.Addr, error) {
+	rig.agent.localAddrs = func() ([]netip.Addr, error) {
 		return []netip.Addr{
 			netip.MustParseAddr("192.168.1.5"), netip.MustParseAddr("10.0.0.7"),
 			netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("fe80::1"),
 		}, nil
 	}
-	h.agent.cache = &state.Cache{}
+	rig.agent.cache = &state.Cache{}
 
-	got := h.agent.hello(h.ident)
-	if h.agent.cfg.Direct.Port != got.DirectPort {
+	got := rig.agent.hello(&rig.ident)
+	if rig.agent.cfg.Direct.Port != got.DirectPort {
 		t.Errorf("direct port = %d", got.DirectPort)
 	}
 
@@ -706,9 +755,9 @@ func TestHelloLANAddrs(t *testing.T) {
 		t.Errorf("fallback lan addrs = %v", got.LANAddrs)
 	}
 
-	h.agent.prefixes = []netip.Prefix{netip.MustParsePrefix("192.168.0.0/22")}
+	rig.agent.prefixes = []netip.Prefix{netip.MustParsePrefix("192.168.0.0/22")}
 
-	got = h.agent.hello(h.ident)
+	got = rig.agent.hello(&rig.ident)
 	if strings.Join(got.LANAddrs, ",") != "192.168.1.5" {
 		t.Errorf("cidr lan addrs = %v", got.LANAddrs)
 	}
@@ -732,6 +781,8 @@ func TestViewerAndRelayStreams(t *testing.T) {
 		t.Fatalf("viewer response: %v", err)
 	}
 
+	defer func() { _ = resp.Body.Close() }()
+
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "local:/v" {
 		t.Errorf("viewer body = %q", body)
@@ -742,7 +793,9 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	defer rs.Close()
 
 	var reply proto.StreamReply
-	if err = proto.ReadLine(rs, &reply); err != nil || !reply.OK {
+
+	err = proto.ReadLine(rs, &reply)
+	if err != nil || !reply.OK {
 		t.Fatalf("relay reply = %+v, %v", reply, err)
 	}
 
@@ -753,6 +806,8 @@ func TestViewerAndRelayStreams(t *testing.T) {
 		t.Fatalf("relay response: %v", err)
 	}
 
+	defer func() { _ = resp.Body.Close() }()
+
 	body, _ = io.ReadAll(resp.Body)
 	if string(body) != "local:/r" {
 		t.Errorf("relay body = %q", body)
@@ -762,30 +817,33 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	bad := hc.openStream(t, proto.StreamHeader{Svc: "nope", From: "agent-z-arch"})
 	defer bad.Close()
 
-	if err = proto.ReadLine(bad, &reply); err != nil || reply.OK {
+	err = proto.ReadLine(bad, &reply)
+	if err != nil || reply.OK {
 		t.Errorf("unknown service reply = %+v, %v", reply, err)
 	}
 }
 
 func TestLinkPortThroughTunnel(t *testing.T) {
-	h := newHarness(t, nil)
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
 
-	code, body := get(t, h.linkURL("/hello"))
+	code, body := get(t, rig.linkURL("/hello"))
 	if code != 200 || body != "remote:/hello" {
 		t.Fatalf("got %d %q", code, body)
 	}
 
-	if host := <-h.hostSeen; host != fmt.Sprintf("127.0.0.1:%d", h.linkPort) {
+	if host := <-rig.hostSeen; host != fmt.Sprintf("127.0.0.1:%d", rig.linkPort) {
 		t.Errorf("upstream Host = %q, want it preserved", host)
 	}
 }
 
 func TestLinkPortWebSocketUpgrade(t *testing.T) {
-	h := newHarness(t, nil)
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
 
-	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", h.linkPort))
+	conn, err := (&net.Dialer{}).DialContext(
+		t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", rig.linkPort),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,7 +855,7 @@ func TestLinkPortWebSocketUpgrade(t *testing.T) {
 	_, _ = fmt.Fprintf(
 		conn,
 		"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-		h.linkPort,
+		rig.linkPort,
 	)
 
 	br := bufio.NewReader(conn)
@@ -806,6 +864,8 @@ func TestLinkPortWebSocketUpgrade(t *testing.T) {
 	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("upgrade response = %v, %v", resp, err)
 	}
+
+	defer func() { _ = resp.Body.Close() }()
 
 	_, _ = io.WriteString(conn, "ping\n")
 
@@ -816,30 +876,35 @@ func TestLinkPortWebSocketUpgrade(t *testing.T) {
 }
 
 func TestLinkPortRefusedByHub(t *testing.T) {
-	h := newHarness(t, nil)
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
 
-	h.hub.mu.Lock()
-	delete(h.hub.linkTargets, "t3.z-arch")
-	h.hub.mu.Unlock()
+	rig.hub.mu.Lock()
+	delete(rig.hub.linkTargets, "t3.z-arch")
+	rig.hub.mu.Unlock()
 
-	if code, _ := get(t, h.linkURL("/x")); code != http.StatusBadGateway {
+	if code, _ := get(t, rig.linkURL("/x")); code != http.StatusBadGateway {
 		t.Errorf("code = %d, want 502", code)
 	}
 }
 
 func TestLinkPortForeignOrigin(t *testing.T) {
-	h := newHarness(t, nil)
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
 
-	req, _ := http.NewRequest(http.MethodGet, h.linkURL("/x"), nil)
+	req, _ := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		rig.linkURL("/x"),
+		http.NoBody,
+	)
 	req.Header.Set("Origin", "https://evil.example")
 
 	if code, _ := httpGet(t, req); code != http.StatusForbidden {
 		t.Errorf("foreign origin code = %d, want 403", code)
 	}
 
-	req, _ = http.NewRequest(http.MethodGet, h.linkURL("/x"), nil)
+	req, _ = http.NewRequestWithContext(t.Context(), http.MethodGet, rig.linkURL("/x"), http.NoBody)
 	req.Host = "evil.example"
 
 	if code, _ := httpGet(t, req); code != http.StatusForbidden {
@@ -847,7 +912,7 @@ func TestLinkPortForeignOrigin(t *testing.T) {
 	}
 
 	select {
-	case host := <-h.hostSeen:
+	case host := <-rig.hostSeen:
 		t.Errorf("request reached upstream with host %q", host)
 	default:
 	}
@@ -864,26 +929,26 @@ func TestLinkPortWithoutHub(t *testing.T) {
 }
 
 func TestReconnectAfterDrop(t *testing.T) {
-	h := newHarness(t, nil)
-	first := h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	first := rig.hub.waitConn(t, 1)
 
 	_ = first.ymx.Close()
 
-	second := h.hub.waitConn(t, 2)
+	second := rig.hub.waitConn(t, 2)
 	if second.hello.Version != "dev" {
 		t.Errorf("second hello = %+v", second.hello)
 	}
 
-	waitFor(t, "current session", func() bool { return h.agent.current() != nil })
+	waitFor(t, "current session", func() bool { return rig.agent.current() != nil })
 
-	if code, body := get(t, h.linkURL("/again")); code != 200 || body != "remote:/again" {
+	if code, body := get(t, rig.linkURL("/again")); code != 200 || body != "remote:/again" {
 		t.Errorf("after reconnect got %d %q", code, body)
 	}
 }
 
 func TestUpdateApplied(t *testing.T) {
-	h := newHarness(t, nil)
-	hc := h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	hc := rig.hub.waitConn(t, 1)
 
 	home := true
 	rules := proto.Rules{
@@ -891,18 +956,19 @@ func TestUpdateApplied(t *testing.T) {
 		Allow:    map[string][]string{"t3.devbox": {"agent-z-arch"}},
 	}
 
-	if err := hc.ctrl.Send(proto.Update{Home: &home, Rules: &rules}); err != nil {
+	err := hc.ctrl.Send(proto.Update{Home: &home, Rules: &rules})
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	waitFor(t, "update persisted", func() bool {
-		c, err := state.Load(h.cfg.StateDir)
+		c, err := state.Load(rig.cfg.StateDir)
 
 		return err == nil && c.Rules.Revision == "rules2" && c.Home &&
 			c.HomeGatewayMAC == "aa:bb:cc:dd:ee:ff"
 	})
 
-	if v := h.agent.view(); v.Rules.Revision != "rules2" || !v.SelfHome || v.Roots == nil ||
+	if v := rig.agent.view(); v.Rules.Revision != "rules2" || !v.SelfHome || v.Roots == nil ||
 		!v.HubConnected {
 		t.Errorf("view = %+v", v)
 	}
@@ -915,15 +981,15 @@ func TestUpdateApplied(t *testing.T) {
 }
 
 func TestRenewal(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.notAfter = 10 * 24 * time.Hour })
-	first := h.hub.waitConn(t, 1)
-	second := h.hub.waitConn(t, 2)
+	rig := newHarness(t, func(o *hopts) { o.notAfter = 10 * 24 * time.Hour })
+	first := rig.hub.waitConn(t, 1)
+	second := rig.hub.waitConn(t, 2)
 
 	if first.fp == second.fp {
 		t.Fatal("renewed session used the old certificate")
 	}
 
-	store := pki.Store{Dir: h.cfg.Identity.Dir}
+	store := pki.Store{Dir: rig.cfg.Identity.Dir}
 
 	waitFor(t, "promotion", func() bool {
 		_, leaf, err := store.Load()
@@ -932,17 +998,13 @@ func TestRenewal(t *testing.T) {
 	})
 
 	for _, f := range []string{"next-key.pem", "next-cert.pem"} {
-		if _, err := os.Stat(
-			filepath.Join(h.cfg.Identity.Dir, f),
-		); !errors.Is(
-			err,
-			os.ErrNotExist,
-		) {
+		_, err := os.Stat(filepath.Join(rig.cfg.Identity.Dir, f))
+		if !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s left behind: %v", f, err)
 		}
 	}
 
-	if fp := pki.Fingerprint(h.agent.identity().Leaf); fp != second.fp {
+	if fp := pki.Fingerprint(rig.agent.identity().Leaf); fp != second.fp {
 		t.Errorf("in-memory identity fingerprint = %s", fp)
 	}
 
@@ -952,7 +1014,7 @@ func TestRenewal(t *testing.T) {
 	// Reconnects use the new identity.
 	_ = second.ymx.Close()
 
-	third := h.hub.waitConn(t, 3)
+	third := rig.hub.waitConn(t, 3)
 	if third.fp != second.fp {
 		t.Errorf("reconnect fingerprint = %s, want %s", third.fp, second.fp)
 	}
@@ -961,11 +1023,11 @@ func TestRenewal(t *testing.T) {
 // A renewal whose first tunnel failed leaves next-* on disk. The hub already
 // admits only that leaf, so the next connect must use and promote it.
 func TestPendingRenewalUsedOnConnect(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.noStart = true })
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
 
-	_, certPEM, keyPEM := h.ca.IssueIdentity(
+	_, certPEM, keyPEM := rig.ca.IssueIdentity(
 		t,
-		h.cfg.Identity.Name,
+		rig.cfg.Identity.Name,
 		true,
 		time.Now().Add(365*24*time.Hour),
 	)
@@ -975,8 +1037,10 @@ func TestPendingRenewalUsedOnConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := pki.Store{Dir: h.cfg.Identity.Dir}
-	if err := store.SaveNext(key, certPEM, h.ca.CertPEM); err != nil {
+	store := pki.Store{Dir: rig.cfg.Identity.Dir}
+
+	err = store.SaveNext(key, certPEM, rig.ca.CertPEM)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -985,26 +1049,27 @@ func TestPendingRenewalUsedOnConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h.start()
+	rig.start()
 
-	first := h.hub.waitConn(t, 1)
+	first := rig.hub.waitConn(t, 1)
 	if first.fp != pki.Fingerprint(next) {
 		t.Fatalf("connected with %s, want pending renewed leaf %s", first.fp, pki.Fingerprint(next))
 	}
 
-	if _, leaf, err := store.Load(); err != nil || pki.Fingerprint(leaf) != first.fp {
+	_, leaf, err := store.Load()
+	if err != nil || pki.Fingerprint(leaf) != first.fp {
 		t.Fatalf("pending identity not promoted: %v", err)
 	}
 }
 
 func TestRenewalFailureKeepsIdentity(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.notAfter = 10 * 24 * time.Hour; o.noStart = true })
-	h.hub.mu.Lock()
-	h.hub.noRenew = true
-	h.hub.mu.Unlock()
-	h.start()
+	rig := newHarness(t, func(o *hopts) { o.notAfter = 10 * 24 * time.Hour; o.noStart = true })
+	rig.hub.mu.Lock()
+	rig.hub.noRenew = true
+	rig.hub.mu.Unlock()
+	rig.start()
 
-	first := h.hub.waitConn(t, 1)
+	first := rig.hub.waitConn(t, 1)
 
 	waitFor(t, "renewal warning", func() bool {
 		st, ok := first.lastStatus()
@@ -1012,54 +1077,55 @@ func TestRenewalFailureKeepsIdentity(t *testing.T) {
 		return ok && len(st.Warnings) > 0
 	})
 
-	if h.hub.connCount() != 1 {
-		t.Errorf("connections = %d, want 1", h.hub.connCount())
+	if rig.hub.connCount() != 1 {
+		t.Errorf("connections = %d, want 1", rig.hub.connCount())
 	}
 
-	store := pki.Store{Dir: h.cfg.Identity.Dir}
+	store := pki.Store{Dir: rig.cfg.Identity.Dir}
 
-	if _, leaf, err := store.Load(); err != nil || pki.Fingerprint(leaf) != first.fp {
+	_, leaf, err := store.Load()
+	if err != nil || pki.Fingerprint(leaf) != first.fp {
 		t.Errorf("identity changed after failed renewal: %v", err)
 	}
 }
 
 func TestFailedLookupKeepsSession(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.hubHost = "localhost" })
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, func(o *hopts) { o.hubHost = "localhost" })
+	rig.hub.waitConn(t, 1)
 
-	cur := h.agent.current()
+	cur := rig.agent.current()
 	if cur == nil {
-		waitFor(t, "current", func() bool { return h.agent.current() != nil })
+		waitFor(t, "current", func() bool { return rig.agent.current() != nil })
 
-		cur = h.agent.current()
+		cur = rig.agent.current()
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
-	h.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) { return nil, errors.New("nxdomain") }
-	h.agent.pathCheck(ctx, "test")
+	rig.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) { return nil, errNXDomain }
+	rig.agent.pathCheck(ctx, "test")
 
-	h.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
-	h.agent.pathCheck(ctx, "test")
+	rig.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	rig.agent.pathCheck(ctx, "test")
 
-	h.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) {
+	rig.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{cur.peer}, nil
 	}
-	h.agent.pathCheck(ctx, "test")
+	rig.agent.pathCheck(ctx, "test")
 
-	if h.agent.current() != cur || h.hub.connCount() != 1 {
-		t.Fatalf("session replaced without cause (conns=%d)", h.hub.connCount())
+	if rig.agent.current() != cur || rig.hub.connCount() != 1 {
+		t.Fatalf("session replaced without cause (conns=%d)", rig.hub.connCount())
 	}
 
 	// A successful non-empty answer without the current peer moves the tunnel.
-	h.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) {
+	rig.agent.lookupHost = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("10.9.9.9")}, nil
 	}
-	h.agent.pathCheck(ctx, "test")
+	rig.agent.pathCheck(ctx, "test")
 
-	h.hub.waitConn(t, 2)
+	rig.hub.waitConn(t, 2)
 
-	if h.agent.current() == cur {
+	if rig.agent.current() == cur {
 		t.Fatal("current session not replaced")
 	}
 
@@ -1072,54 +1138,55 @@ func TestFailedLookupKeepsSession(t *testing.T) {
 		}
 	})
 
-	if code, body := get(t, h.linkURL("/p")); code != 200 || body != "remote:/p" {
+	if code, body := get(t, rig.linkURL("/p")); code != 200 || body != "remote:/p" {
 		t.Errorf("after switch got %d %q", code, body)
 	}
 }
 
 func TestLocalAddrGoneReplacesSession(t *testing.T) {
-	h := newHarness(t, nil)
-	h.hub.waitConn(t, 1)
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
 
-	h.agent.addrPresent = func(netip.Addr) bool { return false }
-	h.agent.pathCheck(context.Background(), "test")
-	h.agent.addrPresent = func(netip.Addr) bool { return true }
+	rig.agent.addrPresent = func(netip.Addr) bool { return false }
+	rig.agent.pathCheck(t.Context(), "test")
+	rig.agent.addrPresent = func(netip.Addr) bool { return true }
 
-	h.hub.waitConn(t, 2)
+	rig.hub.waitConn(t, 2)
 }
 
 func TestRunWithoutIdentity(t *testing.T) {
 	h := newHarness(t, func(o *hopts) { o.noIdent = true; o.noStart = true })
 
-	err := h.agent.Run(context.Background())
+	err := h.agent.Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "enroll") {
 		t.Fatalf("err = %v, want enroll hint", err)
 	}
 }
 
 func TestEnroll(t *testing.T) {
-	h := newHarness(t, func(o *hopts) { o.noIdent = true; o.noStart = true })
-	h.hub.mu.Lock()
-	h.hub.enrollToken = "secret"
-	h.hub.mu.Unlock()
+	rig := newHarness(t, func(o *hopts) { o.noIdent = true; o.noStart = true })
+	rig.hub.mu.Lock()
+	rig.hub.enrollToken = "secret"
+	rig.hub.mu.Unlock()
 
-	ctx := context.Background()
-	tlsCfg := &tls.Config{RootCAs: h.hub.pool, ServerName: "127.0.0.1"}
+	ctx := t.Context()
+	tlsCfg := &tls.Config{RootCAs: rig.hub.pool, ServerName: "127.0.0.1"}
 
-	err := Enroll(ctx, h.cfg, "wrong", tlsCfg)
+	err := Enroll(ctx, rig.cfg, "wrong", tlsCfg)
 	if err == nil || !strings.Contains(err.Error(), "bad token") {
 		t.Fatalf("wrong token err = %v", err)
 	}
 
-	if (pki.Store{Dir: h.cfg.Identity.Dir}).Exists() {
+	if (pki.Store{Dir: rig.cfg.Identity.Dir}).Exists() {
 		t.Fatal("identity stored after failed enrollment")
 	}
 
-	if err = Enroll(ctx, h.cfg, "secret", tlsCfg); err != nil {
+	err = Enroll(ctx, rig.cfg, "secret", tlsCfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	store := pki.Store{Dir: h.cfg.Identity.Dir}
+	store := pki.Store{Dir: rig.cfg.Identity.Dir}
 
 	_, leaf, err := store.Load()
 	if err != nil {
@@ -1130,27 +1197,28 @@ func TestEnroll(t *testing.T) {
 		t.Errorf("identity = %q", id)
 	}
 
-	fi, err := os.Stat(filepath.Join(h.cfg.Identity.Dir, "key.pem"))
+	fi, err := os.Stat(filepath.Join(rig.cfg.Identity.Dir, "key.pem"))
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("key mode = %v, %v", fi, err)
 	}
 
-	di, _ := os.Stat(h.cfg.Identity.Dir)
+	di, _ := os.Stat(rig.cfg.Identity.Dir)
 	if di.Mode().Perm() != 0o700 {
 		t.Errorf("dir mode = %v", di.Mode().Perm())
 	}
 
 	// The enrolled identity runs the agent.
-	h.start()
-	h.hub.waitConn(t, 1)
+	rig.start()
+	rig.hub.waitConn(t, 1)
 
 	// Re-enrolling replaces the identity with a fresh key.
-	if err = Enroll(ctx, h.cfg, "secret", tlsCfg); err != nil {
+	err = Enroll(ctx, rig.cfg, "secret", tlsCfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, leaf2, err2 := store.Load(); err2 != nil ||
-		pki.Fingerprint(leaf2) == pki.Fingerprint(leaf) {
+	_, leaf2, err2 := store.Load()
+	if err2 != nil || pki.Fingerprint(leaf2) == pki.Fingerprint(leaf) {
 		t.Errorf("re-enroll did not replace identity: %v", err2)
 	}
 }
@@ -1159,7 +1227,8 @@ func TestEnrollRejectsOverrideless(t *testing.T) {
 	h := newHarness(t, func(o *hopts) { o.noIdent = true; o.noStart = true })
 
 	// Without the test trust override the hub certificate is not trusted.
-	if err := Enroll(context.Background(), h.cfg, "x", nil); err == nil {
+	err := Enroll(t.Context(), h.cfg, "x", nil)
+	if err == nil {
 		t.Fatal("enrollment succeeded against an untrusted hub")
 	}
 }

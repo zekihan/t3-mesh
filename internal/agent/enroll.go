@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -24,11 +23,11 @@ const enrollTimeout = 30 * time.Second
 // promoted only after the hub answered, so a failed enrollment never leaves the
 // old certificate without its key.
 //
-// hubTLS overrides trust for tests; production passes nil and the hub is
+// HubTLS overrides trust for tests; production passes nil and the hub is
 // verified with system roots and the exact host name.
 func Enroll(ctx context.Context, cfg *agentconfig.Config, token string, hubTLS *tls.Config) error {
 	if token == "" {
-		return errors.New("enroll: token is required")
+		return errTokenRequired
 	}
 
 	store := pki.Store{Dir: cfg.Identity.Dir}
@@ -45,7 +44,8 @@ func Enroll(ctx context.Context, cfg *agentconfig.Config, token string, hubTLS *
 
 	existing := store.Exists()
 	if !existing {
-		if err = store.SaveKey(key); err != nil {
+		err = store.SaveKey(key)
+		if err != nil {
 			return fmt.Errorf("enroll: save key: %w", err)
 		}
 	}
@@ -55,7 +55,8 @@ func Enroll(ctx context.Context, cfg *agentconfig.Config, token string, hubTLS *
 		return err
 	}
 
-	if err = checkEnrolledIdentity(reply, cfg.Identity.Name); err != nil {
+	err = checkEnrolledIdentity(reply, cfg.Identity.Name)
+	if err != nil {
 		return err
 	}
 
@@ -69,18 +70,21 @@ func saveEnrolled(
 	existing bool,
 ) error {
 	if existing {
-		if err := store.SaveNext(key, []byte(reply.Certificate), []byte(reply.Chain)); err != nil {
+		err := store.SaveNext(key, []byte(reply.Certificate), []byte(reply.Chain))
+		if err != nil {
 			return fmt.Errorf("enroll: save certificate: %w", err)
 		}
 
-		if err := store.PromoteNext(); err != nil {
+		err = store.PromoteNext()
+		if err != nil {
 			return fmt.Errorf("enroll: promote certificate: %w", err)
 		}
 
 		return nil
 	}
 
-	if err := store.SaveCert([]byte(reply.Certificate), []byte(reply.Chain)); err != nil {
+	err := store.SaveCert([]byte(reply.Certificate), []byte(reply.Chain))
+	if err != nil {
 		return fmt.Errorf("enroll: save certificate: %w", err)
 	}
 
@@ -99,7 +103,12 @@ func checkEnrolledIdentity(reply proto.Enrolled, name string) error {
 	}
 
 	if got != name {
-		return fmt.Errorf("enroll: hub issued identity %q, want %q", got, name)
+		return fmt.Errorf(
+			"enroll: hub issued identity %q, want %q: %w",
+			got,
+			name,
+			errIdentityMismatch,
+		)
 	}
 
 	return nil
@@ -137,18 +146,21 @@ func enrollExchange(
 	defer func() { _ = raw.Close() }()
 
 	if dl, ok := ctx.Deadline(); ok {
-		_ = raw.SetDeadline(dl)
+		setDeadline(raw.SetDeadline, dl)
 	}
 
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	defer stop()
 
 	conn := tls.Client(raw, tlsCfg)
-	if err = conn.HandshakeContext(ctx); err != nil {
+
+	err = conn.HandshakeContext(ctx)
+	if err != nil {
 		return proto.Enrolled{}, fmt.Errorf("enroll: tls handshake: %w", err)
 	}
 
-	if err = proto.WriteMessage(conn, req); err != nil {
+	err = proto.WriteMessage(conn, req)
+	if err != nil {
 		return proto.Enrolled{}, fmt.Errorf("enroll: send request: %w", err)
 	}
 
@@ -161,8 +173,8 @@ func enrollExchange(
 	case proto.Enrolled:
 		return m, nil
 	case proto.Reject:
-		return proto.Enrolled{}, fmt.Errorf("enroll: hub rejected (%s): %s", m.Reason, m.Detail)
+		return proto.Enrolled{}, fmt.Errorf("%w (%s): %s", errEnrollRejected, m.Reason, m.Detail)
 	default:
-		return proto.Enrolled{}, fmt.Errorf("enroll: unexpected %s reply", msg.MessageType())
+		return proto.Enrolled{}, fmt.Errorf("enroll: %s: %w", msg.MessageType(), errUnexpectedReply)
 	}
 }

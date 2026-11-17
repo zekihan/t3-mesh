@@ -47,82 +47,83 @@ const (
 	pingProbeTimeout    = 2 * time.Second
 	lookupTimeout       = 5 * time.Second
 	shutdownWait        = 5 * time.Second
+	maxBackoffShift     = 30
+)
+
+var (
+	errConfigRequired   = errors.New("agent: config is required")
+	errTokenRequired    = errors.New("enroll: token is required")
+	errIdentityMismatch = errors.New("identity mismatch")
+	errEnrollRejected   = errors.New("enroll: hub rejected")
+	errUnexpectedReply  = errors.New("unexpected reply")
+	errRenewRefused     = errors.New("hub refused renewal")
+	errRenewSessionDone = errors.New("session closed during renewal")
+	errNoRenewReply     = errors.New("no renewal reply from hub")
+	errNoHelloAck       = errors.New("no HelloAck from hub")
 )
 
 // Options configures an Agent.
 type Options struct {
-	Config *agentconfig.Config
-	// Version is the build version, "dev" for non-release builds.
-	Version string
-	Log     *slog.Logger
-	Now     func() time.Time
-	// HubTLS overrides trust for the hub in tests: RootCAs and ServerName.
-	// Production leaves it nil and uses system roots and the exact hub host.
-	HubTLS *tls.Config
-	// Health is the launcher health pipe; nil opens it from the environment.
-	Health updater.HealthSink
-	// LocalAddrs and GatewayMAC override host network lookups in tests, which
-	// need loopback addresses that the real lookup excludes.
+	Health     updater.HealthSink
+	Config     *agentconfig.Config
+	Log        *slog.Logger
+	Now        func() time.Time
+	HubTLS     *tls.Config
 	LocalAddrs func() ([]netip.Addr, error)
 	GatewayMAC func() (string, error)
+	Version    string
 }
 
 // Agent is the running agent.
 type Agent struct {
-	cfg     *agentconfig.Config
-	log     *slog.Logger
-	now     func() time.Time
-	version string
-	store   pki.Store
-	hubTLS  *tls.Config
-	health  updater.HealthSink
-
-	// Seams for tests and tuning.
-	lookupHost  func(ctx context.Context, host string) ([]netip.Addr, error)
-	addrPresent func(netip.Addr) bool
-	gatewayMAC  func() (string, error)
-	localAddrs  func() ([]netip.Addr, error)
-	backoffBase time.Duration
-	backoffMax  time.Duration
-	statusEvery time.Duration
-	renewEvery  time.Duration
-	renewWindow time.Duration
-	renewRetry  time.Duration
-
-	ctx context.Context //nolint:containedctx // run context shared by session goroutines
-	wg  sync.WaitGroup
-
-	direct *direct.Manager
-	upd    *updater.Updater
-
-	mu           sync.Mutex
 	ident        tls.Certificate
-	cache        *state.Cache
-	roots        *x509.CertPool
-	rootsPEM     string
-	prefixes     []netip.Prefix
-	cur          *session
-	live         map[*session]struct{}
-	warnings     []string
-	lastSave     time.Time
-	lastHelloAck time.Time
 	renewAfter   time.Time
-
-	saveMu sync.Mutex
-	dialMu sync.Mutex
-
-	kick        chan struct{}
-	curChanged  chan struct{}
-	statusNudge chan struct{}
-	renewKick   chan struct{}
-
-	renewing atomic.Bool
+	lastHelloAck time.Time
+	lastSave     time.Time
+	health       updater.HealthSink
+	ctx          context.Context //nolint:containedctx // root context of the background goroutines
+	localAddrs   func() ([]netip.Addr, error)
+	now          func() time.Time
+	addrPresent  func(netip.Addr) bool
+	gatewayMAC   func() (string, error)
+	cfg          *agentconfig.Config
+	renewKick    chan struct{}
+	statusNudge  chan struct{}
+	curChanged   chan struct{}
+	kick         chan struct{}
+	log          *slog.Logger
+	lookupHost   func(ctx context.Context, host string) ([]netip.Addr, error)
+	hubTLS       *tls.Config
+	live         map[*session]struct{}
+	direct       *direct.Manager
+	upd          *updater.Updater
+	cur          *session
+	roots        *x509.CertPool
+	cache        *state.Cache
+	version      string
+	rootsPEM     string
+	store        pki.Store
+	prefixes     []netip.Prefix
+	warnings     []string
+	wg           sync.WaitGroup
+	renewWindow  time.Duration
+	renewRetry   time.Duration
+	renewEvery   time.Duration
+	statusEvery  time.Duration
+	backoffMax   time.Duration
+	backoffBase  time.Duration
+	mu           sync.Mutex
+	saveMu       sync.Mutex
+	dialMu       sync.Mutex
+	renewing     atomic.Bool
 }
 
 // New validates opts and returns an Agent. Identity and state are loaded by Run.
-func New(opts Options) (*Agent, error) {
+func New(
+	opts Options, //nolint:gocritic // Options is passed by value in the public API
+) (*Agent, error) {
 	if opts.Config == nil {
-		return nil, errors.New("agent: config is required")
+		return nil, errConfigRequired
 	}
 
 	if opts.Log == nil {
@@ -133,9 +134,9 @@ func New(opts Options) (*Agent, error) {
 		opts.Now = time.Now
 	}
 
-	a := &Agent{
+	agent := &Agent{
 		cfg:         opts.Config,
-		log:         opts.Log.With("component", "agent"),
+		log:         opts.Log.With(slog.String("component", "agent")),
 		now:         opts.Now,
 		version:     opts.Version,
 		store:       pki.Store{Dir: opts.Config.Identity.Dir},
@@ -156,17 +157,17 @@ func New(opts Options) (*Agent, error) {
 		statusNudge: make(chan struct{}, 1),
 		renewKick:   make(chan struct{}, 1),
 	}
-	a.lookupHost = a.defaultLookup
+	agent.lookupHost = agent.defaultLookup
 
 	if opts.LocalAddrs != nil {
-		a.localAddrs = opts.LocalAddrs
+		agent.localAddrs = opts.LocalAddrs
 	}
 
 	if opts.GatewayMAC != nil {
-		a.gatewayMAC = opts.GatewayMAC
+		agent.gatewayMAC = opts.GatewayMAC
 	}
 
-	return a, nil
+	return agent, nil
 }
 
 func defaultGatewayMAC() (string, error) {
@@ -183,45 +184,37 @@ func defaultAddrPresent(a netip.Addr) bool {
 	return a.IsLoopback() || netwatch.AddrPresent(a)
 }
 
-func (a *Agent) defaultLookup(ctx context.Context, host string) ([]netip.Addr, error) {
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return nil, fmt.Errorf("lookup %s: %w", host, err)
-	}
-
-	return addrs, nil
-}
-
 // Run starts the agent and blocks until ctx ends or startup fails. Startup
 // loads the identity and cached state, binds every link port and reconciles the
 // direct listener from cached state; only then does it report the local
 // startup check to the launcher, so a hub outage never fails it.
-func (a *Agent) Run(ctx context.Context) error {
+func (agent *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	a.ctx = ctx
+	agent.ctx = ctx
 
-	if err := a.loadLocal(); err != nil {
+	err := agent.loadLocal()
+	if err != nil {
 		return err
 	}
 
-	if a.cfg.Direct.Enabled {
-		a.direct = direct.New(direct.Options{
-			Port:       a.cfg.Direct.Port,
-			CacheTTL:   a.cfg.Direct.CacheTTL,
-			Serve:      a.cfg.Serve,
-			View:       a.view,
-			Log:        a.log,
-			Now:        a.now,
-			GatewayMAC: a.gatewayMAC,
-			LocalAddrs: a.localAddrs,
+	if agent.cfg.Direct.Enabled {
+		agent.direct = direct.New(direct.Options{
+			Port:       agent.cfg.Direct.Port,
+			CacheTTL:   agent.cfg.Direct.CacheTTL,
+			Serve:      agent.cfg.Serve,
+			View:       agent.view,
+			Log:        agent.log,
+			Now:        agent.now,
+			GatewayMAC: agent.gatewayMAC,
+			LocalAddrs: agent.localAddrs,
 		})
 
-		defer func() { _ = a.direct.Close() }()
+		defer func() { _ = agent.direct.Close() }()
 	}
 
-	links, err := a.bindLinks()
+	links, err := agent.bindLinks(ctx)
 	if err != nil {
 		return err
 	}
@@ -232,44 +225,55 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
-	if a.direct != nil {
-		a.direct.Reconcile(ctx)
+	if agent.direct != nil {
+		agent.direct.Reconcile(ctx)
 	}
 
-	a.setupUpdater()
-	a.startupOK()
+	agent.setupUpdater()
+	agent.startupOK()
 
 	for _, l := range links {
-		a.wg.Go(l.serve)
+		agent.wg.Go(l.serve)
 	}
 
-	a.wg.Go(func() { a.tunnelLoop(ctx) })
-	a.wg.Go(func() { a.netLoop(ctx) })
-	a.wg.Go(func() { a.statusLoop(ctx) })
-	a.wg.Go(func() { a.renewLoop(ctx) })
+	agent.wg.Go(func() { agent.tunnelLoop(ctx) })
+	agent.wg.Go(func() { agent.netLoop(ctx) })
+	agent.wg.Go(func() { agent.statusLoop(ctx) })
+	agent.wg.Go(func() { agent.renewLoop(ctx) })
 
-	if a.upd != nil {
-		a.wg.Go(func() {
-			if uerr := a.upd.Run(ctx); uerr != nil && !errors.Is(uerr, context.Canceled) {
-				a.log.Error("updater stopped", "err", uerr)
+	if agent.upd != nil {
+		agent.wg.Go(func() {
+			uerr := agent.upd.Run(ctx)
+			if uerr != nil && !errors.Is(uerr, context.Canceled) {
+				agent.log.ErrorContext(ctx, "Updater stopped", slog.Any("err", uerr))
 			}
 		})
 	}
 
 	<-ctx.Done()
-	a.closeLinks(links)
-	a.shutdown()
+	agent.closeLinks(links)
+	agent.shutdown()
 
 	return nil
 }
 
-func (a *Agent) shutdown() {
-	a.mu.Lock()
-	sessions := make([]*session, 0, len(a.live))
-	for s := range a.live {
+func (agent *Agent) defaultLookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("lookup %s: %w", host, err)
+	}
+
+	return addrs, nil
+}
+
+func (agent *Agent) shutdown() {
+	agent.mu.Lock()
+
+	sessions := make([]*session, 0, len(agent.live))
+	for s := range agent.live {
 		sessions = append(sessions, s)
 	}
-	a.mu.Unlock()
+	agent.mu.Unlock()
 
 	for _, s := range sessions {
 		s.close()
@@ -278,26 +282,26 @@ func (a *Agent) shutdown() {
 	done := make(chan struct{})
 
 	go func() {
-		a.wg.Wait()
+		agent.wg.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(shutdownWait):
-		a.log.Warn("shutdown timed out waiting for goroutines")
+		agent.log.Warn("Shutdown timed out waiting for goroutines")
 	}
 
-	a.saveCache()
+	agent.saveCache()
 }
 
-func (a *Agent) loadLocal() error {
-	tc, _, err := a.store.Load()
+func (agent *Agent) loadLocal() error {
+	tc, _, err := agent.store.Load()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf(
 				"agent: no identity in %s, run `t3-mesh-agent enroll --token <token>` first: %w",
-				a.cfg.Identity.Dir,
+				agent.cfg.Identity.Dir,
 				err,
 			)
 		}
@@ -305,22 +309,21 @@ func (a *Agent) loadLocal() error {
 		return fmt.Errorf("agent: load identity: %w", err)
 	}
 
-	cache, err := state.Load(a.cfg.StateDir)
+	cache, err := state.Load(agent.cfg.StateDir)
 	if err != nil {
 		return fmt.Errorf("agent: load state: %w", err)
 	}
 
-	a.mu.Lock()
-	a.ident = tc
-	a.cache = cache
-	a.deriveLocked()
-	a.mu.Unlock()
+	agent.mu.Lock()
+	agent.ident = tc
+	agent.cache = cache
+	agent.deriveLocked()
+	agent.mu.Unlock()
 
-	if tc.Leaf != nil && !a.now().Before(tc.Leaf.NotAfter) {
-		a.log.Warn(
-			"identity certificate expired, re-enroll",
-			"not_after",
-			tc.Leaf.NotAfter.Format(time.RFC3339),
+	if tc.Leaf != nil && !agent.now().Before(tc.Leaf.NotAfter) {
+		agent.log.Warn(
+			"Identity certificate expired, re-enroll",
+			slog.String("notAfter", tc.Leaf.NotAfter.Format(time.RFC3339)),
 		)
 	}
 
@@ -330,132 +333,135 @@ func (a *Agent) loadLocal() error {
 // deriveLocked rebuilds the trust pool and home prefixes from the cache. Direct
 // stays inactive until a trust bundle is cached: without roots there are no
 // prefixes, so no listener binds, and dials fail fast in the direct package.
-func (a *Agent) deriveLocked() {
-	if pem := a.cache.TrustBundle.PEM; pem != a.rootsPEM {
-		a.rootsPEM = pem
-		a.roots = nil
+func (agent *Agent) deriveLocked() {
+	if pem := agent.cache.TrustBundle.PEM; pem != agent.rootsPEM {
+		agent.rootsPEM = pem
+		agent.roots = nil
 
 		if pem != "" {
 			pool, err := pki.PoolFromPEM([]byte(pem))
 			if err != nil {
-				a.log.Warn("trust bundle unusable", "err", err)
+				agent.log.Warn("Trust bundle unusable", slog.Any("err", err))
 			} else {
-				a.roots = pool
+				agent.roots = pool
 			}
 		}
 	}
 
-	a.prefixes = a.prefixes[:0:0]
+	agent.prefixes = agent.prefixes[:0:0]
 
-	for _, c := range a.cache.HomeCIDRs {
-		p, err := netip.ParsePrefix(c)
+	for _, c := range agent.cache.HomeCIDRs {
+		prefix, err := netip.ParsePrefix(c)
 		if err != nil {
-			a.log.Warn("bad home cidr", "cidr", c, "err", err)
+			agent.log.Warn("Bad home cidr", slog.String("cidr", c),
+				slog.Any("err", err),
+			)
 
 			continue
 		}
 
-		a.prefixes = append(a.prefixes, p.Masked())
+		agent.prefixes = append(agent.prefixes, prefix.Masked())
 	}
 }
 
-func (a *Agent) view() direct.View {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (agent *Agent) view() direct.View {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
 
-	self := a.cache.Machine
+	self := agent.cache.Machine
 	if self == "" {
-		self = strings.TrimPrefix(a.cfg.Identity.Name, "agent-")
+		self = strings.TrimPrefix(agent.cfg.Identity.Name, "agent-")
 	}
 
 	var prefixes []netip.Prefix
-	if a.roots != nil {
-		prefixes = a.prefixes
+	if agent.roots != nil {
+		prefixes = agent.prefixes
 	}
 
 	return direct.View{
 		Self:           self,
-		Identity:       a.ident,
-		Roots:          a.roots,
-		Rules:          a.cache.Rules,
-		Revocations:    a.cache.Revocations,
-		Peers:          a.cache.Peers.Peers,
-		SelfHome:       a.cache.Home,
-		HubConnected:   a.cur != nil,
-		LastHubContact: a.cache.LastHubContact,
-		HomeGatewayMAC: a.cache.HomeGatewayMAC,
+		Identity:       agent.ident,
+		Roots:          agent.roots,
+		Rules:          agent.cache.Rules,
+		Revocations:    agent.cache.Revocations,
+		Peers:          agent.cache.Peers.Peers,
+		SelfHome:       agent.cache.Home,
+		HubConnected:   agent.cur != nil,
+		LastHubContact: agent.cache.LastHubContact,
+		HomeGatewayMAC: agent.cache.HomeGatewayMAC,
 		HomePrefixes:   prefixes,
 	}
 }
 
-func (a *Agent) identity() tls.Certificate {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (agent *Agent) identity() tls.Certificate {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
 
-	return a.ident
+	return agent.ident
 }
 
-func (a *Agent) current() *session {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (agent *Agent) current() *session {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
 
-	return a.cur
+	return agent.cur
 }
 
-func (a *Agent) warn(msg string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (agent *Agent) warn(msg string) {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
 
-	if len(a.warnings) > 0 && a.warnings[len(a.warnings)-1] == msg {
+	if len(agent.warnings) > 0 && agent.warnings[len(agent.warnings)-1] == msg {
 		return
 	}
 
-	a.warnings = append(a.warnings, msg)
-	if len(a.warnings) > maxWarnings {
-		a.warnings = slices.Clone(a.warnings[len(a.warnings)-maxWarnings:])
+	agent.warnings = append(agent.warnings, msg)
+	if len(agent.warnings) > maxWarnings {
+		agent.warnings = slices.Clone(agent.warnings[len(agent.warnings)-maxWarnings:])
 	}
 }
 
-func (a *Agent) saveCache() {
-	a.mu.Lock()
-	if a.cache == nil {
-		a.mu.Unlock()
+func (agent *Agent) saveCache() {
+	agent.mu.Lock()
+	if agent.cache == nil {
+		agent.mu.Unlock()
 
 		return
 	}
 
-	c := *a.cache
-	a.lastSave = a.now()
-	a.mu.Unlock()
+	cache := *agent.cache
+	agent.lastSave = agent.now()
+	agent.mu.Unlock()
 
-	a.saveMu.Lock()
-	defer a.saveMu.Unlock()
+	agent.saveMu.Lock()
+	defer agent.saveMu.Unlock()
 
-	if err := state.Save(a.cfg.StateDir, &c); err != nil {
-		a.log.Error("state save failed", "err", err)
+	err := state.Save(agent.cfg.StateDir, &cache)
+	if err != nil {
+		agent.log.Error("State save failed", slog.Any("err", err))
 	}
 }
 
 // touchHub records a successful hub contact, saving at most once a minute.
-func (a *Agent) touchHub() {
-	a.mu.Lock()
-	now := a.now()
-	a.cache.LastHubContact = now
-	save := now.Sub(a.lastSave) >= saveThrottle || a.lastSave.IsZero()
-	a.mu.Unlock()
+func (agent *Agent) touchHub() {
+	agent.mu.Lock()
+	now := agent.now()
+	agent.cache.LastHubContact = now
+	save := now.Sub(agent.lastSave) >= saveThrottle || agent.lastSave.IsZero()
+	agent.mu.Unlock()
 
 	if save {
-		a.saveCache()
+		agent.saveCache()
 	}
 }
 
-func (a *Agent) reconcileDirect() {
-	if a.direct == nil {
+func (agent *Agent) reconcileDirect() {
+	if agent.direct == nil {
 		return
 	}
 
-	a.direct.Recheck()
-	a.direct.Reconcile(a.ctx)
+	agent.direct.Recheck()
+	agent.direct.Reconcile(agent.ctx)
 }
 
 func signal(ch chan struct{}) {
@@ -467,130 +473,142 @@ func signal(ch chan struct{}) {
 
 // setupUpdater enables self-update only for release builds running under the
 // launcher; otherwise Restart would silently do nothing.
-func (a *Agent) setupUpdater() {
-	_, verr := release.ParseVersion(a.version)
-	underLauncher := a.health != nil || os.Getenv(launcher.HealthFDEnv) != ""
+func (agent *Agent) setupUpdater() {
+	_, verr := release.ParseVersion(agent.version)
+	underLauncher := agent.health != nil || os.Getenv(launcher.HealthFDEnv) != ""
 
-	if a.health == nil {
-		h, err := launcher.OpenHealth()
+	if agent.health == nil {
+		health, err := launcher.OpenHealth()
 		if err != nil {
-			a.log.Error("open health pipe", "err", err)
+			agent.log.Error("Open health pipe", slog.Any("err", err))
 
-			h = &launcher.Health{}
+			health = &launcher.Health{}
 		}
 
-		a.health = h
+		agent.health = health
 	}
 
 	switch {
 	case verr != nil:
-		a.log.Info("self-update disabled", "reason", "not a release version", "version", a.version)
+		agent.log.Info(
+			"Self-update disabled",
+			slog.String("reason", "not a release version"),
+			slog.String("version", agent.version),
+		)
 
 		return
 	case !underLauncher:
-		a.log.Info("self-update disabled", "reason", "not running under the launcher")
+		agent.log.Info(
+			"Self-update disabled",
+			slog.String("reason", "not running under the launcher"),
+		)
 
 		return
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		a.log.Warn("executable path unknown", "err", err)
+		agent.log.Warn("Executable path unknown", slog.Any("err", err))
 	}
 
-	targets := make([]string, 0, len(a.cfg.Serve))
-	for _, t := range a.cfg.Serve {
+	targets := make([]string, 0, len(agent.cfg.Serve))
+	for _, t := range agent.cfg.Serve {
 		targets = append(targets, t)
 	}
 
 	slices.Sort(targets)
 
 	upd, err := updater.New(updater.Options{
-		Version:  a.version,
+		Version:  agent.version,
 		Platform: runtime.GOOS + "-" + runtime.GOARCH,
-		StateDir: a.cfg.StateDir,
-		Layout:   launcher.Layout{Dir: a.cfg.InstallDir},
-		Health:   a.health,
+		StateDir: agent.cfg.StateDir,
+		Layout:   launcher.Layout{Dir: agent.cfg.InstallDir},
+		Health:   agent.health,
 		Binary:   exe,
 		Hooks: updater.Hooks{
-			LastHelloAck:   a.lastHelloAckTime,
-			HubHandshakeOK: a.hubHandshakeOK,
-			NetworkUp:      a.networkUp,
+			LastHelloAck:   agent.lastHelloAckTime,
+			HubHandshakeOK: agent.hubHandshakeOK,
+			NetworkUp:      agent.networkUp,
 			ServeTargets:   targets,
 		},
-		Log: a.log,
-		Now: a.now,
+		Log: agent.log,
+		Now: agent.now,
 	})
 	if err != nil {
-		a.log.Error("self-update disabled", "reason", "updater setup failed", "err", err)
+		agent.log.Error("Self-update disabled", slog.String("reason", "updater setup failed"),
+			slog.Any("err", err),
+		)
 
 		return
 	}
 
-	a.upd = upd
+	agent.upd = upd
 }
 
 // startupOK reports the local startup check. It runs after the link ports are
 // bound and the direct listener is reconciled, and never waits for the hub.
-func (a *Agent) startupOK() {
-	if a.upd != nil {
-		a.upd.StartupOK()
+func (agent *Agent) startupOK() {
+	if agent.upd != nil {
+		agent.upd.StartupOK()
 
 		return
 	}
 
-	if a.health == nil {
+	if agent.health == nil {
 		return
 	}
 
-	if err := a.health.Ready(); err != nil {
-		a.log.Error("send ready", "err", err)
+	err := agent.health.Ready()
+	if err != nil {
+		agent.log.Error("Send ready", slog.Any("err", err))
 	}
 
-	a.wg.Go(func() {
-		t := time.NewTicker(healthAliveInterval)
-		defer t.Stop()
+	agent.wg.Go(func() {
+		ticker := time.NewTicker(healthAliveInterval)
+		defer ticker.Stop()
 
 		for {
 			select {
-			case <-a.ctx.Done():
+			case <-agent.ctx.Done():
 				return
-			case <-t.C:
-				if err := a.health.Alive(); err != nil {
-					a.log.Warn("send alive", "err", err)
+			case <-ticker.C:
+				err := agent.health.Alive()
+				if err != nil {
+					agent.log.Warn("Send alive", slog.Any("err", err))
 				}
 			}
 		}
 	})
 }
 
-func (a *Agent) lastHelloAckTime() time.Time {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (agent *Agent) lastHelloAckTime() time.Time {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
 
-	return a.lastHelloAck
+	return agent.lastHelloAck
 }
 
-func (a *Agent) networkUp() bool {
-	addrs, err := a.localAddrs()
+func (agent *Agent) networkUp() bool {
+	addrs, err := agent.localAddrs()
 
 	return err == nil && len(addrs) > 0
 }
 
-func (a *Agent) hubHandshakeOK(ctx context.Context) bool {
+func (agent *Agent) hubHandshakeOK(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 
 	d := net.Dialer{}
 
-	raw, err := d.DialContext(ctx, "tcp", a.cfg.HubAddr())
+	raw, err := d.DialContext(ctx, "tcp", agent.cfg.HubAddr())
 	if err != nil {
 		return false
 	}
 
 	defer func() { _ = raw.Close() }()
 
-	tc := tls.Client(raw, a.tunnelTLS(a.identity()))
+	ident := agent.identity()
+	tc := tls.Client(raw, agent.tunnelTLS(&ident))
 
 	return tc.HandshakeContext(ctx) == nil
 }

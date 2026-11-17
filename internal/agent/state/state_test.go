@@ -52,7 +52,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	want := sampleCache(t)
 
-	if err := Save(dir, want); err != nil {
+	err := Save(dir, want)
+	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -69,15 +70,16 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestSaveSetsFormatVersion(t *testing.T) {
 	dir := t.TempDir()
 
-	c := sampleCache(t)
-	c.FormatVersion = 0
+	cache := sampleCache(t)
+	cache.FormatVersion = 0
 
-	if err := Save(dir, c); err != nil {
+	err := Save(dir, cache)
+	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	if c.FormatVersion != 0 {
-		t.Fatalf("Save mutated caller's FormatVersion to %d", c.FormatVersion)
+	if cache.FormatVersion != 0 {
+		t.Fatalf("Save mutated caller's FormatVersion to %d", cache.FormatVersion)
 	}
 
 	got, err := Load(dir)
@@ -93,7 +95,8 @@ func TestSaveSetsFormatVersion(t *testing.T) {
 func TestSaveCreatesDirAndModes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "state")
 
-	if err := Save(dir, sampleCache(t)); err != nil {
+	err := Save(dir, sampleCache(t))
+	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -123,7 +126,8 @@ func TestSaveLeavesNoTempFiles(t *testing.T) {
 		c := sampleCache(t)
 		c.Machine = string(rune('a' + i))
 
-		if err := Save(dir, c); err != nil {
+		err := Save(dir, c)
+		if err != nil {
 			t.Fatalf("Save %d: %v", i, err)
 		}
 	}
@@ -154,27 +158,31 @@ func TestSaveLeavesNoTempFiles(t *testing.T) {
 
 func TestSaveFailsWhenDirIsFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+
+	err := os.WriteFile(path, []byte("x"), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Save(path, sampleCache(t)); err == nil {
+	err = Save(path, sampleCache(t))
+	if err == nil {
 		t.Fatal("Save accepted a file as directory")
 	}
 }
 
 func TestLoadMissingIsEmpty(t *testing.T) {
-	c, err := Load(filepath.Join(t.TempDir(), "absent"))
+	cache, err := Load(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if c.FormatVersion != FormatVersion {
-		t.Fatalf("FormatVersion = %d", c.FormatVersion)
+	if cache.FormatVersion != FormatVersion {
+		t.Fatalf("FormatVersion = %d", cache.FormatVersion)
 	}
 
-	if !c.LastHubContact.IsZero() || c.Home || c.Machine != "" || c.HomeGatewayMAC != "" {
-		t.Fatalf("missing cache not empty: %+v", c)
+	if !cache.LastHubContact.IsZero() || cache.Home || cache.Machine != "" ||
+		cache.HomeGatewayMAC != "" {
+		t.Fatalf("missing cache not empty: %+v", cache)
 	}
 }
 
@@ -182,7 +190,9 @@ func writeCache(t *testing.T, body string) string {
 	t.Helper()
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "cache.json"), []byte(body), 0o600); err != nil {
+
+	err := os.WriteFile(filepath.Join(dir, "cache.json"), []byte(body), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -204,7 +214,8 @@ func TestLoadRejectsBadVersions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Load(writeCache(t, tt.body)); err == nil {
+			_, err := Load(writeCache(t, tt.body))
+			if err == nil {
 				t.Fatal("Load accepted bad cache")
 			}
 		})
@@ -274,19 +285,24 @@ func TestWithinWindow(t *testing.T) {
 	ttl := 168 * time.Hour
 
 	tests := []struct {
-		name string
 		last time.Time
 		now  time.Time
+		name string
 		want bool
 	}{
-		{"zero last contact", time.Time{}, last, false},
-		{"same instant", last, last, true},
-		{"inside window", last, last.Add(time.Hour), true},
-		{"exactly at ttl", last, last.Add(ttl), true},
-		{"one nanosecond past ttl", last, last.Add(ttl + time.Nanosecond), false},
-		{"well past ttl", last, last.Add(30 * 24 * time.Hour), false},
-		{"small backwards skew", last, last.Add(-time.Minute), true},
-		{"clock moved far back", last, last.Add(-24 * time.Hour), false},
+		{name: "zero last contact", last: time.Time{}, now: last, want: false},
+		{name: "same instant", last: last, now: last, want: true},
+		{name: "inside window", last: last, now: last.Add(time.Hour), want: true},
+		{name: "exactly at ttl", last: last, now: last.Add(ttl), want: true},
+		{
+			name: "one nanosecond past ttl",
+			last: last,
+			now:  last.Add(ttl + time.Nanosecond),
+			want: false,
+		},
+		{name: "well past ttl", last: last, now: last.Add(30 * 24 * time.Hour), want: false},
+		{name: "small backwards skew", last: last, now: last.Add(-time.Minute), want: true},
+		{name: "clock moved far back", last: last, now: last.Add(-24 * time.Hour), want: false},
 	}
 
 	for _, tt := range tests {
@@ -299,18 +315,16 @@ func TestWithinWindow(t *testing.T) {
 	}
 }
 
+type applyCase struct {
+	check  func(*testing.T, *Cache)
+	name   string
+	update proto.Update
+}
+
 func TestApply(t *testing.T) {
 	home := true
 	rules := proto.Rules{Revision: "r2", Allow: map[string][]string{"t3.z": {"x"}}}
-	peers := proto.PeerTable{Revision: "p2"}
-	revs := proto.Revocations{Revision: "v2", DisabledIdentities: []string{"gone"}}
-	bundle := proto.TrustBundle{Revision: "t2", PEM: "pem"}
-
-	tests := []struct {
-		name   string
-		update proto.Update
-		check  func(*testing.T, *Cache)
-	}{
+	tests := []applyCase{
 		{
 			name:   "empty update changes nothing",
 			update: proto.Update{},
@@ -336,7 +350,7 @@ func TestApply(t *testing.T) {
 		},
 		{
 			name:   "home false clears home",
-			update: proto.Update{Home: boolPtr(false)},
+			update: proto.Update{Home: new(false)},
 			check: func(t *testing.T, c *Cache) {
 				t.Helper()
 
@@ -356,6 +370,17 @@ func TestApply(t *testing.T) {
 				}
 			},
 		},
+	}
+
+	runApplyCases(t, tests)
+}
+
+func TestApplyReplacesTables(t *testing.T) {
+	peers := proto.PeerTable{Revision: "p2"}
+	revs := proto.Revocations{Revision: "v2", DisabledIdentities: []string{"gone"}}
+	bundle := proto.TrustBundle{Revision: "t2", PEM: "pem"}
+
+	tests := []applyCase{
 		{
 			name:   "peers replaced",
 			update: proto.Update{Peers: &peers},
@@ -391,6 +416,12 @@ func TestApply(t *testing.T) {
 		},
 	}
 
+	runApplyCases(t, tests)
+}
+
+func runApplyCases(t *testing.T, tests []applyCase) {
+	t.Helper()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := sampleCache(t)
@@ -402,16 +433,15 @@ func TestApply(t *testing.T) {
 }
 
 func TestApplyLeavesContactAndMACAlone(t *testing.T) {
-	c := sampleCache(t)
-	before := *c
+	cache := sampleCache(t)
+	before := *cache
 
-	c.Apply(proto.Update{Home: boolPtr(false)})
+	cache.Apply(proto.Update{Home: new(false)})
 
-	if !c.LastHubContact.Equal(before.LastHubContact) || c.HomeGatewayMAC != before.HomeGatewayMAC ||
-		c.Release != before.Release ||
-		c.Machine != before.Machine {
-		t.Fatalf("Apply touched unrelated fields: %+v", c)
+	if !cache.LastHubContact.Equal(before.LastHubContact) ||
+		cache.HomeGatewayMAC != before.HomeGatewayMAC ||
+		cache.Release != before.Release ||
+		cache.Machine != before.Machine {
+		t.Fatalf("Apply touched unrelated fields: %+v", cache)
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }
