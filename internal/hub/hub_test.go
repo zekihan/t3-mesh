@@ -249,11 +249,12 @@ func backendHandler(body string) http.Handler {
 		//nolint:gosec // test backend echoing fixed strings and request metadata, not served to browsers
 		_, _ = fmt.Fprintf(
 			w,
-			"%s host=%s origin=%s mtls=%d",
+			"%s host=%s origin=%s mtls=%d proto=%s",
 			body,
 			r.Host,
 			r.Header.Get("Origin"),
 			len(mt),
+			r.Header.Get("X-Forwarded-Proto"),
 		)
 	})
 	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +600,7 @@ func TestViewerProxy(t *testing.T) {
 
 	b, _ := io.ReadAll(resp.Body)
 
-	want := "devbox-body host=t3.devbox.mesh.test origin=https://t3.devbox.mesh.test mtls=0"
+	want := "devbox-body host=t3.devbox.mesh.test origin=https://t3.devbox.mesh.test mtls=0 proto=https"
 	if resp.StatusCode != http.StatusOK || string(b) != want {
 		t.Fatalf("got %d %q, want %q", resp.StatusCode, b, want)
 	}

@@ -131,6 +131,9 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = pr.In.Host
 			pr.Out.Host = pr.In.Host
+			// Viewers always reach Traefik over TLS; services use this to mark
+			// cookies Secure. Rewrite has already dropped any inbound value.
+			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			if revoked.Load() {

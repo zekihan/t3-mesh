@@ -741,6 +741,15 @@ Traefik middleware lists a kind `agent` identity.
   `auth_invalid` (401) answers on every `/api/` route as an unpaired LAN client of
   the LAN-mode instance, and the WebSocket needs a ticket. M1 repeats the check on
   z-mac.
+  On z-mac (2026-11-17), where T3 is the desktop app, all 196 `/api/` routes answer
+  identically through the mesh and from a remote LAN client. With
+  `serverExposureMode: local-only` the desktop backend binds `127.0.0.1` and reports
+  the `desktop-managed-local` policy, whose advertised bootstrap method is
+  `desktop-bootstrap` only. A viewer still pairs with a one-time token minted on the
+  machine with `t3 auth pairing create --base-url https://t3.z-mac.mesh.noqer.com`,
+  because the server accepts any unexpired one-time token regardless of policy; the
+  in-app pairing UI does not offer this in local-only mode. The hub sends
+  `X-Forwarded-Proto: https` so T3 marks its session cookie `Secure`.
 - **Raw TCP services for viewers** (e.g. SSH). Traefik's HTTP policy middleware
   does not apply to TCP routes, so authorization for these would move into the hub.
   Out of scope for v1.
