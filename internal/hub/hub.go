@@ -123,7 +123,7 @@ func New(opts Options) (*Server, error) {
 	s.enrollH = &enroll.Handler{
 		Tokens:  s.tokens,
 		Issuer:  s.issuer,
-		Allowed: s.enrollAllowed,
+		Allowed: s.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
 			s.setNewest(identity, fp)
 			s.log.Info("certificate issued", "identity", identity, "fingerprint", fp, "via", "enrollment")
@@ -144,7 +144,9 @@ func (s *Server) Ready() bool {
 	return s.ready.Load() && s.cfg.Current() != nil
 }
 
-func (s *Server) enrollAllowed(identity string) error {
+// EnrollAllowed reports whether identity may enroll: a configured agent
+// identity that is not disabled.
+func (s *Server) EnrollAllowed(identity string) error {
 	snap := s.cfg.Current()
 	if _, ok := snap.MachineForIdentity(identity); !ok {
 		return fmt.Errorf("hub: %q is not a configured agent identity", identity)
