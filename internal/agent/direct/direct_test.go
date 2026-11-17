@@ -1,12 +1,14 @@
 package direct
 
 import (
+	"bytes"
 	"crypto/x509"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -578,5 +580,44 @@ func TestExpiryClosesSession(t *testing.T) {
 
 	if testEnv.b.mgr.Sessions() != 0 {
 		t.Fatal("session not expired")
+	}
+}
+
+func TestReconcileLogsDecisionChanges(t *testing.T) {
+	var buf bytes.Buffer
+
+	gw := "aa:bb:cc:dd:ee:ff"
+	node := &node{}
+	node.view = View{
+		HubConnected:   false,
+		LastHubContact: time.Now().Add(-time.Minute),
+		HomeGatewayMAC: "AA:BB:CC:DD:EE:FF",
+		HomePrefixes:   []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")},
+	}
+	mgr := New(Options{
+		CacheTTL: time.Hour, View: node.get,
+		Log:        slog.New(slog.NewTextHandler(&buf, nil)),
+		GatewayMAC: func() (string, error) { return gw, nil },
+		LocalAddrs: func() ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("10.167.57.4")}, nil
+		},
+	})
+
+	defer mgr.Close()
+
+	mgr.Reconcile(t.Context())
+	mgr.Reconcile(t.Context())
+
+	gw = "11:22:33:44:55:66"
+
+	mgr.Reconcile(t.Context())
+
+	out := buf.String()
+	if strings.Count(out, `reason="no local address in the home prefixes"`) != 1 {
+		t.Fatalf("want one no-address decision line, log:\n%s", out)
+	}
+
+	if strings.Count(out, `reason="hub unreachable and gateway differs from home"`) != 1 {
+		t.Fatalf("want one gateway decision line, log:\n%s", out)
 	}
 }

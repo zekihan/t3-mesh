@@ -86,18 +86,20 @@ type Options struct {
 
 // Manager runs the direct listeners, dialer and live-session tracking.
 type Manager struct {
-	ctx         context.Context //nolint:containedctx // root context of the listeners
-	log         *slog.Logger
-	cancel      context.CancelFunc
-	listeners   map[netip.Addr]net.Listener
-	sessions    map[*session]struct{}
-	pending     map[net.Conn]struct{}
-	failures    map[string]time.Time
-	opts        Options
-	wg          sync.WaitGroup
-	reconcileMu sync.Mutex
-	mu          sync.Mutex
-	closed      bool
+	ctx       context.Context //nolint:containedctx // root context of the listeners
+	log       *slog.Logger
+	cancel    context.CancelFunc
+	listeners map[netip.Addr]net.Listener
+	sessions  map[*session]struct{}
+	pending   map[net.Conn]struct{}
+	failures  map[string]time.Time
+	// The last logged listen decision; guarded by reconcileMu.
+	lastDecision string
+	opts         Options
+	wg           sync.WaitGroup
+	reconcileMu  sync.Mutex
+	mu           sync.Mutex
+	closed       bool
 }
 
 // New returns a started Manager. Call Reconcile to bind listeners.
@@ -264,21 +266,16 @@ func (mgr *Manager) Reconcile(ctx context.Context) {
 	want := make(map[netip.Addr]struct{})
 
 	if ok && err == nil {
-		for _, a := range netwatch.AddrsIn(local, view.HomePrefixes) {
-			a = a.Unmap()
-			if a.IsUnspecified() || a.Zone() != "" || (a.Is6() && a.IsLinkLocalUnicast()) {
-				continue
-			}
-
-			want[a] = struct{}{}
-		}
+		want = listenAddrs(local, view.HomePrefixes)
 	}
 
 	mgr.syncListeners(ctx, want, view.Self)
 
-	if !ok {
-		mgr.log.DebugContext(ctx, "Direct inactive", slog.String("reason", reason))
+	if ok && err == nil && len(want) == 0 {
+		ok, reason = false, "no local address in the home prefixes"
 	}
+
+	mgr.logDecision(ctx, ok, reason)
 
 	if err == nil {
 		present := make(map[netip.Addr]struct{}, len(local))
@@ -391,6 +388,47 @@ func (mgr *Manager) active(view *View, checkGateway bool) (bool, string) {
 	}
 
 	return true, ""
+}
+
+// listenAddrs returns the local addresses inside the home prefixes that a
+// direct listener may bind: no unspecified, zoned or link-local addresses.
+func listenAddrs(local []netip.Addr, prefixes []netip.Prefix) map[netip.Addr]struct{} {
+	want := make(map[netip.Addr]struct{})
+
+	for _, a := range netwatch.AddrsIn(local, prefixes) {
+		a = a.Unmap()
+		if a.IsUnspecified() || a.Zone() != "" || (a.Is6() && a.IsLinkLocalUnicast()) {
+			continue
+		}
+
+		want[a] = struct{}{}
+	}
+
+	return want
+}
+
+// logDecision logs whether direct is active, and why not, each time that
+// changes, so outage-mode choices show up in the log without repeating every
+// reconcile. Callers hold reconcileMu.
+func (mgr *Manager) logDecision(ctx context.Context, ok bool, reason string) {
+	decision := "active"
+	if !ok {
+		decision = "inactive: " + reason
+	}
+
+	if decision == mgr.lastDecision {
+		return
+	}
+
+	mgr.lastDecision = decision
+
+	if ok {
+		mgr.log.InfoContext(ctx, "Direct active")
+
+		return
+	}
+
+	mgr.log.InfoContext(ctx, "Direct inactive", slog.String("reason", reason))
 }
 
 func (mgr *Manager) syncListeners(ctx context.Context, want map[netip.Addr]struct{}, self string) {
