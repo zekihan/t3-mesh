@@ -182,31 +182,45 @@ type trackListener struct {
 
 	conns []net.Conn
 	mu    sync.Mutex
+	// refuse closes new connections at once, keeping agents that dial out.
+	refuse atomic.Bool
 }
 
-func (l *trackListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
+func (lst *trackListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := lst.Listener.Accept()
+		if err == nil && lst.refuse.Load() {
+			_ = conn.Close()
+
+			continue
+		}
+
+		return lst.record(conn, err)
+	}
+}
+
+func (lst *trackListener) record(conn net.Conn, err error) (net.Conn, error) {
 	if err == nil {
-		l.mu.Lock()
-		l.conns = append(l.conns, conn)
-		l.mu.Unlock()
+		lst.mu.Lock()
+		lst.conns = append(lst.conns, conn)
+		lst.mu.Unlock()
 	}
 
-	return conn, err //nolint:wrapcheck // passthrough
+	return conn, err
 }
 
-func (l *trackListener) count() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (lst *trackListener) count() int {
+	lst.mu.Lock()
+	defer lst.mu.Unlock()
 
-	return len(l.conns)
+	return len(lst.conns)
 }
 
-func (l *trackListener) since(n int) []net.Conn {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (lst *trackListener) since(n int) []net.Conn {
+	lst.mu.Lock()
+	defer lst.mu.Unlock()
 
-	return append([]net.Conn(nil), l.conns[n:]...)
+	return append([]net.Conn(nil), lst.conns[n:]...)
 }
 
 type meshOpts struct {
@@ -545,30 +559,47 @@ func (msh *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) 
 // ---- nodes (agent side) ----
 
 type node struct {
-	cert       tls.Certificate
-	t3         *httptest.Server
-	m          *mesh
-	t3stop     chan struct{}
-	cfg        *agentconfig.Config
-	cancel     context.CancelFunc
-	done       chan struct{}
-	identity   string
-	name       string
-	hubConns   []net.Conn
-	linkPort   int
-	directPort int
-	clock      atomic.Int64
+	cert   tls.Certificate
+	t3     *httptest.Server
+	m      *mesh
+	t3stop chan struct{}
+	cfg    *agentconfig.Config
+	cancel context.CancelFunc
+	done   chan struct{}
+	// netCh feeds the agent's network events when nodeOpts.fakeNet is set. It is
+	// unbuffered: once a second send returns, the first event has been handled.
+	netCh       chan netwatch.Event
+	lookup      atomic.Pointer[lookupFn]
+	identity    string
+	name        string
+	hubConns    []net.Conn
+	linkPort    int
+	directPort  int
+	clock       atomic.Int64
+	lookupCalls atomic.Int64
+	dnsRecheck  time.Duration
+	localGone   atomic.Bool
+	fakeNetwork bool
 }
 
+type lookupFn func(ctx context.Context, host string) ([]string, error)
+
 type nodeOpts struct {
-	notAfter   time.Time
-	ca         *pkitest.CA
+	ca       *pkitest.CA
+	notAfter time.Time
+	// hubName dials the hub by this name instead of 127.0.0.1, so the agent
+	// runs the DNS re-resolve check.
+	hubName    string
 	links      []string
 	directPort int
 	cacheTTL   time.Duration
+	dnsRecheck time.Duration
 	direct     bool
 	noIdentity bool
 	noStart    bool
+	// fakeNet replaces the OS network watcher, the hub lookup and the local
+	// address check with test-controlled ones.
+	fakeNet bool
 }
 
 type healthStub struct{}
@@ -625,6 +656,14 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 		InstallDir: filepath.Join(dir, "install"),
 		Hub:        msh.hubAddr,
 	}
+
+	if opts.hubName != "" {
+		nd.cfg.Hub = net.JoinHostPort(opts.hubName, msh.hubPort())
+	}
+
+	nd.fakeNetwork = opts.fakeNet
+	nd.dnsRecheck = opts.dnsRecheck
+	nd.netCh = make(chan netwatch.Event)
 
 	// A first start has no cached home prefixes, so the first Hello would list no
 	// direct addresses. Seed them as an agent that has connected before would have.
@@ -722,12 +761,21 @@ func (msh *mesh) seedIdentity(nd *node, opts *nodeOpts) {
 func (nd *node) start() {
 	nd.m.t.Helper()
 
-	agt, err := agent.New(agent.Options{
+	aopts := agent.Options{
 		Config: nd.cfg, Version: "dev", Log: logger(), Now: nd.nowFn,
 		HubTLS: nd.m.hubTLS(), Health: healthStub{},
 		LocalAddrs: func() ([]netip.Addr, error) { return []netip.Addr{nd.m.direct}, nil },
 		GatewayMAC: func() (string, error) { return fixedGatewayMAC, nil },
-	})
+	}
+
+	if nd.fakeNetwork {
+		aopts.NetEvents = nd.netCh
+		aopts.LookupHost = nd.doLookup
+		aopts.AddrPresent = func(netip.Addr) bool { return !nd.localGone.Load() }
+		aopts.DNSRecheckInterval = nd.dnsRecheck
+	}
+
+	agt, err := agent.New(aopts)
 	if err != nil {
 		nd.m.t.Fatal(err)
 	}
@@ -958,4 +1006,45 @@ func cmpTTL(d time.Duration) time.Duration {
 	}
 
 	return d
+}
+
+func (msh *mesh) hubPort() string {
+	_, port, err := net.SplitHostPort(msh.hubAddr)
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	return port
+}
+
+// doLookup is the agent's hub lookup; setLookup chooses the answer.
+func (nd *node) doLookup(ctx context.Context, host string) ([]string, error) {
+	nd.lookupCalls.Add(1)
+
+	fn := nd.lookup.Load()
+	if fn == nil {
+		return []string{"127.0.0.1"}, nil
+	}
+
+	return (*fn)(ctx, host)
+}
+
+func (nd *node) setLookup(fn lookupFn) { nd.lookup.Store(&fn) }
+
+// netEvent delivers ev to the agent and returns once the agent has handled it:
+// the loop is single-threaded, so a second send only completes after the first
+// event's path check finished.
+func (nd *node) netEvent(kind netwatch.EventKind) { nd.sendNetEvents(kind, 2) }
+
+// sendNetEvents sends n events back to back.
+func (nd *node) sendNetEvents(kind netwatch.EventKind, count int) {
+	nd.m.t.Helper()
+
+	for range count {
+		select {
+		case nd.netCh <- netwatch.Event{At: time.Now(), Kind: kind}:
+		case <-time.After(10 * time.Second):
+			nd.m.t.Fatal("agent did not take the network event")
+		}
+	}
 }

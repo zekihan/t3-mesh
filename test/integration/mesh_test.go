@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/zekihan/t3-mesh/internal/agent"
+	"github.com/zekihan/t3-mesh/internal/agent/state"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/pki/pkitest"
 	"github.com/zekihan/t3-mesh/internal/proto"
@@ -848,4 +849,60 @@ func TestHomeLinksSurviveHubOutage(t *testing.T) {
 	// New direct streams keep opening, too.
 	second := openHold(t, nodeA.linkURL("/hold"), nil, "")
 	assertOpen(t, second, "second direct stream with the hub down")
+}
+
+// An offline peer stays reachable directly: the hub keeps its last-known LAN
+// addresses in the peer table, and the agent still listens for direct sessions.
+func TestOfflinePeerLastKnownAddrsAllowDirect(t *testing.T) {
+	t.Parallel()
+
+	msh := newMesh(t, &meshOpts{})
+	skipNoDirect(t, msh)
+	nodeA, nodeB := msh.twoNodes(
+		&nodeOpts{direct: true, links: []string{"t3.b"}},
+		&nodeOpts{direct: true},
+	)
+	nodeA.waitDirectListening()
+	nodeB.waitDirectListening()
+	awaitDirect(t, msh, nodeA)
+
+	// Cut b's tunnel and refuse every new one: b is offline at the hub while a
+	// stays connected, and b's direct listener keeps running.
+	msh.tl.refuse.Store(true)
+	nodeB.dropTunnel()
+	eventually(
+		t,
+		5*time.Second,
+		"b offline",
+		func() bool { return !msh.status().Machines["b"].Connected },
+	)
+
+	// Wait until a has persisted the peer table with b offline but still
+	// carrying its addresses, then take the hub down: with the hub connected an
+	// offline peer is not "home", so only an outage makes the agent act on the
+	// last-known addresses.
+	eventually(t, 5*time.Second, "a cached b's last-known addresses", func() bool {
+		cache, err := state.Load(nodeA.cfg.StateDir)
+		if err != nil {
+			return false
+		}
+
+		for _, peer := range cache.Peers.Peers {
+			if peer.Machine == "b" {
+				return !peer.Home && len(peer.LANAddrs) > 0 && peer.DirectPort > 0
+			}
+		}
+
+		return false
+	})
+	msh.stopHub()
+
+	eventually(t, 15*time.Second, "a reaches offline b directly", func() bool {
+		code, body := get(t, nodeA.linkURL("/"), nil, "")
+
+		return code == http.StatusOK && body == "t3@b mtls=0"
+	})
+
+	second := openHold(t, nodeA.linkURL("/hold"), nil, "")
+	assertOpen(t, second, "direct stream to the offline peer with the hub down")
 }

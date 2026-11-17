@@ -71,7 +71,17 @@ type Options struct {
 	HubTLS     *tls.Config
 	LocalAddrs func() ([]netip.Addr, error)
 	GatewayMAC func() (string, error)
-	Version    string
+
+	// NetEvents replaces netwatch.Watch as the source of network events.
+	// Production leaves it nil.
+	NetEvents <-chan netwatch.Event
+	// LookupHost replaces the hub DNS lookup. Production leaves it nil.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
+	// AddrPresent replaces the local-address check. Production leaves it nil.
+	AddrPresent func(netip.Addr) bool
+	Version     string
+	// DNSRecheckInterval replaces the 30 s DNS backstop when positive.
+	DNSRecheckInterval time.Duration
 }
 
 // Agent is the running agent.
@@ -93,6 +103,7 @@ type Agent struct {
 	kick         chan struct{}
 	log          *slog.Logger
 	lookupHost   func(ctx context.Context, host string) ([]netip.Addr, error)
+	netEvents    <-chan netwatch.Event
 	hubTLS       *tls.Config
 	live         map[*session]struct{}
 	direct       *direct.Manager
@@ -106,6 +117,7 @@ type Agent struct {
 	prefixes     []netip.Prefix
 	warnings     []string
 	wg           sync.WaitGroup
+	dnsEvery     time.Duration
 	renewWindow  time.Duration
 	renewRetry   time.Duration
 	renewEvery   time.Duration
@@ -145,6 +157,8 @@ func New(
 		gatewayMAC:  defaultGatewayMAC,
 		localAddrs:  netwatch.LocalAddrs,
 		addrPresent: defaultAddrPresent,
+		netEvents:   opts.NetEvents,
+		dnsEvery:    dnsRecheckInterval,
 		backoffBase: defaultBackoffBase,
 		backoffMax:  defaultBackoffMax,
 		statusEvery: defaultStatusEvery,
@@ -167,7 +181,43 @@ func New(
 		agent.gatewayMAC = opts.GatewayMAC
 	}
 
+	if opts.LookupHost != nil {
+		agent.lookupHost = stringLookup(opts.LookupHost)
+	}
+
+	if opts.AddrPresent != nil {
+		agent.addrPresent = opts.AddrPresent
+	}
+
+	if opts.DNSRecheckInterval > 0 {
+		agent.dnsEvery = opts.DNSRecheckInterval
+	}
+
 	return agent, nil
+}
+
+// stringLookup adapts a lookup that returns textual addresses. Entries that do
+// not parse are dropped.
+func stringLookup(
+	lookup func(ctx context.Context, host string) ([]string, error),
+) func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return func(ctx context.Context, host string) ([]netip.Addr, error) {
+		raw, err := lookup(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+
+		addrs := make([]netip.Addr, 0, len(raw))
+
+		for _, text := range raw {
+			ad, perr := netip.ParseAddr(text)
+			if perr == nil {
+				addrs = append(addrs, ad)
+			}
+		}
+
+		return addrs, nil
+	}
 }
 
 func defaultGatewayMAC() (string, error) {

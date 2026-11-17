@@ -1232,3 +1232,24 @@ func TestEnrollRejectsOverrideless(t *testing.T) {
 		t.Fatal("enrollment succeeded against an untrusted hub")
 	}
 }
+
+func TestHelloAckClearsEmptiedHomeCIDRs(t *testing.T) {
+	t.Parallel()
+
+	agent := &Agent{
+		now:   time.Now,
+		cache: &state.Cache{HomeCIDRs: []string{"192.168.0.0/22"}},
+	}
+
+	agent.applyAckLocked(&proto.HelloAck{HomeCIDRs: []string{"10.0.0.0/8"}})
+
+	if got := agent.cache.HomeCIDRs; len(got) != 1 || got[0] != "10.0.0.0/8" {
+		t.Fatalf("HomeCIDRs = %v, want the ack's list", got)
+	}
+
+	agent.applyAckLocked(&proto.HelloAck{})
+
+	if got := agent.cache.HomeCIDRs; len(got) != 0 {
+		t.Fatalf("HomeCIDRs = %v, want cleared", got)
+	}
+}

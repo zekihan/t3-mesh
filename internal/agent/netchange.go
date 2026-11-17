@@ -11,8 +11,12 @@ import (
 
 // netLoop reacts to network changes, wake from sleep and a 30 s DNS backstop.
 func (agent *Agent) netLoop(ctx context.Context) {
-	events := netwatch.Watch(ctx, agent.log)
-	tick := time.NewTicker(dnsRecheckInterval)
+	events := agent.netEvents
+	if events == nil {
+		events = netwatch.Watch(ctx, agent.log)
+	}
+
+	tick := time.NewTicker(agent.dnsEvery)
 
 	defer tick.Stop()
 
