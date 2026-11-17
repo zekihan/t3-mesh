@@ -87,8 +87,8 @@ func CreateCSR(key *ecdsa.PrivateKey, identity string) ([]byte, error) {
 }
 
 // ValidateCSR checks the CSR signature, that the key is ECDSA P-256, that it
-// has exactly one URI SAN with the clients prefix and no CN, DNS, IP or email
-// SANs. It returns the parsed CSR and the identity name.
+// has exactly one URI SAN with the clients prefix, an empty subject and no
+// DNS, IP or email SANs. It returns the parsed CSR and the identity name.
 func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -109,8 +109,8 @@ func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 		return nil, "", errors.New("pki: CSR key is not ECDSA P-256")
 	}
 
-	if csr.Subject.CommonName != "" {
-		return nil, "", errors.New("pki: CSR has a common name")
+	if len(csr.Subject.Names) > 0 || len(csr.Subject.ExtraNames) > 0 {
+		return nil, "", errors.New("pki: CSR has subject attributes")
 	}
 
 	if len(csr.DNSNames) > 0 || len(csr.IPAddresses) > 0 || len(csr.EmailAddresses) > 0 {

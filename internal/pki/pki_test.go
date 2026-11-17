@@ -125,6 +125,7 @@ func TestValidateCSRRejects(t *testing.T) {
 
 	cases := map[string][]byte{
 		"cn":        rawCSR(t, key, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "x"}, URIs: []*url.URL{good}}),
+		"org":       rawCSR(t, key, &x509.CertificateRequest{Subject: pkix.Name{Organization: []string{"x"}}, URIs: []*url.URL{good}}),
 		"dns":       rawCSR(t, key, &x509.CertificateRequest{DNSNames: []string{"a.example"}, URIs: []*url.URL{good}}),
 		"ip":        rawCSR(t, key, &x509.CertificateRequest{IPAddresses: []net.IP{net.IPv4(1, 2, 3, 4)}, URIs: []*url.URL{good}}),
 		"email":     rawCSR(t, key, &x509.CertificateRequest{EmailAddresses: []string{"a@b.c"}, URIs: []*url.URL{good}}),
