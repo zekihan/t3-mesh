@@ -731,6 +731,13 @@ Traefik middleware lists a kind `agent` identity.
   (the `t3 auth`/`t3 pair` control plane is local), and that T3 with LAN mode off
   accepts a non-local `Host` such as `t3.devbox.mesh.noqer.com`. If either fails,
   the design needs a change before M1 is done.
+  Checked 2026-11-17 on z-arch (Linux, T3 0.1.11 nightly) with a separate instance
+  bound to `127.0.0.1` and LAN mode off: its auth policy is `loopback-browser`, the
+  only bootstrap method is a one-time token, an unauthenticated loopback request with
+  `Host` and `Origin` set to `t3.z-mac.mesh.noqer.com` is accepted and gets the same
+  `auth_invalid` (401) answers on every `/api/` route as an unpaired LAN client of
+  the LAN-mode instance, and the WebSocket needs a ticket. M1 repeats the check on
+  z-mac.
 - **Raw TCP services for viewers** (e.g. SSH). Traefik's HTTP policy middleware
   does not apply to TCP routes, so authorization for these would move into the hub.
   Out of scope for v1.
