@@ -1,6 +1,6 @@
 # t3-mesh design
 
-Status: accepted design; implementation in progress (M0 and M1 rolled out 2026-11-17; M1's phone checks pending). Date: 2026-11-16.
+Status: accepted design; implementation in progress (M0 and M1 done 2026-11-17). Date: 2026-11-16.
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -683,8 +683,10 @@ request through the agent as it answers a remote unpaired client; the LaunchDaem
 the LAN VIP despite Local Network privacy (the application firewall is off, and only
 matters for M3's direct listener); a live T3 WebSocket through the hub closes 0.8 s
 after the hub applies a blocked fingerprint. Revocation latency is bounded by the
-kubelet's ConfigMap refresh (about 70 s here). Still open: the phone itself from mobile
-data, home and away, and blocking its leaf through `libs/mtls-policy`.
+kubelet's ConfigMap refresh (about 70 s here). The phone, paired with a token from
+`t3 auth pairing create`, used T3 on z-mac from mobile data and from home; blocking
+its leaf in the hub's configuration revoked its open stream and refused its reconnects
+until the block was removed.
 
 **M2 gate (before the cutover), on real machines with real T3 through the full
 frp/Traefik path:** z-arch moves first: its T3 is bound to `127.0.0.1` with LAN mode
