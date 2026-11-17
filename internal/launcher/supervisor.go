@@ -231,6 +231,10 @@ func writeJSONAtomic(path string, v any) error {
 }
 
 func touch(path string) error {
+	return touchAt(path, time.Now())
+}
+
+func touchAt(path string, now time.Time) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
@@ -238,7 +242,6 @@ func touch(path string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
 	}
-	now := time.Now()
 	if err := os.Chtimes(path, now, now); err != nil {
 		return fmt.Errorf("launcher: touch %s: %w", path, err)
 	}

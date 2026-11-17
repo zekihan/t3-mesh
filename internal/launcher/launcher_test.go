@@ -109,13 +109,30 @@ func TestFallback(t *testing.T) {
 	if ok, err := Fallback(l, hb, 5*time.Minute, now); ok || err != nil {
 		t.Fatalf("fresh heartbeat: %v %v", ok, err)
 	}
-	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(6*time.Minute)); !ok || err != nil {
-		t.Fatalf("stale heartbeat: %v %v", ok, err)
+	// First stale reading (e.g. right after wake) only records suspicion.
+	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(6*time.Minute)); ok || err != nil {
+		t.Fatalf("first stale reading: %v %v", ok, err)
+	}
+	// A heartbeat after the suspicion clears it.
+	if err := touchAt(hb, now.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(8*time.Minute)); ok || err != nil {
+		t.Fatalf("recovered heartbeat: %v %v", ok, err)
+	}
+	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(13*time.Minute)); ok || err != nil {
+		t.Fatalf("new suspicion: %v %v", ok, err)
+	}
+	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(18*time.Minute)); !ok || err != nil {
+		t.Fatalf("stale twice: %v %v", ok, err)
 	}
 	if kg, _ := l.KnownGood(); kg != "1" {
 		t.Fatalf("kg=%s", kg)
 	}
 	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(time.Hour)); ok || err != nil {
+		t.Fatalf("re-suspect after fallback: %v %v", ok, err)
+	}
+	if ok, err := Fallback(l, hb, 5*time.Minute, now.Add(2*time.Hour)); ok || err != nil {
 		t.Fatalf("second fallback: %v %v", ok, err)
 	}
 }
