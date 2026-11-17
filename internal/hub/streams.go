@@ -18,7 +18,6 @@ import (
 // tracked is a relayed or viewer stream that is re-checked on every
 // configuration change and at its certificate's NotAfter.
 type tracked struct {
-	err     error
 	target  *session
 	source  *session
 	closeFn func()

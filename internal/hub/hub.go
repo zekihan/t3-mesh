@@ -460,27 +460,33 @@ func (server *Server) enforce() {
 		}
 	}
 
-	var doomed []*tracked
+	// Enforcement runs from both the sweep and config changes, so the reasons stay
+	// local rather than on the shared tracked entries.
+	type revoked struct {
+		track *tracked
+		err   error
+	}
+
+	var doomed []revoked
 
 	server.tmu.Lock()
 	for t := range server.tracked {
 		err := policy.Check(snap.Rules, snap.Revocations, t.pol, now)
 		if err != nil {
-			t.err = err
-			doomed = append(doomed, t)
+			doomed = append(doomed, revoked{track: t, err: err})
 		}
 	}
 	server.tmu.Unlock()
 
-	for _, track := range doomed {
+	for _, item := range doomed {
 		server.log.Info(
 			"Revoke stream",
-			slog.Any("kind", track.kind),
-			slog.Any("identity", track.pol.Identity),
-			slog.String("target", policy.Target(track.pol.Svc, track.pol.Machine)),
-			slog.String("reason", track.err.Error()),
+			slog.Any("kind", item.track.kind),
+			slog.Any("identity", item.track.pol.Identity),
+			slog.String("target", policy.Target(item.track.pol.Svc, item.track.pol.Machine)),
+			slog.String("reason", item.err.Error()),
 		)
-		track.close()
+		item.track.close()
 	}
 }
 
