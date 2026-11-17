@@ -50,10 +50,17 @@ the owner's own devices.
   does not allow a private fork of a public repository, and the mesh hostnames are
   already public in the t3-mesh docs. The fork's commits stay a small stack on top
   of an upstream nightly tag.
-- **Base.** Every build rebases the stack onto the newest upstream nightly tag,
-  e.g. `v0.1.11-nightly.20261117.4838`, not `main`, so the app matches the nightly
-  servers. Upstream tags several nightlies a day, and preview tags share the build
-  counter; only `-nightly.` tags are bases.
+- **Stack layout.** Fork code lives in its own files: `modules/t3-client-certificates`,
+  `src/features/mesh` and `plugins/withMesh*.cjs`. Upstream files get only small
+  hook edits that call into them. One commit per concern: mTLS, app identity, CI,
+  then one per mesh feature.
+- **Base.** Every build rebases the stack onto the newest upstream nightly tag at
+  run time, e.g. `v0.1.11-nightly.20261117.4838`, not `main`, so the app matches
+  the nightly servers. Upstream tags several nightlies a day, and preview tags share
+  the build counter; only `-nightly.` tags are bases. The weekly phone check against
+  the deployed servers catches incompatibilities.
+- **Upstream.** The client-certificate support stays in the fork. Discussion #17218
+  got no maintainer response and PR #27889 was closed; no upstream PR is planned.
 - **First port.** Bring nickypro's commit onto a current nightly. With Expo and
   React Native upgrades in between this is a port, not a cherry-pick; budget
   1–2 days.
@@ -199,8 +206,9 @@ directly.
 
 ## Build and distribution
 
-- **Build job.** A scheduled GitHub Actions job in the fork rebases onto the
-  newest nightly, runs the mobile tests, then `expo prebuild` and
+- **Build job.** A GitHub Actions job on each push to `mesh` runs the mobile tests
+  (JavaScript and the module's Kotlin unit tests; no emulator test, because
+  installing a KeyChain identity needs the UI), then `expo prebuild` and
   `./gradlew assembleRelease` for `arm64-v8a` only (Galaxy S24 Ultra and Galaxy
   Tab S9 FE+), unsigned. It has no secrets and a read-only token, because it runs
   freshly fetched upstream and dependency code.
@@ -209,12 +217,17 @@ directly.
   application ID `com.noqer.t3mesh`, the expected signing certificate fingerprint,
   `versionName` and `versionCode`, and Expo Updates disabled in the manifest. It
   refuses a `versionCode` at or below the last published one.
+- **Rollback.** A manual `workflow_dispatch` takes the last good release tag,
+  rebuilds that commit with the next `versionCode` and a `.rollback` suffix on
+  `versionName`, and publishes it. Android and Obtainium install only a higher
+  `versionCode`, so republishing the old APK would not work. Release tags keep old
+  commits reachable after `mesh` is force-pushed.
 - **Publish job.** Only this job may write releases.
 - **Signing key.** It lives in the secrets repo and is published to the fork's
   `release` environment by homelab `terraform/git`, like the t3-mesh minisign key.
   Losing it means reinstalling and re-pairing, so it is backed up.
-- **Accepted risk.** Releases publish without review. A compromised upstream or
-  dependency change reaches both devices, signed, within a week.
+- **Accepted risk.** Clean rebases publish without review. A compromised upstream
+  or dependency change reaches both devices, signed, within a week.
 - **Distribution.** Each build is a GitHub Release on the fork with the signed APK.
   Obtainium on each device tracks those releases and installs updates; Android
   refuses an update signed with a different key. No index, index key or hosting.
@@ -227,7 +240,7 @@ directly.
 | Field | Format | Example |
 |---|---|---|
 | `versionName` | `<nightly>+mesh.<rev>` | `0.1.11-nightly.20261117.4838+mesh.1` |
-| `versionCode` | `<nightly build number> × 100 + <rev>` | `483801` |
+| `versionCode` | `max(<nightly build number> × 100 + <rev>, <last published> + 1)` | `483801` |
 | Git tag | `v<nightly>-mesh.<rev>` | `v0.1.11-nightly.20261117.4838-mesh.1` |
 
 - Expo's `version` stays upstream's mobile version (e.g. `2.3.0`), because the app
@@ -235,19 +248,34 @@ directly.
   `versionName` and `versionCode`; upstream takes `versionCode` from EAS, so a local
   Gradle build would otherwise get 1.
 - `rev` restarts at 1 on each new upstream base and stays between 1 and 99.
-- The upstream build number only increases, so `versionCode` does too.
+- The upstream build number only increases, so `versionCode` normally follows the
+  formula; the `max` matters only after a rollback, whose old base would otherwise
+  get a lower code. A rollback's `versionName` is e.g.
+  `0.1.11-nightly.20261117.4825+mesh.3.rollback`.
 - Hub endpoints are versioned (`/api/v1/...`) independently of t3-mesh releases.
 
 ## Weekly upkeep
 
-- **Automation.** A scheduled task runs the rebase, tests and build, and publishes
-  the release. It reports only conflicts or failures.
+- **Automation.** A weekly T3 scheduled task on devbox fetches upstream and rebases
+  `mesh` onto the newest nightly. A clean rebase is force-pushed with devbox's
+  existing SSH key, and CI tests, builds, signs and publishes it. The clean path
+  runs no upstream code on devbox.
+- **Conflicts and failures.** A rebase conflict or a failed CI run goes to the
+  task's agent: it fixes it on a branch, runs the tests and opens a PR on the fork.
+  Nothing publishes until the owner merges, and the previous release stays live.
+- **Reporting.** Details stay in the task's T3 thread; the PR or a failure issue on
+  the fork arrives through GitHub notifications.
+- **Accepted risk.** devbox's SSH key can push to every repository, and the agent
+  runs upstream install and test scripts on devbox when fixing a failure. A
+  compromised upstream change met during a fix could use that key.
 - **Normal week.** A clean rebase, then a 10–15 minute phone check against all
   three machines on their deployed server versions: pair, chat, reconnect, an
   attachment and the Mesh screen.
 - **Bad week.** Conflicts concentrate in `features/connection` and `app.config.ts`.
   An Expo or React Native upgrade that breaks the native module costs half a day to
   a day every month or two.
+- **Exit.** No fixed rule; whether to keep the fork is decided case by case. The
+  browser on the mesh hosts remains the fallback.
 
 ## Milestones
 
