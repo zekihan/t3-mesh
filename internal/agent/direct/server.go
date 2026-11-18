@@ -18,10 +18,14 @@ import (
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
 
-func (mgr *Manager) serverTLS() *tls.Config {
+// serverTLS is the TLS configuration of every listener: TLS 1.3, the agent's own
+// leaf as the server certificate, and a client certificate that must chain to the
+// cached clients CA bundle. What else a caller must be is decided by the listener
+// that serves it, through verify.
+func (mgr *Manager) serverTLS(alpn string, verify func(raw [][]byte) error) *tls.Config {
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
-		NextProtos:             []string{proto.ALPNDirect},
+		NextProtos:             []string{alpn},
 		ClientAuth:             tls.RequireAnyClientCert,
 		SessionTicketsDisabled: true,
 		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -35,22 +39,28 @@ func (mgr *Manager) serverTLS() *tls.Config {
 			return &c, nil
 		},
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			v := mgr.view()
-			if v.Roots == nil {
-				return errNoTrustBundle
-			}
-
-			_, err := pki.VerifyPeer(raw, v.Roots, x509.ExtKeyUsageClientAuth, mgr.now())
-			if err != nil {
-				return fmt.Errorf("verify caller: %w", err)
-			}
-
-			return nil
+			return verify(raw)
 		},
 	}
 }
 
-func (mgr *Manager) acceptLoop(ln net.Listener) {
+// verifyAgent accepts a caller whose certificate chains to the cached bundle with
+// client auth usage.
+func (mgr *Manager) verifyAgent(raw [][]byte) error {
+	v := mgr.view()
+	if v.Roots == nil {
+		return errNoTrustBundle
+	}
+
+	_, err := pki.VerifyPeer(raw, v.Roots, x509.ExtKeyUsageClientAuth, mgr.now())
+	if err != nil {
+		return fmt.Errorf("verify caller: %w", err)
+	}
+
+	return nil
+}
+
+func (mgr *Manager) acceptLoop(ln net.Listener, serve func(net.Conn)) {
 	defer mgr.wg.Done()
 
 	for {
@@ -84,7 +94,7 @@ func (mgr *Manager) acceptLoop(ln net.Listener) {
 		mgr.wg.Add(1)
 		mgr.mu.Unlock()
 
-		go mgr.serve(conn)
+		go serve(conn)
 	}
 }
 
@@ -104,7 +114,7 @@ func (mgr *Manager) refuse(tc net.Conn, why string, attrs ...slog.Attr) {
 // handshake completes the TLS handshake with a caller and checks that it is an
 // agent. It refuses the connection and returns ok=false otherwise.
 func (mgr *Manager) handshake(raw net.Conn) (*tls.Conn, string, *x509.Certificate, bool) {
-	tc := tls.Server(raw, mgr.serverTLS())
+	tc := tls.Server(raw, mgr.serverTLS(proto.ALPNDirect, mgr.verifyAgent))
 
 	ctx, cancel := context.WithTimeout(mgr.ctx, serverSetupLimit)
 	defer cancel()
