@@ -738,6 +738,9 @@ func TestDeviceDirectFollowsTheHubsHomeVerdict(t *testing.T) {
 	rig.msh.update(func(c *hubCfg) { c.home = []string{"10.99.0.0/16"} })
 
 	ws.waitClosed(t, 10*time.Second, "machine away")
+	// Sessions are re-checked on their own and can close a moment before the
+	// listener is unbound; new connections in between are refused at admission.
+	eventually(t, 5*time.Second, "listener closed", func() bool { return !nd.listening() })
 	nd.neverListens(500*time.Millisecond, "machine away")
 	eventually(
 		t,
