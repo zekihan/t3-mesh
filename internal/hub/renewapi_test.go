@@ -63,7 +63,7 @@ func (harness *env) renewAs(call *renewCall) apiResponse {
 	req.Header.Set("Content-Type", call.contentType)
 	setViewerHeaders(req.Header, call.viewer, call.fp, call.notAfter)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oneShotClient.Do(req)
 	if err != nil {
 		harness.t.Fatal(err)
 	}

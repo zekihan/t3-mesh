@@ -38,7 +38,7 @@ func (harness *env) api(
 	req.Host = host
 	setViewerHeaders(req.Header, viewer, fp, notAfter)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oneShotClient.Do(req)
 	if err != nil {
 		harness.t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func (harness *env) fleet(viewer, realIP string) apiResponse {
 		req.Header.Set("X-Real-IP", realIP)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oneShotClient.Do(req)
 	if err != nil {
 		harness.t.Fatal(err)
 	}
