@@ -438,6 +438,7 @@ func (agent *Agent) view() direct.View {
 		Rules:          agent.cache.Rules,
 		Revocations:    agent.cache.Revocations,
 		Peers:          agent.cache.Peers.Peers,
+		DeviceLeaves:   agent.cache.DeviceLeaves,
 		SelfHome:       agent.cache.Home,
 		HubConnected:   agent.cur != nil,
 		LastHubContact: agent.cache.LastHubContact,

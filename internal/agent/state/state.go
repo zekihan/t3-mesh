@@ -35,9 +35,14 @@ type Cache struct {
 	HomeGatewayMAC string            `json:"homeGatewayMAC,omitempty"` //nolint:tagliatelle // persisted key
 	Revocations    proto.Revocations `json:"revocations"`
 	Peers          proto.PeerTable   `json:"peers"`
-	HomeCIDRs      []string          `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // persisted key
-	FormatVersion  int               `json:"formatVersion"`
-	Home           bool              `json:"home"`
+	// DeviceLeaves is the newest leaf of every enrolled device the hub told this
+	// agent about. The field is optional and the format version stays 1: a release
+	// before it ignores the key when reading and drops it when it next saves,
+	// and the hub sends the list again at the next HelloAck.
+	DeviceLeaves  proto.DeviceLeaves `json:"deviceLeaves,omitzero"`
+	HomeCIDRs     []string           `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // persisted key
+	FormatVersion int                `json:"formatVersion"`
+	Home          bool               `json:"home"`
 }
 
 // Load reads the cache in dir. A missing file yields an empty cache. A file written
@@ -188,5 +193,21 @@ func (cache *Cache) Apply(update proto.Update) {
 
 	if update.HomeCIDRs != nil {
 		cache.HomeCIDRs = slices.Clone(*update.HomeCIDRs)
+	}
+
+	if update.DeviceLeaves != nil {
+		cache.DeviceLeaves = cloneDeviceLeaves(update.DeviceLeaves)
+	}
+}
+
+func cloneDeviceLeaves(in *proto.DeviceLeaves) proto.DeviceLeaves {
+	return proto.DeviceLeaves{Revision: in.Revision, Leaves: slices.Clone(in.Leaves)}
+}
+
+// ApplyAck copies the device leaves of a HelloAck into the cache. A nil list
+// means the hub could not tell or predates them, and the cached one stays.
+func (cache *Cache) ApplyAck(ack *proto.HelloAck) {
+	if ack.DeviceLeaves != nil {
+		cache.DeviceLeaves = cloneDeviceLeaves(ack.DeviceLeaves)
 	}
 }
