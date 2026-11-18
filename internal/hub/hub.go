@@ -76,6 +76,7 @@ type Server struct {
 	log          *slog.Logger
 	newest       map[string]string
 	tokens       *enroll.Tokens
+	renewals     *renewLimiter
 	machines     map[string]*machineState
 	releaseRev   string
 	wg           sync.WaitGroup
@@ -122,6 +123,7 @@ func New(opts Options) (*Server, error) {
 		server.tokens = enroll.NewTokens(server.now)
 	}
 
+	server.renewals = newRenewLimiter(server.now)
 	server.started = server.now()
 	server.releaseSince = server.started
 	server.releaseRev = opts.Config.Current().Release.Revision
