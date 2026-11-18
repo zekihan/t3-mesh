@@ -108,7 +108,6 @@ func (q *connQueue) offer(ctx context.Context, conn net.Conn) bool {
 // upgrades or keep-alive gaps that spans.
 type deviceSession struct {
 	local    netip.Addr
-	notAfter time.Time
 	err      error
 	raw      net.Conn
 	m        *Manager
@@ -234,7 +233,6 @@ func (mgr *Manager) newDeviceSession(
 		local:    localAddrOf(raw),
 		identity: identity,
 		fp:       pki.Fingerprint(leaf),
-		notAfter: leaf.NotAfter,
 		backends: make(map[*backendConn]struct{}),
 	}
 	sess.rule = policy.Session{
