@@ -17,3 +17,9 @@ serve:
 # direct:
 #   enabled: true
 #   port: 27400
+#   # TLS listener for enrolled devices (the Android app), under the same home gate.
+#   # On whenever direct is; 27443 unless set. Both ports need to be reachable from the
+#   # LAN: see "Firewall" in docs/design.md.
+#   devices:
+#     port: 27443
+#     # enabled: false

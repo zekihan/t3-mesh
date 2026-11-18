@@ -48,7 +48,12 @@ func TestParseValid(t *testing.T) {
 		t.Fatalf("links = %v", cfg.Links)
 	}
 
-	want := Direct{Enabled: true, Port: 27400, CacheTTL: 168 * time.Hour}
+	want := Direct{
+		Enabled:  true,
+		Port:     27400,
+		CacheTTL: 168 * time.Hour,
+		Devices:  Devices{Enabled: true, Port: DefaultDevicesPort},
+	}
 	if cfg.Direct != want {
 		t.Fatalf("direct = %+v, want %+v", cfg.Direct, want)
 	}
@@ -85,6 +90,10 @@ hub: mesh.noqer.com:8443
 
 	if cfg.Direct.Enabled || cfg.Direct.CacheTTL != 168*time.Hour {
 		t.Fatalf("direct defaults = %+v", cfg.Direct)
+	}
+
+	if cfg.Direct.Devices.Enabled || cfg.Direct.Devices.Port != DefaultDevicesPort {
+		t.Fatalf("devices defaults = %+v, want off on %d", cfg.Direct.Devices, DefaultDevicesPort)
 	}
 
 	if cfg.HubAddr() != "mesh.noqer.com:8443" || cfg.HubHost() != "mesh.noqer.com" {
@@ -302,6 +311,95 @@ func TestParseInvalid(t *testing.T) {
 			"identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\ndirect:\n  enabled: true\n  port: 27400\n  ttl: 1h\n",
 		},
 		{"malformed yaml", "identity: [\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.doc))
+			if err == nil {
+				t.Fatal("Parse accepted invalid config")
+			}
+		})
+	}
+}
+
+const devicesBase = "identity:\n  name: agent-x\n  dir: /a/identity\nhub: h\n"
+
+func TestDevicesListener(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want Devices
+	}{
+		{
+			"on with direct, default port",
+			devicesBase + "direct:\n  enabled: true\n  port: 27400\n",
+			Devices{Enabled: true, Port: 27443},
+		},
+		{
+			"port from config",
+			devicesBase + "direct:\n  enabled: true\n  port: 27400\n  devices:\n    port: 27500\n",
+			Devices{Enabled: true, Port: 27500},
+		},
+		{
+			"switched off keeps the default port",
+			devicesBase + "direct:\n  enabled: true\n  port: 27400\n  devices:\n    enabled: false\n",
+			Devices{Enabled: false, Port: 27443},
+		},
+		{
+			"off with direct",
+			devicesBase + "direct:\n  enabled: false\n",
+			Devices{Enabled: false, Port: 27443},
+		},
+		{
+			"direct section absent",
+			devicesBase,
+			Devices{Enabled: false, Port: 27443},
+		},
+		{
+			"an unused default port may sit on a link port",
+			devicesBase + "links:\n  t3.a: 127.0.0.1:27443\ndirect:\n  enabled: false\n",
+			Devices{Enabled: false, Port: 27443},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.doc))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+
+			if cfg.Direct.Devices != tt.want {
+				t.Fatalf("devices = %+v, want %+v", cfg.Direct.Devices, tt.want)
+			}
+		})
+	}
+}
+
+func TestDevicesListenerInvalid(t *testing.T) {
+	const on = devicesBase + "direct:\n  enabled: true\n  port: 27400\n"
+
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{"port at the ephemeral floor", on + "  devices:\n    port: 40000\n"},
+		{"port out of range", on + "  devices:\n    port: 99999\n"},
+		{"port equals direct.port", on + "  devices:\n    port: 27400\n"},
+		{
+			"port collides with a link",
+			devicesBase + "links:\n  t3.a: 127.0.0.1:27443\ndirect:\n  enabled: true\n  port: 27400\n",
+		},
+		{
+			"explicit port collides with a link while off",
+			devicesBase + "links:\n  t3.a: 127.0.0.1:27500\ndirect:\n  enabled: false\n  devices:\n    port: 27500\n",
+		},
+		{
+			"on without direct",
+			devicesBase + "direct:\n  enabled: false\n  devices:\n    enabled: true\n",
+		},
+		{"unknown field", on + "  devices:\n    host: x\n"},
 	}
 
 	for _, tt := range tests {
