@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/tunnel"
@@ -91,7 +92,30 @@ func (server *Server) closeAllTracked() {
 	}
 }
 
+// checkNow reports whether a stream is still allowed: by the rules and
+// revocations, and, for an enrolled device, by what the hub knows of its
+// configuration and newest leaf.
 func (server *Server) checkNow(pol *policy.Session) error {
+	return server.checkSession(server.cfg.Current(), pol, server.now())
+}
+
+func (server *Server) checkSession(
+	snap *hubconfig.Snapshot,
+	pol *policy.Session,
+	now time.Time,
+) error {
+	err := policy.Check(snap.Rules, snap.Revocations, *pol, now)
+	if err != nil {
+		//nolint:wrapcheck // policy errors are returned verbatim; callers send them as reject reasons
+		return err
+	}
+
+	return server.deviceCurrent(snap, pol.Identity, pol.Fingerprint)
+}
+
+// checkRules is the rules and revocations half of checkNow, for a request that
+// has not yet been through the device check.
+func (server *Server) checkRules(pol *policy.Session) error {
 	snap := server.cfg.Current()
 
 	//nolint:wrapcheck // policy errors are returned verbatim; callers send them as reject reasons

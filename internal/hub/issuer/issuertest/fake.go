@@ -22,10 +22,12 @@ var (
 type Fake struct {
 	// PruneErr, if set, is returned by Prune.
 	PruneErr error
-	Sign     func(csrPEM []byte) (certPEM, chainPEM []byte, err error)
-	newest   map[string]string
-	pruned   []PruneCall
-	mu       sync.Mutex
+	// NewestErr, if set, is returned by Newest.
+	NewestErr error
+	Sign      func(csrPEM []byte) (certPEM, chainPEM []byte, err error)
+	newest    map[string]string
+	pruned    []PruneCall
+	mu        sync.Mutex
 }
 
 // Issue signs via Sign and records the leaf fingerprint as newest for identity.
@@ -74,6 +76,10 @@ func (fake *Fake) Newest(ctx context.Context, identity string) (string, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 
+	if fake.NewestErr != nil {
+		return "", fake.NewestErr
+	}
+
 	return fake.newest[identity], nil
 }
 
@@ -99,6 +105,14 @@ func (fake *Fake) PruneCalls() []PruneCall {
 	defer fake.mu.Unlock()
 
 	return slices.Clone(fake.pruned)
+}
+
+// SetNewestErr makes Newest fail with err; nil makes it work again.
+func (fake *Fake) SetNewestErr(err error) {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	fake.NewestErr = err
 }
 
 // SetNewest overrides the newest fingerprint for identity.
