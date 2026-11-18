@@ -212,10 +212,16 @@ type Enroll struct {
 	CSR   string `json:"csr"`
 }
 
-// Enrolled carries the enrolled certificate and chain (PEM).
+// Enrolled carries the enrolled certificate and chain (PEM), and the clients CA
+// bundle (PEM, one or more certificates) with its revision. An app that has no
+// tunnel to carry a HelloAck takes its trust anchors from here; agents already
+// get the same bundle in HelloAck and ignore these fields. Releases before
+// device enrollment send neither.
 type Enrolled struct {
 	Certificate string `json:"certificate"`
 	Chain       string `json:"chain"`
+	CABundle    string `json:"caBundle,omitempty"`
+	CARevision  string `json:"caRevision,omitempty"`
 }
 
 func (Hello) MessageType() string    { return TypeHello }

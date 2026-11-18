@@ -2,6 +2,8 @@ package proto
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -79,5 +81,73 @@ func TestReadLineLeavesRest(t *testing.T) {
 	rest, _ := io.ReadAll(&buf)
 	if string(rest) != "GET / HTTP/1.1\r\n" {
 		t.Fatalf("rest = %q", rest)
+	}
+}
+
+// The app speaks the enrollment protocol from the documented JSON, so the exact
+// bytes of both messages are pinned here.
+func TestEnrollWireFormat(t *testing.T) {
+	frame := func(msg Message) string {
+		t.Helper()
+
+		var buf bytes.Buffer
+
+		err := WriteMessage(&buf, msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		raw := buf.Bytes()
+		if n := binary.BigEndian.Uint32(raw[:4]); int(n) != len(raw)-4 {
+			t.Fatalf("length prefix %d, body %d", n, len(raw)-4)
+		}
+
+		return string(raw[4:])
+	}
+
+	got := frame(Enroll{Token: "tok", CSR: "csr"})
+	if want := `{"type":"Enroll","body":{"token":"tok","csr":"csr"}}`; got != want {
+		t.Errorf("Enroll = %s, want %s", got, want)
+	}
+
+	got = frame(Enrolled{Certificate: "leaf", Chain: "chain", CABundle: "bundle", CARevision: "r1"})
+	want := `{"type":"Enrolled","body":{"certificate":"leaf","chain":"chain",` +
+		`"caBundle":"bundle","caRevision":"r1"}}`
+
+	if got != want {
+		t.Errorf("Enrolled = %s, want %s", got, want)
+	}
+
+	got = frame(Reject{Reason: RejectEnrollFailed, Detail: "invalid token"})
+	if want := `{"type":"Reject","body":{"reason":"enroll-failed","detail":"invalid token"}}`; got != want {
+		t.Errorf("Reject = %s, want %s", got, want)
+	}
+}
+
+// A release that predates the CA fields still reads a new reply, and a new
+// reader reads an old one.
+func TestEnrolledIsCompatible(t *testing.T) {
+	var legacy struct {
+		Certificate string `json:"certificate"`
+		Chain       string `json:"chain"`
+	}
+
+	data, err := json.Marshal(
+		Enrolled{Certificate: "leaf", Chain: "chain", CABundle: "b", CARevision: "r"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = json.Unmarshal(data, &legacy)
+	if err != nil || legacy.Certificate != "leaf" || legacy.Chain != "chain" {
+		t.Fatalf("legacy decode: %+v, %v", legacy, err)
+	}
+
+	var current Enrolled
+
+	err = json.Unmarshal([]byte(`{"certificate":"leaf","chain":"chain"}`), &current)
+	if err != nil || current.CABundle != "" || current.CARevision != "" {
+		t.Fatalf("decode without CA fields: %+v, %v", current, err)
 	}
 }

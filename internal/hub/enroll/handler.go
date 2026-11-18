@@ -13,6 +13,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/hub/issuer"
 	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
@@ -25,6 +26,7 @@ var (
 	errCertCount           = errors.New("issued PEM holds the wrong number of certificates")
 	errIdentityMismatch    = errors.New("issued certificate identity differs")
 	errKeyMismatch         = errors.New("issued certificate key differs from CSR key")
+	errDeviceCert          = errors.New("issued device certificate is unusable")
 )
 
 // Handler serves enrollment connections (ALPN t3-mesh-enroll/1).
@@ -33,9 +35,11 @@ type Handler struct {
 	Issuer   issuer.Issuer
 	Allowed  func(identity string) error
 	OnIssued func(identity, fingerprint string)
-	Limiter  *Limiter
-	Log      *slog.Logger
-	Now      func() time.Time
+	// Trust returns the clients CA bundle sent with every certificate.
+	Trust   func() proto.TrustBundle
+	Limiter *Limiter
+	Log     *slog.Logger
+	Now     func() time.Time
 }
 
 // rejectedError carries a short, non-sensitive detail for the client.
@@ -208,7 +212,14 @@ func (handler *Handler) exchange(
 		handler.OnIssued(identity, fp)
 	}
 
-	return identity, fp, proto.Enrolled{Certificate: string(certPEM), Chain: string(chainPEM)}, nil
+	reply := proto.Enrolled{Certificate: string(certPEM), Chain: string(chainPEM)}
+
+	if handler.Trust != nil {
+		bundle := handler.Trust()
+		reply.CABundle, reply.CARevision = bundle.PEM, bundle.Revision
+	}
+
+	return identity, fp, reply, nil
 }
 
 func verifyLeaf(
@@ -238,6 +249,13 @@ func verifyLeaf(
 
 	if !samePublicKey(leaf.PublicKey, csr.PublicKey) {
 		return nil, errKeyMismatch
+	}
+
+	if policy.IsDevice(identity) {
+		err = pki.CheckDeviceLeaf(leaf)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errDeviceCert, err)
+		}
 	}
 
 	return leaf, nil
