@@ -15,6 +15,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
+	"github.com/zekihan/t3-mesh/internal/viewerproxy"
 )
 
 // Viewer headers set by traefik-mtls-authz.
@@ -136,20 +137,7 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	rp := &httputil.ReverseProxy{
 		Transport:     tr,
 		FlushInterval: -1,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			for k := range pr.Out.Header {
-				if strings.HasPrefix(strings.ToLower(k), "x-mtls-") {
-					delete(pr.Out.Header, k)
-				}
-			}
-
-			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = pr.In.Host
-			pr.Out.Host = pr.In.Host
-			// Viewers always reach Traefik over TLS; services use this to mark
-			// cookies Secure. Rewrite has already dropped any inbound value.
-			pr.Out.Header.Set("X-Forwarded-Proto", "https")
-		},
+		Rewrite:       viewerproxy.Rewrite,
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			if revoked.Load() {
 				// Closing the hijacked connection ends the request at once; an
