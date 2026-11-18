@@ -320,6 +320,98 @@ func TestAPIConfigInvalid(t *testing.T) {
 	}
 }
 
+func TestDevicesConfig(t *testing.T) {
+	t.Run("absent means no devices", func(t *testing.T) {
+		snap, err := loadAPIConfig(t, goodConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(snap.Devices) != 0 || snap.Device("device-z-phone-mesh") {
+			t.Fatalf("devices = %v", snap.Devices)
+		}
+	})
+
+	t.Run("sorted and unique", func(t *testing.T) {
+		snap, err := loadAPIConfig(
+			t,
+			goodConfig+"devices: [device-z-tablet-mesh, device-z-phone-mesh, device-z-tablet-mesh]\n",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Join(snap.Devices, ",") != "device-z-phone-mesh,device-z-tablet-mesh" {
+			t.Fatalf("devices = %v", snap.Devices)
+		}
+
+		if !snap.Device("device-z-phone-mesh") || snap.Device("z-phone") ||
+			snap.Device("agent-devbox") {
+			t.Fatal("Device mismatch")
+		}
+
+		if len(snap.Rules.Allow) != 2 || len(snap.APIIdentities) != 0 {
+			t.Fatalf("devices leaked into the rules or api callers: %v %v",
+				snap.Rules.Allow, snap.APIIdentities)
+		}
+	})
+
+	t.Run("changes the fingerprint", func(t *testing.T) {
+		before, err := loadAPIConfig(t, goodConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		after, err := loadAPIConfig(t, goodConfig+"devices: [device-z-phone-mesh]\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if before.Fingerprint == after.Fingerprint {
+			t.Fatal("snapshot fingerprint ignores devices")
+		}
+	})
+}
+
+func TestDevicesConfigInvalid(t *testing.T) {
+	bad := map[string]string{
+		"agent identity":       "devices: [agent-devbox]\n",
+		"keychain identity":    "devices: [z-phone]\n",
+		"missing suffix":       "devices: [device-z-phone]\n",
+		"missing name":         "devices: [device-mesh]\n",
+		"upper case":           "devices: [Device-Z-Phone-Mesh]\n",
+		"underscore":           "devices: [device-z_phone-mesh]\n",
+		"double dash":          "devices: [device-z--phone-mesh]\n",
+		"blank":                "devices: [\" \"]\n",
+		"uri":                  "devices: [\"urn:noqer:mtls:clients:device-z-phone-mesh\"]\n",
+		"too long":             "devices: [device-" + strings.Repeat("a", 40) + "-mesh]\n",
+		"one bad among good":   "devices: [device-z-phone-mesh, z-tablet]\n",
+		"agent among devices":  "devices: [device-z-phone-mesh, agent-z-mac]\n",
+		"unknown nested field": "devices: [device-z-phone-mesh]\nbogus: 1\n",
+		"not a list":           "devices: device-z-phone-mesh\n",
+	}
+
+	for name, extra := range bad {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadAPIConfig(t, goodConfig+extra)
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("want ErrInvalid, got %v", err)
+			}
+		})
+	}
+}
+
+// A machine identity is always agent-<machine>, so the names cannot collide;
+// the overlap check still refuses it should that rule ever loosen.
+func TestDevicesOverlapWithAgentIdentity(t *testing.T) {
+	cfg := &config{machines: map[string]Machine{"x": {Identity: "device-z-phone-mesh"}}}
+
+	err := cfg.parseDevices([]string{"device-z-phone-mesh"})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "agent identity") {
+		t.Fatalf("want an agent-overlap error, got %v", err)
+	}
+}
+
 func TestIsHome(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	snap, _ := Load(f.p)

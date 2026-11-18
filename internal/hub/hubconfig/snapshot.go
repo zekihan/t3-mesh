@@ -90,6 +90,9 @@ type Snapshot struct {
 	Revocations    proto.Revocations
 	HomePrefixes   []netip.Prefix
 	APIIdentities  []string
+	// Devices are the enrolled-device identities allowed to enroll and renew,
+	// sorted. Empty means device enrollment is off.
+	Devices []string
 }
 
 // IsAPIHost reports whether host (any case, optional port) is the hub API host.
@@ -100,6 +103,11 @@ func (snap *Snapshot) IsAPIHost(host string) bool {
 // APICaller reports whether identity is listed under api.identities.
 func (snap *Snapshot) APICaller(identity string) bool {
 	return slices.Contains(snap.APIIdentities, identity)
+}
+
+// Device reports whether identity is a configured enrolled-device identity.
+func (snap *Snapshot) Device(identity string) bool {
+	return slices.Contains(snap.Devices, identity)
 }
 
 func normalizeHost(host string) string {
@@ -174,6 +182,7 @@ func (snap *Snapshot) Services(machine string) []string {
 
 type rawConfig struct {
 	Machines map[string]rawMachine `yaml:"machines"`
+	Devices  []string              `yaml:"devices"`
 	//nolint:tagliatelle // public config key; renaming it would break existing config files
 	HomeCIDRs    []string `yaml:"homeCIDRs"`
 	ViewerDomain string   `yaml:"viewerDomain"`
@@ -217,6 +226,7 @@ type config struct {
 	viewerDomain string
 	apiHost      string
 	apiCallers   []string
+	devices      []string
 	revs         proto.Revocations
 	home         []netip.Prefix
 }
@@ -273,6 +283,11 @@ func parseConfig(data []byte) (*config, error) {
 	cfg := &config{machines: map[string]Machine{}}
 
 	err = cfg.parseMachines(raw.Machines)
+	if err != nil {
+		return nil, err
+	}
+
+	err = cfg.parseDevices(raw.Devices)
 	if err != nil {
 		return nil, err
 	}
@@ -353,6 +368,31 @@ func (cfg *config) parseMachines(in map[string]rawMachine) error {
 			DisconnectAlertAfter: alertAfter,
 		}
 	}
+
+	return nil
+}
+
+// parseDevices validates the enrolled-device identities. A device is never an
+// agent: the names are disjoint by construction, and an overlap is refused
+// anyway, so no identity can be both enrolled as a device and tunnel as an agent.
+func (cfg *config) parseDevices(in []string) error {
+	for _, id := range in {
+		if !policy.IsDevice(id) || len(id) > policy.MaxIdentityLen {
+			return invalid(
+				"devices has invalid identity %q: want device-<name>-mesh, at most %d characters",
+				id,
+				policy.MaxIdentityLen,
+			)
+		}
+
+		for _, machine := range cfg.machines {
+			if machine.Identity == id {
+				return invalid("devices lists agent identity %q", id)
+			}
+		}
+	}
+
+	cfg.devices = sortedUnique(in)
 
 	return nil
 }
@@ -608,6 +648,7 @@ func Load(paths Paths) (*Snapshot, error) {
 		ViewerDomain:   cfg.viewerDomain,
 		APIHost:        cfg.apiHost,
 		APIIdentities:  cfg.apiCallers,
+		Devices:        cfg.devices,
 		HomePrefixes:   cfg.home,
 		Issuer:         cfg.issuer,
 		Rules:          cfg.rules,
