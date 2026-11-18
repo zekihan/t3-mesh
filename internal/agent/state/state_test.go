@@ -469,3 +469,112 @@ func TestApplyHomeCIDRs(t *testing.T) {
 		t.Fatalf("empty pointer did not clear: %v", cache.HomeCIDRs)
 	}
 }
+
+func TestApplyDeviceLeaves(t *testing.T) {
+	cache := &Cache{FormatVersion: FormatVersion}
+	leaves := proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: "aa"}},
+	}
+
+	cache.Apply(proto.Update{DeviceLeaves: &leaves})
+
+	if !reflect.DeepEqual(cache.DeviceLeaves, leaves) {
+		t.Fatalf("DeviceLeaves = %+v, want %+v", cache.DeviceLeaves, leaves)
+	}
+
+	// The cache owns its copy.
+	leaves.Leaves[0].Fingerprint = "zz"
+
+	if cache.DeviceLeaves.Leaves[0].Fingerprint != "aa" {
+		t.Fatal("the cache shares the update's slice")
+	}
+
+	// An update without the field leaves it alone; an empty list replaces it.
+	cache.Apply(proto.Update{})
+
+	if cache.DeviceLeaves.Revision != "d1" {
+		t.Fatalf("update without leaves changed them: %+v", cache.DeviceLeaves)
+	}
+
+	cache.Apply(
+		proto.Update{
+			DeviceLeaves: &proto.DeviceLeaves{Revision: "d2", Leaves: []proto.DeviceLeaf{}},
+		},
+	)
+
+	if cache.DeviceLeaves.Revision != "d2" || len(cache.DeviceLeaves.Leaves) != 0 {
+		t.Fatalf("empty list did not replace: %+v", cache.DeviceLeaves)
+	}
+}
+
+func TestApplyAckDeviceLeaves(t *testing.T) {
+	cache := &Cache{FormatVersion: FormatVersion}
+
+	// A hub that predates device leaves, or could not tell, sends none: keep the cache.
+	cache.ApplyAck(&proto.HelloAck{DeviceLeaves: &proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: "aa"}},
+	}})
+	cache.ApplyAck(&proto.HelloAck{})
+
+	if cache.DeviceLeaves.Revision != "d1" || len(cache.DeviceLeaves.Leaves) != 1 {
+		t.Fatalf("a HelloAck without leaves cleared them: %+v", cache.DeviceLeaves)
+	}
+
+	cache.ApplyAck(&proto.HelloAck{DeviceLeaves: &proto.DeviceLeaves{Revision: "d2", Leaves: nil}})
+
+	if cache.DeviceLeaves.Revision != "d2" || len(cache.DeviceLeaves.Leaves) != 0 {
+		t.Fatalf("an empty list did not replace: %+v", cache.DeviceLeaves)
+	}
+}
+
+// The new field does not change the format: a release before it reads the file,
+// and this release reads a file written before it.
+func TestDeviceLeavesStayCompatible(t *testing.T) {
+	dir := t.TempDir()
+	cache := sampleCache(t)
+	cache.DeviceLeaves = proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: "aa"}},
+	}
+
+	err := Save(dir, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil || !reflect.DeepEqual(loaded.DeviceLeaves, cache.DeviceLeaves) ||
+		loaded.FormatVersion != 1 {
+		t.Fatalf("round trip: %+v, %v", loaded, err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The cache as the previous release declares it, without the field.
+	var legacy struct {
+		Machine       string `json:"machine"`
+		FormatVersion int    `json:"formatVersion"`
+	}
+
+	err = json.Unmarshal(raw, &legacy)
+	if err != nil || legacy.Machine != "z-arch" || legacy.FormatVersion != 1 {
+		t.Fatalf("previous release cannot read the file: %+v, %v", legacy, err)
+	}
+
+	// A file written before the field loads with an empty list, and a cache
+	// without leaves does not write the key at all.
+	old, err := Load(writeCache(t, `{"formatVersion": 1, "machine": "m"}`))
+	if err != nil || old.DeviceLeaves.Revision != "" || len(old.DeviceLeaves.Leaves) != 0 {
+		t.Fatalf("old file: %+v, %v", old, err)
+	}
+
+	data, err := json.Marshal(&Cache{FormatVersion: 1})
+	if err != nil || strings.Contains(string(data), "deviceLeaves") {
+		t.Fatalf("empty leaves not omitted: %s (%v)", data, err)
+	}
+}

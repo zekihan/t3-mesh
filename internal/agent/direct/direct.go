@@ -66,9 +66,38 @@ type View struct {
 	HomeGatewayMAC string
 	Revocations    proto.Revocations
 	Peers          []proto.Peer
+	DeviceLeaves   proto.DeviceLeaves
 	HomePrefixes   []netip.Prefix
 	SelfHome       bool
 	HubConnected   bool
+}
+
+// allowDevice reports whether fingerprint is the newest leaf this agent knows
+// for the enrolled-device identity: the one the hub last pushed, and no other.
+// A device that is not in the list, a repeated entry (which the hub never sends)
+// and an empty fingerprint are all refused. It decides nothing else: the caller
+// still applies revocations, the rules and the cache window, and a leaf may be
+// refused here although it is valid, as a renewed device's old leaf is.
+func (view *View) allowDevice(identity, fingerprint string) bool {
+	if !policy.IsDevice(identity) || fingerprint == "" {
+		return false
+	}
+
+	var newest string
+
+	for _, leaf := range view.DeviceLeaves.Leaves {
+		if leaf.Identity != identity {
+			continue
+		}
+
+		if newest != "" {
+			return false
+		}
+
+		newest = leaf.Fingerprint
+	}
+
+	return newest != "" && strings.EqualFold(newest, fingerprint)
 }
 
 // Options configures a Manager.

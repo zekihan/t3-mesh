@@ -75,6 +75,7 @@ func (conn *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
 }
 
 type fakeHub struct {
+	ack         proto.HelloAck
 	ln          net.Listener
 	t           *testing.T
 	ca          *pkitest.CA
@@ -83,7 +84,6 @@ type fakeHub struct {
 	addr        string
 	enrollToken string
 	conns       []*hubConn
-	ack         proto.HelloAck
 	mu          sync.Mutex
 	noRenew     bool
 }
@@ -978,6 +978,81 @@ func TestUpdateApplied(t *testing.T) {
 
 		return ok && st.RulesRevision == "rules2"
 	})
+}
+
+func TestUpdateDeviceLeaves(t *testing.T) {
+	rig := newHarness(t, nil)
+	hc := rig.hub.waitConn(t, 1)
+
+	fpA, fpB := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	leaves := proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: fpA}},
+	}
+
+	err := hc.ctrl.Send(proto.Update{DeviceLeaves: &leaves})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "device leaves persisted", func() bool {
+		c, loadErr := state.Load(rig.cfg.StateDir)
+
+		return loadErr == nil && c.DeviceLeaves.Revision == "d1" && len(c.DeviceLeaves.Leaves) == 1
+	})
+
+	// The direct package sees them through the agent's view.
+	if v := rig.agent.view(); v.DeviceLeaves.Revision != "d1" ||
+		v.DeviceLeaves.Leaves[0].Fingerprint != fpA {
+		t.Errorf("view does not hold the pushed leaf: %+v", v.DeviceLeaves)
+	}
+
+	waitFor(t, "status acknowledges the leaves", func() bool {
+		st, ok := hc.lastStatus()
+
+		return ok && st.DeviceLeavesRevision == "d1"
+	})
+
+	// A later push replaces the list: the renewed leaf is the only one kept.
+	renewed := proto.DeviceLeaves{
+		Revision: "d2",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: fpB}},
+	}
+
+	err = hc.ctrl.Send(proto.Update{DeviceLeaves: &renewed})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "renewed leaf", func() bool {
+		v := rig.agent.view()
+
+		return v.DeviceLeaves.Revision == "d2" && len(v.DeviceLeaves.Leaves) == 1 &&
+			v.DeviceLeaves.Leaves[0].Fingerprint == fpB
+	})
+}
+
+func TestHelloAckDeviceLeaves(t *testing.T) {
+	t.Parallel()
+
+	agent := &Agent{now: time.Now, cache: &state.Cache{}}
+	leaves := &proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []proto.DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: "aa"}},
+	}
+
+	agent.applyAckLocked(&proto.HelloAck{DeviceLeaves: leaves})
+
+	if agent.cache.DeviceLeaves.Revision != "d1" {
+		t.Fatalf("DeviceLeaves = %+v", agent.cache.DeviceLeaves)
+	}
+
+	// A hub that sends none (older, or unable to tell) leaves the cached list.
+	agent.applyAckLocked(&proto.HelloAck{})
+
+	if agent.cache.DeviceLeaves.Revision != "d1" || len(agent.cache.DeviceLeaves.Leaves) != 1 {
+		t.Fatalf("a HelloAck without leaves cleared them: %+v", agent.cache.DeviceLeaves)
+	}
 }
 
 func TestRenewal(t *testing.T) {

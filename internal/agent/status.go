@@ -45,6 +45,8 @@ func (agent *Agent) buildStatus() proto.Status {
 		RulesRevision:       agent.cache.Rules.Revision,
 		RevocationRevision:  agent.cache.Revocations.Revision,
 		TrustBundleRevision: agent.cache.TrustBundle.Revision,
+
+		DeviceLeavesRevision: agent.cache.DeviceLeaves.Revision,
 	}
 
 	if agent.ident.Leaf != nil {

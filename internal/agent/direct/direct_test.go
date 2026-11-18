@@ -621,3 +621,69 @@ func TestReconcileLogsDecisionChanges(t *testing.T) {
 		t.Fatalf("want one gateway decision line, log:\n%s", out)
 	}
 }
+
+func TestAllowDevice(t *testing.T) {
+	const (
+		phone  = "device-z-phone-mesh"
+		tablet = "device-z-tablet-mesh"
+		fpA    = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"
+		fpB    = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22"
+	)
+
+	view := View{DeviceLeaves: proto.DeviceLeaves{
+		Revision: "d1",
+		Leaves: []proto.DeviceLeaf{
+			{Identity: phone, Fingerprint: fpA},
+			{Identity: tablet, Fingerprint: fpB},
+			{Identity: "device-dup-mesh", Fingerprint: fpA},
+			{Identity: "device-dup-mesh", Fingerprint: fpB},
+			{Identity: "z-phone", Fingerprint: fpA},
+			{Identity: "agent-z-mac", Fingerprint: fpA},
+		},
+	}}
+
+	cases := []struct {
+		name        string
+		identity    string
+		fingerprint string
+		want        bool
+	}{
+		{"newest leaf", phone, fpA, true},
+		{"other device's newest leaf", tablet, fpB, true},
+		{"upper case fingerprint", phone, strings.ToUpper(fpA), true},
+		{"a device's leaf under another device", phone, fpB, false},
+		{
+			"superseded leaf",
+			phone,
+			"cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33",
+			false,
+		},
+		{"empty fingerprint", phone, "", false},
+		{"unknown device", "device-ghost-mesh", fpA, false},
+		{"repeated entry is ambiguous", "device-dup-mesh", fpA, false},
+		{"KeyChain identity even when listed", "z-phone", fpA, false},
+		{"agent identity even when listed", "agent-z-mac", fpA, false},
+		{"empty identity", "", fpA, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := view.allowDevice(tc.identity, tc.fingerprint)
+			if got != tc.want {
+				t.Fatalf(
+					"allowDevice(%q, %q) = %v, want %v",
+					tc.identity,
+					tc.fingerprint,
+					got,
+					tc.want,
+				)
+			}
+		})
+	}
+
+	var empty View
+
+	if empty.allowDevice(phone, fpA) {
+		t.Fatal("a view without leaves admitted a device")
+	}
+}

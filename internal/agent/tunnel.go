@@ -387,6 +387,7 @@ func (agent *Agent) applyAckLocked(ack *proto.HelloAck) {
 	cache.Revocations = ack.Revocations
 	cache.TrustBundle = ack.TrustBundle
 	cache.HomeCIDRs = ack.HomeCIDRs
+	cache.ApplyAck(ack)
 
 	cache.LastHubContact = agent.now()
 
@@ -700,6 +701,7 @@ func (agent *Agent) applyUpdate(update proto.Update) {
 		slog.Bool("peers", update.Peers != nil),
 		slog.Bool("revocations", update.Revocations != nil),
 		slog.Bool("trustBundle", update.TrustBundle != nil),
+		slog.Bool("deviceLeaves", update.DeviceLeaves != nil),
 	)
 
 	agent.reconcileDirect()
