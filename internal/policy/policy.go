@@ -5,6 +5,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -17,6 +18,24 @@ const URIPrefix = "urn:noqer:mtls:clients:"
 
 // AgentPrefix is the name prefix of agent identities.
 const AgentPrefix = "agent-"
+
+// MaxIdentityLen is the longest identity name the hub issues a certificate for.
+const MaxIdentityLen = 40
+
+// Kind says which family an identity belongs to. It decides the usages the
+// hub requests, so a certificate never carries those of the other kind.
+type Kind string
+
+// Identity kinds.
+const (
+	KindAgent  Kind = "agent"
+	KindDevice Kind = "device"
+)
+
+// deviceRe matches the names of enrolled-device identities, such as
+// device-z-phone-mesh. They sit in their own namespace: no existing device
+// identity (z-phone) and no agent identity can match.
+var deviceRe = regexp.MustCompile(`^device-[a-z0-9]+(-[a-z0-9]+)*-mesh$`)
 
 // Errors returned by Check.
 var (
@@ -50,6 +69,24 @@ func AgentIdentity(machine string) string {
 // IsAgent reports whether name is an agent identity.
 func IsAgent(name string) bool {
 	return strings.HasPrefix(name, AgentPrefix)
+}
+
+// IsDevice reports whether name is the name of an enrolled-device identity.
+func IsDevice(name string) bool {
+	return deviceRe.MatchString(name)
+}
+
+// KindOf returns the kind of an identity name, or false when it is neither an
+// agent nor an enrolled device.
+func KindOf(name string) (Kind, bool) {
+	switch {
+	case IsAgent(name):
+		return KindAgent, true
+	case IsDevice(name):
+		return KindDevice, true
+	default:
+		return "", false
+	}
 }
 
 // Target returns the rules key for a service on a machine.
