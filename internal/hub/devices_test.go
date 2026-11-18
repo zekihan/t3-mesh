@@ -2,8 +2,10 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -700,4 +702,211 @@ func TestDeviceCertCannotOpenTunnel(t *testing.T) {
 	if err == nil {
 		t.Fatal("device certificate opened a tunnel")
 	}
+}
+
+func leavesOf(dl *proto.DeviceLeaves) map[string]string {
+	out := map[string]string{}
+	if dl == nil {
+		return out
+	}
+
+	for _, leaf := range dl.Leaves {
+		out[leaf.Identity] = leaf.Fingerprint
+	}
+
+	return out
+}
+
+// nextDeviceLeaves waits for an Update that carries the device leaves.
+func (fakeAgent *agent) nextDeviceLeaves() proto.Update {
+	fakeAgent.t.Helper()
+
+	msg := fakeAgent.next(func(m proto.Message) bool {
+		upd, ok := m.(proto.Update)
+
+		return ok && upd.DeviceLeaves != nil
+	})
+
+	upd, _ := msg.(proto.Update)
+
+	return upd
+}
+
+func TestAgentsGetDeviceLeavesInHelloAck(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	// The phone has a leaf, the tablet has none yet.
+	phoneFP := harness.newDeviceFP(devPhone)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	got := arch.ack.DeviceLeaves
+	if got == nil || got.Revision == "" ||
+		!maps.Equal(leavesOf(got), map[string]string{devPhone: phoneFP}) {
+		t.Fatalf("ack.DeviceLeaves = %+v", got)
+	}
+}
+
+// A hub that restarted has issued nothing yet; the issuer's record is used.
+func TestDeviceLeavesLookedUpAfterRestart(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	cert := harness.newCert(devTablet, farFuture) // known to the issuer only
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	want := map[string]string{devTablet: pki.Fingerprint(cert.Leaf)}
+	if got := leavesOf(arch.ack.DeviceLeaves); !maps.Equal(got, want) {
+		t.Fatalf("leaves = %v, want %v", got, want)
+	}
+}
+
+func TestNoDevicesMeansAnEmptyList(t *testing.T) {
+	harness := newEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	got := arch.ack.DeviceLeaves
+	if got == nil || len(got.Leaves) != 0 || got.Revision == "" {
+		t.Fatalf("ack.DeviceLeaves = %+v", got)
+	}
+
+	// On the wire an empty list is [], not null.
+	data, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(data), `"leaves":[]`) {
+		t.Fatalf("wire = %s (%v)", data, err)
+	}
+}
+
+func TestDeviceLeavesPushedOnRenewal(t *testing.T) {
+	harness, oldFP := renewEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	if got := leavesOf(arch.ack.DeviceLeaves); got[devPhone] != oldFP {
+		t.Fatalf("initial leaves = %v", got)
+	}
+
+	resp := harness.renewAs(
+		&renewCall{viewer: devPhone, fp: oldFP, body: newDeviceCSR(t, devPhone)},
+	)
+	if resp.status != http.StatusOK {
+		t.Fatalf("renewal: %d %s", resp.status, resp.body)
+	}
+
+	newFP := checkRenewReply(t, harness, resp.body)
+	upd := arch.nextDeviceLeaves()
+
+	if got := leavesOf(upd.DeviceLeaves); !maps.Equal(got, map[string]string{devPhone: newFP}) {
+		t.Fatalf("pushed leaves = %v, want the new leaf %s", got, newFP)
+	}
+
+	// Only what changed is sent.
+	if upd.Rules != nil || upd.Revocations != nil || upd.TrustBundle != nil || upd.Peers != nil {
+		t.Errorf("update carries more than the device leaves: %+v", upd)
+	}
+
+	if upd.DeviceLeaves.Revision == arch.ack.DeviceLeaves.Revision {
+		t.Error("the revision did not change with the leaf")
+	}
+}
+
+func TestDeviceLeavesPushedOnEnrollment(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	phoneFP := harness.newDeviceFP(devPhone)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	token, _, err := harness.srv.tokens.Create(devTablet)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enrolled, ok := harness.enrollOver(proto.Enroll{Token: token, CSR: deviceCSR(t, devTablet)}).(proto.Enrolled)
+	if !ok {
+		t.Fatal("enrollment failed")
+	}
+
+	certs, err := pki.ParseCertsPEM([]byte(enrolled.Certificate))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{devPhone: phoneFP, devTablet: pki.Fingerprint(certs[0])}
+	if got := leavesOf(arch.nextDeviceLeaves().DeviceLeaves); !maps.Equal(got, want) {
+		t.Fatalf("pushed leaves = %v, want %v", got, want)
+	}
+}
+
+func TestDeviceLeavesFollowTheConfig(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	phoneFP := harness.newDeviceFP(devPhone)
+	tabletFP := harness.newDeviceFP(devTablet)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	// A device that is no longer configured is dropped from every agent.
+	harness.setConfig(cfgOpts{devices: []string{devTablet}})
+
+	got := leavesOf(arch.nextDeviceLeaves().DeviceLeaves)
+	if !maps.Equal(got, map[string]string{devTablet: tabletFP}) {
+		t.Fatalf("after removal: %v", got)
+	}
+
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	got = leavesOf(arch.nextDeviceLeaves().DeviceLeaves)
+	if !maps.Equal(got, map[string]string{devPhone: phoneFP, devTablet: tabletFP}) {
+		t.Fatalf("after re-adding: %v", got)
+	}
+}
+
+// When the issuer cannot say, the agent keeps what it has: an empty list would
+// take a device's direct access away because of an outage.
+func TestDeviceLeavesLookupFailureSendsNothing(t *testing.T) {
+	harness := newEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	harness.fake.SetNewestErr(errLookupBoom)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	select {
+	case m := <-arch.msgs:
+		if upd, ok := m.(proto.Update); ok && upd.DeviceLeaves != nil {
+			t.Fatalf("the hub pushed %+v without knowing the leaves", upd.DeviceLeaves)
+		}
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	// Once the issuer answers, the next push carries the list.
+	phone := harness.newCert(devPhone, farFuture)
+	harness.fake.SetNewestErr(nil)
+	harness.setConfig(cfgOpts{devices: bothDevices, disabled: []string{"z-unrelated"}})
+
+	got := leavesOf(arch.nextDeviceLeaves().DeviceLeaves)
+	if !maps.Equal(got, map[string]string{devPhone: pki.Fingerprint(phone.Leaf)}) {
+		t.Fatalf("leaves after recovery = %v", got)
+	}
+}
+
+func TestStatusShowsAckedDeviceLeaves(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+	harness.newDeviceFP(devPhone)
+
+	arch := harness.connect("agent-z-arch", "arch-body")
+	rev := arch.ack.DeviceLeaves.Revision
+
+	err := arch.ctrl.Send(proto.Status{DeviceLeavesRevision: rev, Version: "v0.2.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, func() bool {
+		var doc statusDoc
+
+		getJSON(t, harness.ops.URL+"/status", &doc)
+
+		return doc.DeviceLeaves == rev && doc.Machines["z-arch"].Acked.DeviceLeaves == rev
+	})
 }

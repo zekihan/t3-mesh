@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -149,5 +150,82 @@ func TestEnrolledIsCompatible(t *testing.T) {
 	err = json.Unmarshal([]byte(`{"certificate":"leaf","chain":"chain"}`), &current)
 	if err != nil || current.CABundle != "" || current.CARevision != "" {
 		t.Fatalf("decode without CA fields: %+v, %v", current, err)
+	}
+}
+
+func TestDeviceLeavesWireFormat(t *testing.T) {
+	leaves := &DeviceLeaves{
+		Revision: "d1",
+		Leaves:   []DeviceLeaf{{Identity: "device-z-phone-mesh", Fingerprint: "aa"}},
+	}
+
+	data, err := json.Marshal(Update{DeviceLeaves: leaves})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const want = `{"deviceLeaves":{"revision":"d1","leaves":[{"identity":"device-z-phone-mesh","fingerprint":"aa"}]}}`
+	if string(data) != want {
+		t.Fatalf("Update = %s, want %s", data, want)
+	}
+
+	// Unchanged is absent, so a release before the field sees the same Update.
+	data, err = json.Marshal(Update{})
+	if err != nil || string(data) != `{}` {
+		t.Fatalf("empty Update = %s (%v)", data, err)
+	}
+
+	data, err = json.Marshal(HelloAck{})
+	if err != nil || strings.Contains(string(data), "deviceLeaves") {
+		t.Fatalf("HelloAck without leaves = %s (%v)", data, err)
+	}
+
+	var buf bytes.Buffer
+
+	err = WriteMessage(&buf, HelloAck{Machine: "z-mac", DeviceLeaves: leaves})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadMessage(&buf, MaxMessageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ack, ok := got.(HelloAck)
+	if !ok || !reflect.DeepEqual(ack.DeviceLeaves, leaves) {
+		t.Fatalf("HelloAck round trip = %#v", got)
+	}
+}
+
+// A release before device leaves ignores the field instead of failing on it.
+func TestDeviceLeavesAreIgnoredByOlderReaders(t *testing.T) {
+	var legacy struct {
+		Machine string `json:"machine"`
+		Home    bool   `json:"home"`
+	}
+
+	data, err := json.Marshal(HelloAck{
+		Machine: "z-mac",
+		Home:    true,
+		DeviceLeaves: &DeviceLeaves{
+			Revision: "d1",
+			Leaves:   []DeviceLeaf{{Identity: "x", Fingerprint: "y"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = json.Unmarshal(data, &legacy)
+	if err != nil || legacy.Machine != "z-mac" || !legacy.Home {
+		t.Fatalf("legacy decode: %+v (%v)", legacy, err)
+	}
+
+	var current HelloAck
+
+	err = json.Unmarshal([]byte(`{"machine":"z-mac"}`), &current)
+	if err != nil || current.DeviceLeaves != nil {
+		t.Fatalf("decode without leaves: %+v (%v)", current, err)
 	}
 }

@@ -124,6 +124,21 @@ type TrustBundle struct {
 	PEM      string `json:"pem"`
 }
 
+// DeviceLeaf is the newest leaf the hub issued for one enrolled-device identity.
+type DeviceLeaf struct {
+	Identity    string `json:"identity"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// DeviceLeaves is the newest leaf of every enrolled device the hub has issued
+// one for, sorted by identity. A device that is no longer configured, or has no
+// leaf, is absent, so an agent accepts nothing for it. Releases before device
+// enrollment ignore it.
+type DeviceLeaves struct {
+	Revision string       `json:"revision"`
+	Leaves   []DeviceLeaf `json:"leaves"`
+}
+
 // HelloAck answers Hello.
 type HelloAck struct { //nolint:govet // JSON field order is the wire format
 	Machine     string      `json:"machine"`
@@ -135,6 +150,9 @@ type HelloAck struct { //nolint:govet // JSON field order is the wire format
 	TrustBundle TrustBundle `json:"trustBundle"`
 	// HomeCIDRs are the LAN prefixes; the direct listener binds only inside them.
 	HomeCIDRs []string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
+	// DeviceLeaves is nil when the hub could not tell or predates enrollment of
+	// devices; the agent then keeps what it has cached.
+	DeviceLeaves *DeviceLeaves `json:"deviceLeaves,omitempty"`
 }
 
 // Update carries changed state. Nil fields are unchanged.
@@ -146,6 +164,8 @@ type Update struct {
 	TrustBundle *TrustBundle `json:"trustBundle,omitempty"`
 	// HomeCIDRs is nil when unchanged; a pointer to an empty slice clears the list.
 	HomeCIDRs *[]string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
+	// DeviceLeaves is nil when unchanged.
+	DeviceLeaves *DeviceLeaves `json:"deviceLeaves,omitempty"`
 }
 
 // Release is the desired agent version.
@@ -195,15 +215,17 @@ type FailedUpdate struct {
 
 // Status is the agent's periodic report.
 type Status struct { //nolint:govet // JSON field order is the wire format
-	Version             string         `json:"version"`
-	Warnings            []string       `json:"warnings,omitempty"`
-	DirectSessions      int            `json:"directSessions"`
-	ReleaseRevision     string         `json:"releaseRevision"`
-	RulesRevision       string         `json:"rulesRevision"`
-	RevocationRevision  string         `json:"revocationRevision"`
-	TrustBundleRevision string         `json:"trustBundleRevision"`
-	FailedUpdates       []FailedUpdate `json:"failedUpdates,omitempty"`
-	CertNotAfter        string         `json:"certNotAfter,omitempty"`
+	Version             string   `json:"version"`
+	Warnings            []string `json:"warnings,omitempty"`
+	DirectSessions      int      `json:"directSessions"`
+	ReleaseRevision     string   `json:"releaseRevision"`
+	RulesRevision       string   `json:"rulesRevision"`
+	RevocationRevision  string   `json:"revocationRevision"`
+	TrustBundleRevision string   `json:"trustBundleRevision"`
+	// DeviceLeavesRevision is empty from a release that does not hold device leaves.
+	DeviceLeavesRevision string         `json:"deviceLeavesRevision,omitempty"`
+	FailedUpdates        []FailedUpdate `json:"failedUpdates,omitempty"`
+	CertNotAfter         string         `json:"certNotAfter,omitempty"`
 }
 
 // Enroll requests a first certificate with a single-use token.
