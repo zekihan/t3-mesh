@@ -79,6 +79,9 @@ type sentState struct {
 }
 
 type session struct {
+	// What the agent last reported about its listener for enrolled devices,
+	// sanitized; nil while it is not bound. Guarded by server.mu.
+	device      *proto.DeviceListener
 	notAfter    time.Time
 	accepted    time.Time
 	source      netip.Addr
@@ -492,6 +495,39 @@ func sanitizeHello(incoming *proto.Hello) proto.Hello {
 	return hello
 }
 
+// sanitizeDeviceListener keeps what an agent reported about its device listener
+// only when it is usable: a port, and at least one address that parses. Addresses
+// are normalized, deduplicated and bounded like the LAN addresses of a Hello.
+func sanitizeDeviceListener(in *proto.DeviceListener) *proto.DeviceListener {
+	if in == nil || in.Port < 1 || in.Port > 65535 {
+		return nil
+	}
+
+	addrs := make([]string, 0, min(len(in.Addrs), maxLANAddrs))
+
+	for _, text := range in.Addrs {
+		if len(addrs) >= maxLANAddrs {
+			break
+		}
+
+		addr, err := netip.ParseAddr(text)
+		if err != nil {
+			continue
+		}
+
+		norm := addr.Unmap().WithZone("").String()
+		if !slices.Contains(addrs, norm) {
+			addrs = append(addrs, norm)
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil
+	}
+
+	return &proto.DeviceListener{Port: in.Port, Addrs: addrs}
+}
+
 func truncate(s string, n int) string {
 	if len(s) > n {
 		return s[:n]
@@ -542,12 +578,18 @@ func (sess *session) logConnect(snap *hubconfig.Snapshot) {
 	}
 }
 
+// Path names of a tunnel: through the LAN or through the public gateways.
+const (
+	pathLAN = "LAN"
+	pathOCI = "OCI"
+)
+
 func pathName(home bool) string {
 	if home {
-		return "LAN"
+		return pathLAN
 	}
 
-	return "OCI"
+	return pathOCI
 }
 
 type desired struct {
@@ -843,13 +885,14 @@ func (sess *session) acceptLoop() {
 	}
 }
 
-func (server *Server) recordStatus(c *session, st *proto.Status) {
+func (server *Server) recordStatus(sess *session, st *proto.Status) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 
-	m := server.machineLocked(c.machine)
+	m := server.machineLocked(sess.machine)
 	cp := *st
 	m.status = &cp
+	sess.device = sanitizeDeviceListener(st.DeviceListener)
 
 	if st.Version != "" {
 		m.version = truncate(st.Version, maxVersionLen)

@@ -56,6 +56,11 @@ func (agent *Agent) buildStatus() proto.Status {
 
 	if agent.direct != nil {
 		st.DirectSessions = agent.direct.Sessions()
+		st.DeviceSessions = agent.direct.DeviceSessions()
+
+		if port, addrs := agent.direct.DeviceListener(); port != 0 {
+			st.DeviceListener = &proto.DeviceListener{Port: port, Addrs: addrs}
+		}
 	}
 
 	if agent.upd != nil {
