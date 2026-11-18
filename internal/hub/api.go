@@ -43,6 +43,14 @@ type apiFleetMachine struct {
 	Alerts       []string  `json:"alerts"`
 }
 
+// apiTrust is the body of /api/v1/trust: the clients CA bundle with its revision
+// and the blocked leaf fingerprints, which include every blocked agent leaf.
+type apiTrust struct {
+	CABundle      string   `json:"caBundle"`
+	CARevision    string   `json:"caRevision"`
+	RevokedAgents []string `json:"revokedAgents"`
+}
+
 type apiCaller struct {
 	Path *string `json:"path"`
 }
@@ -110,6 +118,15 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		server.serveFleet(w, r, snap, caller)
+	case "/api/v1/trust":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		server.serveTrust(w, r, snap)
 	default:
 		http.NotFound(w, r)
 	}
@@ -225,6 +242,23 @@ func (server *Server) serveFleet(
 	server.mu.Unlock()
 
 	server.writeAPI(w, r, doc)
+}
+
+// serveTrust answers with what an app needs to verify an agent directly: the
+// clients CA bundle it may trust and the leaves that are revoked. The list is the
+// configured blocked fingerprints as they are, since the hub cannot tell an
+// agent's leaf from another by its fingerprint; the app only ever compares an
+// agent's leaf against it. It holds no identity, so every API caller sees the same.
+func (server *Server) serveTrust(
+	w http.ResponseWriter,
+	r *http.Request,
+	snap *hubconfig.Snapshot,
+) {
+	server.writeAPI(w, r, apiTrust{
+		CABundle:      snap.TrustBundle.PEM,
+		CARevision:    snap.TrustBundle.Revision,
+		RevokedAgents: slices.Clone(nonNil(snap.Revocations.BlockedFingerprints)),
+	})
 }
 
 // firingAlerts is the sorted names of the alerts that are currently true.
