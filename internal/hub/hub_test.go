@@ -25,6 +25,7 @@ import (
 	"github.com/hashicorp/yamux"
 
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
+	"github.com/zekihan/t3-mesh/internal/hub/issuer"
 	"github.com/zekihan/t3-mesh/internal/hub/issuer/issuertest"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/pki/pkitest"
@@ -120,6 +121,13 @@ func writeFile(t *testing.T, path, content string) {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 
+	return newEnvIssuer(t, nil)
+}
+
+// newEnvIssuer is newEnv with the hub's issuer chosen by mk; nil keeps the fake.
+func newEnvIssuer(t *testing.T, mk func(*env) issuer.Issuer) *env {
+	t.Helper()
+
 	harness := &env{t: t, ca: pkitest.NewCA(t, "clients"), dir: t.TempDir()}
 	harness.paths = hubconfig.Paths{
 		ConfigDir: filepath.Join(harness.dir, "config"),
@@ -165,8 +173,13 @@ func newEnv(t *testing.T) *env {
 	harness.pool = x509.NewCertPool()
 	harness.pool.AddCert(harness.ca.Cert)
 
+	var iss issuer.Issuer = harness.fake
+	if mk != nil {
+		iss = mk(harness)
+	}
+
 	harness.srv, err = New(Options{
-		Config: harness.watcher, Issuer: harness.fake,
+		Config: harness.watcher, Issuer: iss,
 		Now: func() time.Time { return time.Now().Add(time.Duration(harness.offset.Load())) },
 	})
 	if err != nil {
