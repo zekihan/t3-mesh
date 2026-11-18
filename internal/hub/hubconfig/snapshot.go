@@ -86,8 +86,29 @@ type Snapshot struct {
 	PolicyRevision string
 	Fingerprint    string
 	ViewerDomain   string
+	APIHost        string
 	Revocations    proto.Revocations
 	HomePrefixes   []netip.Prefix
+	APIIdentities  []string
+}
+
+// IsAPIHost reports whether host (any case, optional port) is the hub API host.
+func (snap *Snapshot) IsAPIHost(host string) bool {
+	return normalizeHost(host) == snap.APIHost
+}
+
+// APICaller reports whether identity is listed under api.identities.
+func (snap *Snapshot) APICaller(identity string) bool {
+	return slices.Contains(snap.APIIdentities, identity)
+}
+
+func normalizeHost(host string) string {
+	h, _, err := net.SplitHostPort(host)
+	if err == nil {
+		host = h
+	}
+
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 // MachineForIdentity returns the machine whose agent identity is id.
@@ -100,14 +121,7 @@ func (snap *Snapshot) MachineForIdentity(id string) (string, bool) {
 // HostTarget maps a viewer host "<svc>.<machine>.<viewerDomain>" (any case,
 // optional port) to its machine and service.
 func (snap *Snapshot) HostTarget(host string) (string, string, bool) {
-	h, _, err := net.SplitHostPort(host)
-	if err == nil {
-		host = h
-	}
-
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-
-	rest, found := strings.CutSuffix(host, "."+snap.ViewerDomain)
+	rest, found := strings.CutSuffix(normalizeHost(host), "."+snap.ViewerDomain)
 	if !found {
 		return "", "", false
 	}
@@ -163,7 +177,11 @@ type rawConfig struct {
 	//nolint:tagliatelle // public config key; renaming it would break existing config files
 	HomeCIDRs    []string `yaml:"homeCIDRs"`
 	ViewerDomain string   `yaml:"viewerDomain"`
-	Release      struct {
+	API          struct {
+		Host       string   `yaml:"host"`
+		Identities []string `yaml:"identities"`
+	} `yaml:"api"`
+	Release struct {
 		Version         string `yaml:"version"`
 		RollbackAllowed bool   `yaml:"rollbackAllowed"`
 	} `yaml:"release"`
@@ -197,6 +215,8 @@ type config struct {
 	issuer       Issuer
 	release      proto.Release
 	viewerDomain string
+	apiHost      string
+	apiCallers   []string
 	revs         proto.Revocations
 	home         []netip.Prefix
 }
@@ -258,6 +278,11 @@ func parseConfig(data []byte) (*config, error) {
 	}
 
 	err = cfg.parseGeneral(&raw)
+	if err != nil {
+		return nil, err
+	}
+
+	err = cfg.parseAPI(&raw)
 	if err != nil {
 		return nil, err
 	}
@@ -370,6 +395,41 @@ func (cfg *config) parseGeneral(raw *rawConfig) error {
 	if (cfg.issuer != Issuer{}) && (cfg.issuer.Name == "" || cfg.issuer.Kind == "") {
 		return invalid("issuer needs at least name and kind")
 	}
+
+	return nil
+}
+
+// parseAPI validates the hub API host and its caller set. The callers are a
+// separate list, never a rule: rules admit only mesh-<svc>-<machine> entries.
+func (cfg *config) parseAPI(raw *rawConfig) error {
+	host := strings.ToLower(strings.TrimSuffix(raw.API.Host, "."))
+	if host == "" {
+		host = "hub." + cfg.viewerDomain
+	}
+
+	for label := range strings.SplitSeq(host, ".") {
+		if !labelRe.MatchString(label) {
+			return invalid("api.host %q is not a valid domain", raw.API.Host)
+		}
+	}
+
+	if rest, ok := strings.CutSuffix(host, "."+cfg.viewerDomain); host == cfg.viewerDomain ||
+		(ok && strings.Contains(rest, ".")) {
+		return invalid("api.host %q collides with the agent endpoint or a viewer host", host)
+	}
+
+	for _, id := range raw.API.Identities {
+		if strings.TrimSpace(id) == "" || strings.ContainsAny(id, " \t:/") {
+			return invalid("api.identities has invalid identity %q", id)
+		}
+
+		if policy.IsAgent(id) {
+			return invalid("api.identities lists agent identity %q", id)
+		}
+	}
+
+	cfg.apiHost = host
+	cfg.apiCallers = sortedUnique(raw.API.Identities)
 
 	return nil
 }
@@ -546,6 +606,8 @@ func Load(paths Paths) (*Snapshot, error) {
 	snap := &Snapshot{
 		Machines:       cfg.machines,
 		ViewerDomain:   cfg.viewerDomain,
+		APIHost:        cfg.apiHost,
+		APIIdentities:  cfg.apiCallers,
 		HomePrefixes:   cfg.home,
 		Issuer:         cfg.issuer,
 		Rules:          cfg.rules,

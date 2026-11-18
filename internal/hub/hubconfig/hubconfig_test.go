@@ -247,6 +247,79 @@ func TestHostTarget(t *testing.T) {
 	}
 }
 
+func loadAPIConfig(t *testing.T, cfg string) (*Snapshot, error) {
+	t.Helper()
+
+	return Load(newFixture(t, cfg, time.Now().Add(time.Hour*24*90)).p)
+}
+
+func TestAPIConfig(t *testing.T) {
+	load := loadAPIConfig
+
+	t.Run("default host and no callers", func(t *testing.T) {
+		snap, err := load(t, goodConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if snap.APIHost != "hub.mesh.noqer.com" || len(snap.APIIdentities) != 0 {
+			t.Fatalf("api = %q %v", snap.APIHost, snap.APIIdentities)
+		}
+
+		if !snap.IsAPIHost("HUB.mesh.noqer.com:443") || snap.IsAPIHost("t3.devbox.mesh.noqer.com") {
+			t.Fatal("IsAPIHost mismatch")
+		}
+
+		if _, _, ok := snap.HostTarget("hub.mesh.noqer.com"); ok {
+			t.Fatal("API host resolved as a viewer host")
+		}
+	})
+
+	t.Run("identities and host", func(t *testing.T) {
+		snap, err := load(
+			t,
+			goodConfig+"api:\n  host: Api.Mesh.Noqer.com.\n  identities: [z-tablet, z-phone, z-phone]\n",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if snap.APIHost != "api.mesh.noqer.com" ||
+			strings.Join(snap.APIIdentities, ",") != "z-phone,z-tablet" {
+			t.Fatalf("api = %q %v", snap.APIHost, snap.APIIdentities)
+		}
+
+		if !snap.APICaller("z-phone") || snap.APICaller("z-other") {
+			t.Fatal("APICaller mismatch")
+		}
+
+		if len(snap.Rules.Allow) != 2 {
+			t.Fatalf("api.identities leaked into the rules: %v", snap.Rules.Allow)
+		}
+	})
+}
+
+func TestAPIConfigInvalid(t *testing.T) {
+	bad := map[string]string{
+		"unknown api field": "api:\n  bogus: 1\n",
+		"agent identity":    "api:\n  identities: [agent-devbox]\n",
+		"bad identity":      "api:\n  identities: [\"urn:x:y\"]\n",
+		"blank identity":    "api:\n  identities: [\" \"]\n",
+		"bad host":          "api:\n  host: not_a_host\n",
+		"agent endpoint":    "api:\n  host: mesh.noqer.com\n",
+		"viewer host":       "api:\n  host: t3.devbox.mesh.noqer.com\n",
+	}
+
+	for name, extra := range bad {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadAPIConfig(t, goodConfig+extra)
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("want ErrInvalid, got %v", err)
+			}
+		})
+	}
+}
+
 func TestIsHome(t *testing.T) {
 	f := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	snap, _ := Load(f.p)
