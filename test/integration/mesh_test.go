@@ -670,6 +670,133 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 	expectRefused(t, conn, err)
 }
 
+// ---- device enrollment reaches the agents ----
+
+// enrollDevice speaks the enrollment protocol as the app does and returns the
+// fingerprint of the leaf it was issued.
+func (msh *mesh) enrollDevice(identity string) string {
+	msh.t.Helper()
+
+	token, _, err := msh.tokens.Create(identity)
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	key, err := pki.GenerateKey()
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	csr, err := pki.CreateCSR(key, identity)
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	conn, err := msh.rawDial(nil, proto.ALPNEnroll)
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	err = proto.WriteMessage(conn, proto.Enroll{Token: token, CSR: string(csr)})
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	msg, err := proto.ReadMessage(conn, proto.MaxMessageSize)
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	enrolled, ok := msg.(proto.Enrolled)
+	if !ok {
+		msh.t.Fatalf("enrollment of %s: %#v", identity, msg)
+	}
+
+	certs, err := pki.ParseCertsPEM([]byte(enrolled.Certificate))
+	if err != nil {
+		msh.t.Fatal(err)
+	}
+
+	return pki.Fingerprint(certs[0])
+}
+
+func (nd *node) deviceLeaves(t *testing.T) map[string]string {
+	t.Helper()
+
+	cache, err := state.Load(nd.cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := map[string]string{}
+	for _, leaf := range cache.DeviceLeaves.Leaves {
+		out[leaf.Identity] = leaf.Fingerprint
+	}
+
+	return out
+}
+
+func TestDeviceLeavesReachAgents(t *testing.T) {
+	t.Parallel()
+
+	const (
+		phone  = "device-z-phone-mesh"
+		tablet = "device-z-tablet-mesh"
+	)
+
+	msh := newMesh(t, &meshOpts{cfg: hubCfg{devices: []string{phone, tablet}}})
+	nodeA, nodeB := msh.twoNodes(&nodeOpts{}, &nodeOpts{})
+
+	holds := func(nd *node, want map[string]string) func() bool {
+		return func() bool {
+			got := nd.deviceLeaves(t)
+			if len(got) != len(want) {
+				return false
+			}
+
+			for id, fp := range want {
+				if got[id] != fp {
+					return false
+				}
+			}
+
+			return true
+		}
+	}
+
+	// Nothing is enrolled yet: both agents hold an empty list.
+	eventually(t, 5*time.Second, "agents know no device leaves", holds(nodeA, map[string]string{}))
+
+	phoneFP := msh.enrollDevice(phone)
+	want := map[string]string{phone: phoneFP}
+
+	eventually(t, 5*time.Second, "agent a learns the phone", holds(nodeA, want))
+	eventually(t, 5*time.Second, "agent b learns the phone", holds(nodeB, want))
+
+	// Re-enrollment (or renewal) replaces the leaf on every agent, so the old one
+	// is refused at once; the tablet's leaf is independent.
+	newFP := msh.enrollDevice(phone)
+	tabletFP := msh.enrollDevice(tablet)
+	want = map[string]string{phone: newFP, tablet: tabletFP}
+
+	if newFP == phoneFP {
+		t.Fatal("re-enrollment returned the same leaf")
+	}
+
+	eventually(t, 5*time.Second, "agent a learns the new leaves", holds(nodeA, want))
+	eventually(t, 5*time.Second, "agent b learns the new leaves", holds(nodeB, want))
+
+	// A device removed from the config is dropped from every agent.
+	msh.update(func(c *hubCfg) { c.devices = []string{tablet} })
+
+	want = map[string]string{tablet: tabletFP}
+
+	eventually(t, 5*time.Second, "agent a drops the phone", holds(nodeA, want))
+	eventually(t, 5*time.Second, "agent b drops the phone", holds(nodeB, want))
+}
+
 // ---- 7. release change ----
 
 func TestReleaseChangeReachesAgent(t *testing.T) {

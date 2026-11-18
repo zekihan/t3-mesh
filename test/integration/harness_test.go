@@ -137,6 +137,7 @@ type hubCfg struct {
 	disabled    []string
 	blocked     []string
 	home        []string
+	devices     []string
 	noRelayRule bool
 }
 
@@ -165,13 +166,14 @@ machines:
 homeCIDRs: %s
 viewerDomain: %s
 release: {version: %s}
+devices: %s
 policy:
   entries:
     mesh-t3-a: {identities: [z-phone]}
     mesh-t3-b: {identities: [%s]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, list(quoted), viewerDomain, rel, bIDs, list(hc.disabled), list(hc.blocked))
+`, list(quoted), viewerDomain, rel, list(hc.devices), bIDs, list(hc.disabled), list(hc.blocked))
 }
 
 // ---- mesh (hub side) ----
