@@ -51,6 +51,13 @@ sudo packaging/darwin/install.sh --binary ./t3-mesh-agent-darwin-arm64 --version
 Edit the generated config (`links`, `direct`; see the design for the fields). The
 installer enables the service but starts it only once the machine is enrolled.
 
+With `direct` enabled, the agent also listens for enrolled devices (the Android app) on
+`direct.devices.port`, 27443 unless set, under the same home gate; set
+`direct.devices.enabled: false` to switch it off. Both listeners bind only addresses
+inside the hub's `homeCIDRs`, so let the LAN reach TCP 27400 and 27443 on the host
+firewall (for example an nftables input rule on Linux, and the application firewall on
+macOS). See [Direct device access](docs/design.md#direct-device-access).
+
 ## Enroll an agent
 
 1. On the cluster, get a single-use token (valid 15 minutes):

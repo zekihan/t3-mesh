@@ -3,7 +3,9 @@
 Status: accepted design; implemented (M0 to M4 done 2026-11-17). Date: 2026-11-16.
 Device enrollment for the Android app (hub 0.2.0) is described under
 [Enrolled-device identities](#enrolled-device-identities), [Device enrollment](#device-enrollment)
-and [Device renewal](#device-renewal).
+and [Device renewal](#device-renewal). Direct connection of an enrolled device to a
+machine at home (agent and hub 0.3.0) is described under
+[Direct device access](#direct-device-access).
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -20,7 +22,7 @@ any network it is on, while machines at home talk to each other directly.
 - `t3 environment link` works between any two machines, home or away, although T3
   cannot present a client certificate.
 - Machines at home talk to each other directly, without the cluster, and keep
-  doing so through a cluster outage.
+  doing so through a cluster outage. An enrolled phone at home does the same.
 - z-mac stays reachable when it leaves home.
 - Agents renew their own certificates and update themselves without manual steps.
 
@@ -79,6 +81,7 @@ Paths:
 | Phone, home or away | any machine | Traefik (viewer mTLS + policy) → hub → that machine's tunnel → `127.0.0.1:3773` |
 | Machine A | machine B, both home | A's link port → direct mTLS to B's direct listener → `127.0.0.1:3773` |
 | Machine A | machine B, otherwise | A's link port → A's tunnel → hub → B's tunnel → `127.0.0.1:3773` |
+| Enrolled device at home | a machine at home | LAN → the machine's device listener (mTLS, HTTP/1.1) → `127.0.0.1:3773`, with no hub on the path |
 
 A tunnel's route is decided by DNS when the agent dials: at home, Technitium
 answers `mesh.noqer.com` with the Traefik VIP and the tunnel is LAN-only; away,
@@ -501,22 +504,37 @@ machines goes through it, so `/api/v1/fleet` reuses it; `/api/v1/trust` lists no
 `GET /api/v1/machines` returns the visible machines sorted by name:
 
 ```json
-{"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com"}]}
+{"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443}}]}
 ```
 
 `online` means a live tunnel session. `lastSeen` is RFC 3339 UTC, the current time
 while online and the last disconnect otherwise (as in `/status`), or `null` if the hub
 has not seen the machine since it started. `viewerUrl` is
-`https://t3.<machine>.<viewerDomain>`.
+`https://t3.<machine>.<viewerDomain>`. `agentIdentity` is the machine's configured agent
+identity, `agent-<machine>`: the one URI an app expects in the certificate of the agent
+it connects to directly.
+
+`direct` says where an enrolled device may reach the machine directly on the LAN
+([Direct device access](#direct-device-access)): `address` is an IP literal (IPv6 without
+brackets or zone) and `port` the agent's device listener port. It is `null` (the key is
+always present) unless the machine has a live tunnel session that the hub marks home
+(the same verdict as `tunnel.path` being `LAN`) and its agent reports the listener bound.
+The agent reports the addresses it is bound on; the hub keeps those inside `homeCIDRs`
+(so a wrong or hostile report cannot point a device outside the LAN, and an app still
+checks the agent's identity before it sends anything), drops unspecified, multicast and
+link-local ones, prefers IPv4 to IPv6, and within the family the address the tunnel
+arrived from, else the lowest. It is the newest live session's report, so a reconnect
+withdraws a route until the new session reports its listener. A machine that is offline,
+away, or whose listener is closed has none.
 
 `GET /api/v1/fleet` returns the same visible machines, sorted by name, with the state
 `/status` reports for each, read through the same code:
 
 ```json
-{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"alerts":["cert-expiry"]}]}
+{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"alerts":["cert-expiry"]}]}
 ```
 
-Each entry is the `/machines` object plus `agentVersion` (as the agent reported it,
+Each entry is the `/machines` object (so `agentIdentity` and `direct` too) plus `agentVersion` (as the agent reported it,
 `null` if unknown), `certNotAfter` (best known leaf expiry, `null` if unknown),
 `tunnel` (`path` is `LAN` or `OCI` and `connectedSince` the live session's accept
 time, both `null` while not connected) and `alerts`, the sorted names of the
@@ -656,12 +674,18 @@ direct:
   enabled: true                  # hub bypass while home
   port: 27400                    # bound only on addresses inside homeCIDRs
   cacheTTL: 168h                 # how long cached rules allow direct traffic
+  devices:                       # listener for enrolled devices (the Android app)
+    enabled: true                # default: on whenever direct is
+    port: 27443                  # default 27443, bound on the same addresses
 ```
 
 Link ports are explicit because T3 stores the URL; a port must never move. On each
-machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`. Link
-and direct ports sit below both the Linux (32768–60999) and macOS (49152–65535)
-ephemeral ranges, so an outgoing connection can never hold one.
+machine, peers are linked with `t3 environment link http://127.0.0.1:<port>`. Link,
+direct and device ports sit below both the Linux (32768–60999) and macOS (49152–65535)
+ephemeral ranges, so an outgoing connection can never hold one, and the unprivileged
+service user can bind them. `direct.devices.port` may not equal `direct.port` or a link
+port, and `direct.devices.enabled: true` without `direct.enabled` is refused. The
+device listener also stays off when the agent serves no `t3` service.
 
 Link ports are unauthenticated loopback listeners, so any local process on the
 machine can use them; that is accepted on single-user machines. To block DNS
@@ -722,8 +746,8 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   device (`deviceLeaves`, see the wire protocol), and the agent caches it with the rest.
   It holds one fingerprint per device and accepts only that one (`allowDevice`), so a
   renewed or re-enrolled device's old leaf is refused as soon as the update arrives.
-  The cache is valid for the same `cacheTTL` as the rules. The direct listener for
-  devices, which uses this, is a later milestone; today the agent only stores the data.
+  The cache is valid for the same `cacheTTL` as the rules. The device listener
+  ([Direct device access](#direct-device-access)) uses this.
   The hub learns each device's newest leaf from its own issuances and, once after it
   starts, from the issuer; when the issuer cannot be asked it sends no list (so an agent
   never loses a leaf to an outage) and asks again after 30 s.
@@ -740,6 +764,87 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   not listen and does not dial cached peers.
 - Direct connections require TLS 1.3, so the client certificate is encrypted and
   never shown to a wrong host that answers on a peer's address.
+
+### Direct device access
+
+At home an enrolled device (the Android app; the fork's `docs/android-fork.md`, item 5)
+can reach a machine's T3 over the LAN without the hub, so a cluster outage does not cut
+the phone off. Each agent runs a second listener for it, separate from the
+`t3-mesh-direct/1` one: that one carries agents' byte streams, this one speaks HTTP and
+proxies to the machine's T3 (`serve.t3`, `127.0.0.1:3773`).
+
+- **Listener.** TLS 1.3 only, ALPN `http/1.1` only (the viewer path reaches T3 as
+  HTTP/1.1, and a caller that does not negotiate it is closed), session tickets off. The
+  server certificate is the agent's own leaf: it has `server auth` and the one URI
+  `urn:noqer:mtls:clients:agent-<machine>`, which the app checks against the cached
+  clients CA bundle in place of a host name. A client certificate is required and
+  verified against the cached clients CA bundle with `client auth` usage. The port is
+  `direct.devices.port`, default 27443. It binds the same addresses as the
+  `t3-mesh-direct/1` listener under the same home gate: only while the hub marks the
+  machine home, and during a hub outage only within `cacheTTL` of the last hub contact
+  and only while the default gateway's MAC matches the one cached in the last
+  hub-confirmed home session. It closes with that listener when the gate closes.
+  Between accept and admission at most 64 connections are in flight, each under a 5 s
+  limit, so a host on the LAN cannot hold the descriptors with half-open handshakes.
+- **Admission.** Decided per connection, inside the TLS handshake, so a refused caller
+  gets a `bad_certificate` alert and never an HTTP answer. A caller is admitted only if:
+  1. its certificate carries exactly one URI SAN and no DNS, IP or email SAN, the URI is
+     `urn:noqer:mtls:clients:<name>` with a name of the enrolled-device kind
+     (`device-<name>-mesh`), and the certificate is `client auth` only and not a CA. The
+     KeyChain identities (`z-phone`, ...) and agents fail here, whatever the rules say;
+  2. the identity is not disabled, the leaf is not blocked, and it has not expired;
+  3. the machine's rule (`mesh-t3-<machine>` in `libs/mtls-policy`, as pushed to the
+     agent) lists the identity;
+  4. the leaf's fingerprint is the newest this agent knows for the identity
+     (`deviceLeaves`; see [Direct bypass](#direct-bypass)), so a renewed or re-enrolled
+     device's old leaf is refused as soon as the update arrives.
+
+  The same checks run again once the handshake is done, before the session is
+  registered, and before every request.
+- **Origin.** The viewer host stays T3's logical origin. A request is accepted only with
+  `Host: t3.<machine>.<viewerDomain>` for this machine (any case, with or without
+  `:443`; the hub sends the viewer domain in `HelloAck` and `Update`, and an agent that
+  has none yet accepts no host); any other `Host` gets `421`. `Host` is forwarded
+  unchanged. The request is rewritten by the same code as the hub's viewer proxy
+  (`internal/viewerproxy`): every `X-Mtls-*` header is dropped, `X-Forwarded-Proto` is
+  set to `https`, and no `X-Forwarded-For` is added. Because no proxy sits in front of
+  this listener, whatever the client sent as `Forwarded`, `X-Forwarded-*` (all of them,
+  not only the four Go removes) or `X-Real-Ip` is dropped too; on the hub those come from
+  Traefik. WebSocket upgrades are proxied. Like the hub, the agent opens a connection to
+  T3 for each request and reuses none, and a failure to reach T3 is a plain `502`
+  (`bad gateway`). An unpaired request therefore gets what it gets through the viewer
+  host, which the integration test compares status, headers and body for, for HTTP and a
+  WebSocket, and with T3 down.
+- **Probe.** `GET /.well-known/t3-mesh/direct` (and `HEAD`; any other method is `405`)
+  is answered by the agent itself and never proxied. It is subject to the `Host` rule and
+  returns `200` with `Cache-Control: no-store`, `Content-Type: application/json` and
+  `{"machine":"<name>","identity":"<caller identity name>"}`. It has no side effect, so
+  the app uses it to choose a path.
+- **Live sessions.** A session is one TLS connection, however many keep-alive requests or
+  WebSocket upgrades it carries. Every session is re-checked with the agent's current
+  state on every update from the hub, on every network event, and every second, and a
+  request on a session that no longer passes is not served. A session that fails is
+  closed at once (the TCP connection first, so a stalled peer cannot delay it, and the
+  connections to T3 it opened with it) when the identity is disabled, the leaf blocked,
+  the device removed from the rule or from the leaves, a newer leaf known, the leaf
+  expired, the home gate closed, or the cache window ended. Revocation latency is the
+  hub's push, as for agents.
+- **Outage.** The cached rules, revocations, device leaves, trust bundle and viewer domain
+  let the listener open after a cold start and admit devices for up to `cacheTTL` (1
+  week) without the hub; a revocation made during an outage takes effect when the agent
+  next reaches the hub. When the window ends the sessions close at once and new
+  connections are closed before the handshake; the socket itself is unbound at the next
+  reconcile (a network event, or the 30 s backstop).
+- **Route.** The agent reports the port and addresses the listener is bound on in `Status`
+  (`deviceListener`), and sends a `Status` whenever that changes. The hub lists them for
+  the machine as `direct` in the machine list ([Hub API](#hub-api)).
+- **Firewall.** The listener needs inbound TCP on its port (27443) from the LAN. On Linux
+  the service user binds it without privilege (the port is above 1024), so only a host
+  firewall, such as an nftables input chain that drops by default, needs a rule for it,
+  next to the one for the direct port (27400). On macOS the application firewall may block
+  an inbound connection to a binary whose ad-hoc signature changes on every update, as for
+  the direct port; the same check applies to 27443, on z-mac after the first update to
+  0.3.0. Nothing outside the LAN can reach it: it binds only addresses inside `homeCIDRs`.
 
 ### Platform notes
 
@@ -850,13 +955,13 @@ length-prefixed JSON with a `type` field. The protocol version is in the ALPN.
 | Message | Direction | Content |
 |---|---|---|
 | `Hello` | agent → hub | agent version, announced services, LAN addresses, direct port, cert fingerprint |
-| `HelloAck` | hub → agent | home status, `Release`, rules, peer table, revocation list, trust bundle, device leaves |
-| `Update` | hub → agent | new rules, peer table, revocation list, trust bundle or device leaves after a change; agents re-check live sessions against it |
+| `HelloAck` | hub → agent | home status, `Release`, rules, peer table, revocation list, trust bundle, device leaves, viewer domain |
+| `Update` | hub → agent | new rules, peer table, revocation list, trust bundle, device leaves or viewer domain after a change; agents re-check live sessions against it |
 | `Release` | hub → agent | desired version, rollback allowed, revision; sent in `HelloAck` and again whenever the chart value changes |
 | `Ping` / `Pong` | both | liveness, round-trip time |
 | `Renew` / `Renewed` | agent → hub / hub → agent | CSR / certificate and chain |
 | `Reject` | hub → agent | reason (identity disabled, leaf not newest, unsupported version, other) before closing a session |
-| `Status` | agent → hub | recent warnings, direct-session counts, running version, last applied `Release`, policy, revocation, trust-bundle and device-leaves revisions, failed update versions and reasons |
+| `Status` | agent → hub | recent warnings, direct-session and device-session counts, the device listener's port and bound addresses, running version, last applied `Release`, policy, revocation, trust-bundle and device-leaves revisions, failed update versions and reasons |
 | `Enroll` / `Enrolled` | agent or device → hub / hub → agent or device | token + CSR / certificate, chain, clients CA bundle and its revision (ALPN `t3-mesh-enroll/1` only) |
 
 The device leaves are `{"revision":"<opaque>","leaves":[{"identity":"device-z-phone-mesh","fingerprint":"<sha256 hex>"}]}`,
@@ -864,10 +969,15 @@ sorted by identity, one entry per configured device the hub has issued a leaf fo
 `HelloAck.deviceLeaves` and `Update.deviceLeaves` carry it, and an absent field means
 "unchanged" (an older hub, or one that could not ask the issuer, which keeps what the
 agent has). An empty list replaces the cached one, and a device that is no longer
-configured is absent from the list. Every addition to the protocol is an optional JSON
-field that releases before it ignore, and the protocol version in the ALPN is unchanged,
-so agents of the previous release keep working while the hub is ahead of them and the
-other way round; the agent cache gains one optional key and keeps format version 1.
+configured is absent from the list. `HelloAck.viewerDomain` and `Update.viewerDomain` carry
+the domain viewer hosts live under, which the device listener needs for its `Host` rule;
+an absent or empty one means "unchanged". `Status.deviceListener` is
+`{"port":27443,"addrs":["192.168.2.71"]}` while the agent's device listener is bound and
+absent otherwise, and `Status.deviceSessions` counts its open connections. Every addition
+to the protocol is an optional JSON field that releases before it ignore, and the protocol
+version in the ALPN is unchanged, so agents of the previous release keep working while the
+hub is ahead of them and the other way round; the agent cache gains two optional keys (the
+device leaves, then the viewer domain) and keeps format version 1.
 
 Data streams start with one header line of JSON, then raw bytes:
 
@@ -890,6 +1000,7 @@ Data streams start with one header line of JSON, then raw bytes:
 | `terraform/git` | minisign key published to the `t3-mesh` repo's `release` environment |
 | `terraform/technitium` | LAN A and AAAA records for `mesh.noqer.com` and each viewer host, pointing at the Traefik VIPs. A `mesh.noqer.com` zone is authoritative for its whole subtree, so every viewer record lives in it and the zone is created with all of them in one change; a missing record would be NXDOMAIN at home |
 | CI | regenerate `gitops_pr.yaml` and `renovate.json` for the new chart |
+| direct device access (0.3.0) | no chart change besides `release.version`: the rules already list the device identities in the `mesh-t3-<machine>` entries, and the hub and agents take the rest (viewer domain, home prefixes, device leaves) from the existing config |
 
 ## Observability
 
@@ -897,9 +1008,11 @@ The cluster has no metrics scraper or vmalert, so the hub evaluates its own aler
 conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
 - **`/status`** (JSON) lists, per agent: connected, path (LAN or OCI), open and
-  direct sessions, stream counts, version, certificate expiry, last seen, and the
-  last acknowledged `Release`, policy, revocation, trust-bundle and device-leaves
-  revisions. Rotation steps that wait for "every agent acknowledged" read it.
+  direct sessions, open device sessions, the device listener the live session
+  reports (`deviceListener`: port and bound addresses, absent while not bound), stream
+  counts, version, certificate expiry, last seen, and the last acknowledged
+  `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
+  steps that wait for "every agent acknowledged" read it.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
@@ -913,7 +1026,11 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   stream an enrolled device opens, is logged at info as `Viewer stream` with the identity
   URI (`uri`), the leaf fingerprint, the target and whether it is an upgrade, so a device's
   chat socket and its streams can be told apart in the log. The many plain requests of
-  other viewers stay at debug.
+  other viewers stay at debug. Each agent logs the same on its device listener: every
+admitted connection as `Device session open` and every WebSocket upgrade as
+`Device stream`, with the identity name, URI and leaf fingerprint, every refusal as
+`Device caller refused` with the reason, and every session it closes as
+`Closing device session` with the reason.
 - Gatus canaries: `canary-unauthorized` must be refused on every viewer host, and a
   TLS check on `mesh.noqer.com` confirms the hub serves its certificate. A Gatus
   probe cannot speak the tunnel protocol, so rejection of unauthenticated or
@@ -925,11 +1042,15 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 |---|---|
 | Unauthenticated access to a machine | T3 binds to loopback, LAN mode is off, and pre-existing non-mTLS proxies (z-arch's `caddy-t3.service`) are removed. The only routes in are the tunnel (hub-authenticated agent, Traefik-authorized viewer) and the direct listener (mTLS + cached rules). T3 pairing remains. |
 | Stolen phone or browser certificate | Reaches T3 login only; still needs T3 pairing. Cannot register as an agent or open a tunnel (tunnel admission accepts configured agent URIs only). Revoke in `libs/mtls-policy`. |
-| Stolen enrolled-device key | The key is non-exportable in the Android Keystore. A leaf is refused as soon as it is not the newest, is blocked or its identity is disabled; the hub cuts its open streams. It reaches `mesh-*` hosts only. Re-enrollment needs an operator token. |
+| Stolen enrolled-device key | The key is non-exportable in the Android Keystore. A leaf is refused as soon as it is not the newest, is blocked or its identity is disabled; the hub cuts its open streams, and agents close its direct sessions when the update arrives. It reaches `mesh-*` hosts and, listed in a machine's rule, that machine's device listener only. Re-enrollment needs an operator token. |
+| KeyChain identity, agent or other certificate on the device listener | Admission accepts only an enrolled-device identity (exactly one URI of that kind, `client auth` only, no other name), listed in that machine's rule, with the newest leaf the agent knows; a caller that fails gets a TLS alert, no HTTP. `z-phone` and the other KeyChain identities never connect directly, whatever the rules say. |
+| Client-forged identity or forwarding headers on the device listener | `X-Mtls-*`, `Forwarded`, every `X-Forwarded-*` and `X-Real-Ip` are dropped before T3 sees the request; `X-Forwarded-Proto` is set to `https`; identity comes only from the certificate. |
+| LAN host abusing the device listener before authenticating | TLS 1.3 with a required, CA-verified client certificate, a 5 s setup limit, at most 64 connections between accept and admission, closed without a handshake while the home gate is closed, `Host` held to this machine's viewer host. |
+| Wrong or hostile direct route in the machine list | The hub lists only addresses inside `homeCIDRs` that the agent says it is bound on; the app checks the agent's certificate (server auth, the one expected `agent-<machine>` URI, chained to the cached clients CA bundle, not revoked) before it sends T3 credentials, and refuses another peer. |
 | KeyChain identity used on the device paths | `z-phone` and the other KeyChain identities are refused by `renew` (devices only), are not in `devices`, and cannot enroll: a token is minted only for a name listed under `devices`. |
 | Agent certificate used as a viewer | Traefik middlewares exclude kind `agent`. |
 | Local process or web page using a link port | Loopback only, `Host` and `Origin` checks on every request against DNS rebinding and cross-site requests, T3 pairing. Other local users are trusted (single-user machines). |
-| Direct listener exposed off the LAN | Binds only addresses inside `homeCIDRs`, and during a hub outage only when the default gateway's MAC matches the cached home gateway. TLS 1.3 only. |
+| Direct listener exposed off the LAN | Binds only addresses inside `homeCIDRs`, and during a hub outage only when the default gateway's MAC matches the cached home gateway. TLS 1.3 only. The device listener binds the same addresses under the same gate. |
 | In-cluster spoofing of PROXY v2 or viewer header | NetworkPolicy admits only Traefik on 8443 and 8080. |
 | Stolen agent key | Revoke in `libs/mtls-policy`; the hub cuts the tunnel and relayed streams at once; peers close live direct sessions and refuse new ones as soon as they receive the update, and stop all direct traffic at the end of the cache window. The key file is readable only by the service user. |
 | Compromised hub | Can mint only the configured agent certificates and the enumerated device certificates (approver-policy, two policies, usable only by the hub's ServiceAccount; a device certificate has no `server auth`). Never `z-phone` or any other identity. The device identities reach only `mesh-*` hosts, which the hub already proxies. Can reach every agent's services, as any relay could. T3 pairing still applies. |
@@ -1019,6 +1140,17 @@ session's `HelloAck`, which deferred every update on a long-lived session. After
 update z-mac still dials the LAN and accepts direct connections; its application
 firewall is off, so the ad-hoc-signature firewall risk remains untested.
 
+**Rolling out direct device access (0.3.0).** The hub release ships first (the agents'
+`Status.deviceListener` and the `HelloAck` viewer domain are optional fields, so an agent
+ahead of its hub is harmless, but the hub must understand them to list a route), then the
+homelab chart's `release.version` moves every agent to 0.3.0 through the usual self-update.
+Open inbound TCP 27443 from the LAN on each machine's host firewall first, next to 27400,
+and on z-mac check the application firewall after the update, as for the direct port. A
+machine's device listener opens once it has a hub-confirmed home session on 0.3.0 (its
+cache then holds the viewer domain), and the machine list carries its `direct` route
+within seconds of that. Rolling back to 0.2.0 removes the listener; the cache's extra key
+is ignored, so no `minStateVersion` is needed.
+
 After each machine moves, turn T3 Connect off on it (`t3 up`), bind T3 to
 `127.0.0.1`, turn LAN mode off, and remove any other proxy or listener that reaches
 T3 without mTLS.
@@ -1046,6 +1178,29 @@ missing `HelloAck` is retried rather than blacklisted, and that a stale config t
 `/alerts/stale-config` red without failing `/readyz`.
 A broken release can strand z-mac while it is away, so this test runs in CI before
 every release.
+
+The direct device listener has its own tests. Unit tests in `internal/agent/direct` cover
+admission (the KeyChain identity, an agent, a device missing from the rule, a superseded
+leaf, a device leaf with `server auth` or an extra name or two URIs, another CA, no
+certificate, a blocked leaf, a disabled identity, an expired leaf, ALPN and TLS version),
+the `Host` rule, header stripping, the probe, WebSocket proxying, a `502` with T3 down,
+closing live keep-alive connections and WebSockets on each loss (blocked leaf, disabled
+identity, rule removal, a newer leaf, leaf expiry, cache window, left home) and that a
+request on a revoked connection is not served, the outage window, the home gate (hub
+connected but away, a foreign network matching the home prefixes, no cached gateway, cache
+window over), and that the listener binds and unbinds with its notification. The
+integration test (`test/integration/device_test.go`) runs a real hub and an agent with the
+device listener over loopback and enrolls the device through the enrollment protocol: a
+device enrolled and listed is proxied over HTTP and WebSocket and appears as the machine's
+`direct` route; the KeyChain identity, an agent, an enrolled device not in the rule and a
+superseded leaf are refused; a wrong `Host` is `421`; forged headers are stripped; the
+probe answers; a WebSocket closes on a blocked leaf, a rule removal, a new leaf, a disabled
+identity, a device dropped from the configuration and leaf expiry; with the hub stopped the
+open session and new ones keep working, also after a cold start, and stop at the end of the
+cache window; an agent that boots in an outage on a foreign network with a matching home
+prefix, or moves to one, opens or keeps no listener; the hub's home verdict opens and
+closes the listener and the route; and an unpaired request gets the same status, headers
+and body on the direct path as through the viewer host, for HTTP, a WebSocket, and T3 down.
 
 The homelab side keeps its usual chart tests, plus one asserting that no rendered
 Traefik middleware lists a kind `agent` identity.
@@ -1139,6 +1294,11 @@ Traefik middleware lists a kind `agent` identity.
 | Device leaves | newest leaf per device on viewer hosts and the API, and pushed to agents; `GET /api/v1/trust` for the clients CA and blocked leaves |
 | Agent renewal | at 90 days left; hub admits only the newest leaf per identity |
 | T3 on machines | loopback-bound, LAN mode off, other non-mTLS proxies removed before the gates |
+| Direct device access | second agent listener (`direct.devices`, port 27443, TLS 1.3, ALPN `http/1.1`), separate from `t3-mesh-direct/1`, same home gate and cache window |
+| Device listener admission | in the handshake: one device-kind URI, `client auth` only, in the machine's rule, newest leaf the agent knows; refusal is a TLS alert, no HTTP; the KeyChain identities never connect |
+| Device listener origin | `Host` must be `t3.<machine>.<viewerDomain>` (domain sent by the hub), else `421`; same rewrite code as the hub's viewer proxy plus dropping every client forwarding header |
+| Device listener probe | `GET /.well-known/t3-mesh/direct`, answered by the agent, `{"machine","identity"}` with `no-store` |
+| Direct route in the machine list | `direct` (address and port) and `agentIdentity`; non-null only while the hub marks the machine home and the agent reports the listener bound; IPv4 inside `homeCIDRs` preferred, then the tunnel's source address |
 | Hub state | none persistent; tokens and last-seen lost on restart |
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
