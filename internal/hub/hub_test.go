@@ -982,14 +982,25 @@ func getJSON(t *testing.T, target string, out any) {
 func openStream(t *testing.T, e *env, path string, notAfter time.Time) (io.Reader, func()) {
 	t.Helper()
 
+	return openStreamAs(t, e, "z-phone", viewerFP, path, notAfter)
+}
+
+func openStreamAs(
+	t *testing.T,
+	harness *env,
+	viewer, fp, path string,
+	notAfter time.Time,
+) (io.Reader, func()) {
+	t.Helper()
+
 	req, _ := http.NewRequestWithContext(
 		t.Context(),
 		http.MethodGet,
-		e.viewer.URL+path,
+		harness.viewer.URL+path,
 		http.NoBody,
 	)
 	req.Host = "t3.devbox.mesh.test"
-	setViewerHeaders(req.Header, "z-phone", viewerFP, notAfter)
+	setViewerHeaders(req.Header, viewer, fp, notAfter)
 
 	//nolint:bodyclose // the returned func closes the body once the caller is done streaming
 	resp, err := http.DefaultClient.Do(req)

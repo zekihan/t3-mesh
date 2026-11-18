@@ -131,8 +131,7 @@ func New(opts Options) (*Server, error) {
 		Issuer:  server.issuer,
 		Allowed: server.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
-			server.setNewest(identity, fp)
-			server.pruneAsync(identity)
+			server.noteIssued(identity, fp)
 			server.log.Info(
 				"Certificate issued",
 				slog.Any("identity", identity),
@@ -516,7 +515,7 @@ func (server *Server) enforce() {
 
 	server.tmu.Lock()
 	for t := range server.tracked {
-		err := policy.Check(snap.Rules, snap.Revocations, t.pol, now)
+		err := server.checkSession(snap, &t.pol, now)
 		if err != nil {
 			doomed = append(doomed, revoked{track: t, err: err})
 		}

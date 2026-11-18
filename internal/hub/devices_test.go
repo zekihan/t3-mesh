@@ -2,8 +2,13 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +22,11 @@ const (
 	devTablet = "device-z-tablet-mesh"
 )
 
-var bothDevices = []string{devPhone, devTablet}
+var (
+	bothDevices = []string{devPhone, devTablet}
+
+	errLookupBoom = errors.New("issuer unavailable")
+)
 
 func TestEnrollTokenKinds(t *testing.T) {
 	harness := newEnv(t)
@@ -371,5 +380,324 @@ func TestDeviceEnrollmentRefusals(t *testing.T) {
 				t.Fatal("a certificate was issued")
 			}
 		})
+	}
+}
+
+// newDeviceFP issues a leaf for identity, as the hub does: the issuer and the
+// hub's own record both name it the newest. It returns the fingerprint.
+func (harness *env) newDeviceFP(identity string) string {
+	harness.t.Helper()
+
+	cert := harness.newCert(identity, farFuture)
+	fp := pki.Fingerprint(cert.Leaf)
+	harness.srv.setNewest(identity, fp)
+
+	return fp
+}
+
+func (harness *env) deviceViewerStatus(identity, fp string) int {
+	harness.t.Helper()
+
+	code, _ := harness.get("t3.devbox.mesh.test", identity, fp, farFuture, "/hdr")
+
+	return code
+}
+
+func (harness *env) deviceAPIStatus(identity, fp, path string) int {
+	harness.t.Helper()
+
+	return harness.api(http.MethodGet, apiHost, identity, fp, farFuture, path).status
+}
+
+func deviceEnv(t *testing.T) *env {
+	t.Helper()
+
+	harness := newEnv(t)
+	harness.setConfig(
+		cfgOpts{devices: bothDevices, api: append([]string{"z-phone"}, bothDevices...)},
+	)
+	harness.connect("agent-devbox", "devbox-body")
+
+	return harness
+}
+
+func TestDeviceViewerAdmitsOnlyNewestLeaf(t *testing.T) {
+	harness := deviceEnv(t)
+
+	oldFP := harness.newDeviceFP(devPhone)
+	if code := harness.deviceViewerStatus(devPhone, oldFP); code != http.StatusOK {
+		t.Fatalf("newest leaf got %d", code)
+	}
+
+	newFP := harness.newDeviceFP(devPhone)
+	if code := harness.deviceViewerStatus(devPhone, oldFP); code != http.StatusForbidden {
+		t.Fatalf("superseded leaf got %d", code)
+	}
+
+	if code := harness.deviceViewerStatus(devPhone, newFP); code != http.StatusOK {
+		t.Fatalf("new leaf got %d", code)
+	}
+
+	// One device's renewal never supersedes the other's.
+	tabletFP := harness.newDeviceFP(devTablet)
+	if code := harness.deviceViewerStatus(devTablet, tabletFP); code != http.StatusOK {
+		t.Fatalf("tablet leaf got %d", code)
+	}
+
+	if code := harness.deviceViewerStatus(devPhone, newFP); code != http.StatusOK {
+		t.Fatalf("phone leaf got %d after the tablet's issuance", code)
+	}
+}
+
+func TestDeviceAPIAdmitsOnlyNewestLeaf(t *testing.T) {
+	harness := deviceEnv(t)
+
+	oldFP := harness.newDeviceFP(devPhone)
+	newFP := harness.newDeviceFP(devPhone)
+
+	for _, path := range []string{"/api/v1/machines", "/api/v1/fleet"} {
+		if code := harness.deviceAPIStatus(devPhone, newFP, path); code != http.StatusOK {
+			t.Errorf("GET %s with the newest leaf = %d", path, code)
+		}
+
+		if code := harness.deviceAPIStatus(devPhone, oldFP, path); code != http.StatusForbidden {
+			t.Errorf("GET %s with a superseded leaf = %d", path, code)
+		}
+	}
+}
+
+func TestDeviceNotConfiguredIsRefused(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: []string{devTablet}, api: bothDevices})
+	harness.connect("agent-devbox", "devbox-body")
+
+	fp := harness.newDeviceFP(devPhone)
+
+	if code := harness.deviceViewerStatus(devPhone, fp); code != http.StatusForbidden {
+		t.Errorf("viewer: unconfigured device got %d", code)
+	}
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		fp,
+		"/api/v1/machines",
+	); code != http.StatusForbidden {
+		t.Errorf("API: unconfigured device got %d", code)
+	}
+}
+
+// With no devices configured, device enrollment is off and no such leaf is admitted.
+func TestDeviceIdentitiesNeedTheDevicesList(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{api: []string{devPhone}})
+	harness.connect("agent-devbox", "devbox-body")
+
+	fp := harness.newDeviceFP(devPhone)
+
+	if code := harness.deviceViewerStatus(devPhone, fp); code != http.StatusForbidden {
+		t.Errorf("viewer got %d", code)
+	}
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		fp,
+		"/api/v1/machines",
+	); code != http.StatusForbidden {
+		t.Errorf("API got %d", code)
+	}
+}
+
+// As for agents, a leaf the issuer has no record of is admitted (and logged).
+func TestDeviceWithoutIssuanceRecordIsAdmitted(t *testing.T) {
+	harness := deviceEnv(t)
+
+	if code := harness.deviceViewerStatus(
+		devPhone,
+		strings.Repeat("c", 64),
+	); code != http.StatusOK {
+		t.Fatalf("viewer got %d", code)
+	}
+}
+
+func TestDeviceCheckUnavailable(t *testing.T) {
+	harness := deviceEnv(t)
+	fp := harness.newDeviceFP(devPhone)
+
+	harness.fake.SetNewestErr(errLookupBoom)
+
+	other := strings.Repeat("d", 64)
+	if code := harness.deviceViewerStatus(devPhone, other); code != http.StatusServiceUnavailable {
+		t.Errorf("viewer got %d", code)
+	}
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		other,
+		"/api/v1/machines",
+	); code != http.StatusServiceUnavailable {
+		t.Errorf("API got %d", code)
+	}
+
+	// What the hub already knows needs no lookup.
+	if code := harness.deviceViewerStatus(devPhone, fp); code != http.StatusOK {
+		t.Errorf("known leaf got %d while the issuer was down", code)
+	}
+
+	harness.fake.SetNewestErr(nil)
+
+	if code := harness.deviceViewerStatus(devPhone, other); code != http.StatusForbidden {
+		t.Errorf("superseded leaf got %d after recovery", code)
+	}
+}
+
+// A hub that restarted knows nothing yet: the issuer decides, and what it says
+// is remembered.
+func TestDeviceNewestAfterHubRestart(t *testing.T) {
+	harness := deviceEnv(t)
+
+	oldCert := harness.newCert(devPhone, farFuture)
+	newCert := harness.newCert(
+		devPhone,
+		farFuture,
+	) // the issuer's newest; the hub's record is empty
+	oldFP, newFP := pki.Fingerprint(oldCert.Leaf), pki.Fingerprint(newCert.Leaf)
+
+	if code := harness.deviceViewerStatus(devPhone, oldFP); code != http.StatusForbidden {
+		t.Errorf("superseded leaf got %d", code)
+	}
+
+	if code := harness.deviceViewerStatus(devPhone, newFP); code != http.StatusOK {
+		t.Errorf("newest leaf got %d", code)
+	}
+}
+
+func TestSupersededLeafClosesOpenStream(t *testing.T) {
+	harness := deviceEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices, api: bothDevices})
+
+	phoneFP := harness.newDeviceFP(devPhone)
+	tabletFP := harness.newDeviceFP(devTablet)
+
+	phoneStream, closePhone := openStreamAs(t, harness, devPhone, phoneFP, "/stream", farFuture)
+	defer closePhone()
+
+	tabletStream, closeTablet := openStreamAs(t, harness, devTablet, tabletFP, "/stream", farFuture)
+	defer closeTablet()
+
+	// The device renews through enrollment: the old leaf's stream ends at once.
+	token, _, err := harness.srv.tokens.Create(devPhone)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enrolled, ok := harness.enrollOver(proto.Enroll{Token: token, CSR: deviceCSR(t, devPhone)}).(proto.Enrolled)
+	if !ok {
+		t.Fatal("enrollment failed")
+	}
+
+	expectStreamClosed(t, phoneStream)
+
+	certs, err := pki.ParseCertsPEM([]byte(enrolled.Certificate))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code := harness.deviceViewerStatus(devPhone, phoneFP); code != http.StatusForbidden {
+		t.Errorf("old leaf got %d", code)
+	}
+
+	if code := harness.deviceViewerStatus(
+		devPhone,
+		pki.Fingerprint(certs[0]),
+	); code != http.StatusOK {
+		t.Errorf("new leaf got %d", code)
+	}
+
+	// The other device's stream is untouched.
+	expectStreamOpen(t, tabletStream)
+
+	if code := harness.deviceViewerStatus(devTablet, tabletFP); code != http.StatusOK {
+		t.Errorf("tablet got %d", code)
+	}
+}
+
+func expectStreamOpen(t *testing.T, r io.Reader) {
+	t.Helper()
+
+	done := make(chan struct{})
+
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("stream was closed")
+	case <-time.After(600 * time.Millisecond):
+	}
+}
+
+func TestRemovedDeviceClosesOpenStream(t *testing.T) {
+	harness := deviceEnv(t)
+	fp := harness.newDeviceFP(devPhone)
+
+	stream, closeFn := openStreamAs(t, harness, devPhone, fp, "/stream", farFuture)
+	defer closeFn()
+
+	harness.setConfig(cfgOpts{devices: []string{devTablet}, api: bothDevices})
+	expectStreamClosed(t, stream)
+}
+
+func TestDisabledAndBlockedDeviceRefused(t *testing.T) {
+	harness := deviceEnv(t)
+	fp := harness.newDeviceFP(devPhone)
+
+	harness.setConfig(cfgOpts{devices: bothDevices, api: bothDevices, disabled: []string{devPhone}})
+
+	if code := harness.deviceViewerStatus(devPhone, fp); code != http.StatusForbidden {
+		t.Errorf("disabled device on a viewer host got %d", code)
+	}
+
+	harness.setConfig(cfgOpts{devices: bothDevices, api: bothDevices, blocked: []string{fp}})
+
+	if code := harness.deviceViewerStatus(devPhone, fp); code != http.StatusForbidden {
+		t.Errorf("blocked leaf on a viewer host got %d", code)
+	}
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		fp,
+		"/api/v1/machines",
+	); code != http.StatusForbidden {
+		t.Errorf("blocked leaf on the API got %d", code)
+	}
+}
+
+// An enrolled device is a viewer. It never reaches the agent tunnel, which
+// relays between machines without the viewer controls.
+func TestDeviceCertCannotOpenTunnel(t *testing.T) {
+	harness := deviceEnv(t)
+
+	cert := harness.newCert(devPhone, farFuture)
+
+	conn, err := harness.dial(&cert, proto.TunnelALPN(1))
+	if err == nil {
+		defer func() { _ = conn.Close() }()
+
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+		_, rerr := conn.Read(make([]byte, 1))
+
+		var netErr net.Error
+		if rerr == nil || (errors.As(rerr, &netErr) && netErr.Timeout()) {
+			t.Fatalf("tunnel connection was not refused: %v", rerr)
+		}
+	}
+
+	_, err = harness.connectWith(devPhone, &cert, "x")
+	if err == nil {
+		t.Fatal("device certificate opened a tunnel")
 	}
 }

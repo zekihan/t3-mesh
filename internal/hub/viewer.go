@@ -77,7 +77,12 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 		Machine:     machine,
 	}
 
-	err := server.checkNow(&pol)
+	err := server.checkRules(&pol)
+	if err == nil {
+		// An enrolled device is admitted only with its newest leaf.
+		err = server.admitDevice(r.Context(), snap, viewer, fp)
+	}
+
 	if err != nil {
 		server.log.InfoContext(
 			r.Context(),
@@ -87,7 +92,7 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 			slog.String("target", policy.Target(svc, machine)),
 			slog.String("reason", err.Error()),
 		)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		refuse(w, err)
 
 		return
 	}

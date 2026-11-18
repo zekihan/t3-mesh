@@ -77,9 +77,14 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		err = errNotAPICaller
 	}
 
+	if err == nil {
+		// An enrolled device is admitted only with its newest leaf.
+		err = server.admitDevice(r.Context(), snap, caller, fp)
+	}
+
 	if err != nil {
 		server.rejectAPI(r, caller, err.Error())
-		http.Error(w, "forbidden", http.StatusForbidden)
+		refuse(w, err)
 
 		return
 	}
