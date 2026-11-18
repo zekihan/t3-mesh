@@ -39,9 +39,11 @@ type cfgOpts struct {
 	release  string
 	disabled []string
 	blocked  []string
+	api      []string
 	noCIDRs  bool
 }
 
+//nolint:gocritic // test options are passed by value so call sites stay literals
 func (opts cfgOpts) yaml() string {
 	rel := opts.release
 	if rel == "" {
@@ -57,6 +59,11 @@ func (opts cfgOpts) yaml() string {
 		blk = "[" + strings.Join(opts.blocked, ",") + "]"
 	}
 
+	apiIDs := "[]"
+	if len(opts.api) > 0 {
+		apiIDs = "[" + strings.Join(opts.api, ",") + "]"
+	}
+
 	cidrs := "[127.0.0.0/8]"
 	if opts.noCIDRs {
 		cidrs = "[]"
@@ -69,13 +76,14 @@ machines:
 homeCIDRs: %s
 viewerDomain: mesh.test
 release: {version: %s}
+api: {identities: %s}
 policy:
   entries:
-    mesh-t3-devbox: {identities: [z-phone, agent-z-arch]}
+    mesh-t3-devbox: {identities: [z-phone, z-viewer, agent-z-arch]}
     mesh-t3-z-arch: {identities: [z-phone]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, cidrs, rel, dis, blk)
+`, cidrs, rel, apiIDs, dis, blk)
 }
 
 type env struct {
@@ -197,6 +205,7 @@ func newEnv(t *testing.T) *env {
 	return harness
 }
 
+//nolint:gocritic // test options are passed by value so call sites stay literals
 func (harness *env) setConfig(o cfgOpts) {
 	harness.t.Helper()
 	writeFile(harness.t, filepath.Join(harness.paths.ConfigDir, hubconfig.ConfigFile), o.yaml())

@@ -38,6 +38,14 @@ func (server *Server) ViewerHandler() http.Handler {
 }
 
 func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
+	// The API host is matched first: HostTarget only splits
+	// <svc>.<machine>.<domain> and would answer 404.
+	if server.cfg.Current().IsAPIHost(r.Host) {
+		server.serveAPI(w, r)
+
+		return
+	}
+
 	viewer, fp, notAfter, ok := viewerIdentity(r)
 	if !ok {
 		server.log.InfoContext(

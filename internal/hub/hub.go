@@ -39,6 +39,7 @@ const (
 var (
 	errNoEnrollment = errors.New("hub: enrollment is not open")
 	errNoSession    = errors.New("hub: machine not connected")
+	errNotAPICaller = errors.New("hub: identity not listed under api.identities")
 
 	errConfigRequired  = errors.New("hub: Config is required")
 	errIssuerRequired  = errors.New("hub: Issuer is required")
