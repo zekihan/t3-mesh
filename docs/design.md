@@ -1202,6 +1202,39 @@ prefix, or moves to one, opens or keeps no listener; the hub's home verdict open
 closes the listener and the route; and an unpaired request gets the same status, headers
 and body on the direct path as through the viewer host, for HTTP, a WebSocket, and T3 down.
 
+### Compatibility with upstream T3
+
+The tests above run against a stand-in T3. `TestT3Compat` (`test/integration/t3compat_test.go`)
+puts a real `t3 serve` behind the same hub and agent, with a temporary data directory and
+project, and runs what the web and mobile apps do through three routes: the hub's viewer host
+(`t3.<machine>.<viewerDomain>` with the `X-Mtls-Mesh-*` headers), the agent's device listener
+(an enrolled device), and T3 directly as the control. It checks that unpaired requests
+(`/.well-known/t3/environment`, `/`, the auth endpoints with bad credentials, a WebSocket
+upgrade without a valid ticket) get the status, headers and body semantics T3 gives on its
+own, so no forwarded `Host`, `Origin` or `X-Forwarded-Proto` is rejected; that a pairing
+credential minted with `t3 auth pairing create` redeems for a bearer token (`/oauth/token`)
+and for a browser session cookie that is `Secure` behind the proxies; that a WebSocket ticket
+opens the RPC socket (`/ws`), which then carries a request, a message over 100 KB, a
+subscription stream, four seconds of idle pings and a clean close, with and without an
+`Origin`; and that T3's largest static script arrives unaltered. Bodies are compared as
+data, so a harmless upstream change does not fail it. A check that fails on a proxied route
+but passes on `direct` is the proxy; one that fails on all three means T3 changed and the
+test needs updating.
+
+It runs only when `T3_COMPAT_BINARY` names a `t3` executable, so `go test ./...` needs no T3:
+
+```sh
+T3_COMPAT_BINARY=$(command -v t3) go test -count=1 -run '^TestT3Compat$' -v ./test/integration
+```
+
+`.github/workflows/t3-compat.yaml` runs it daily and on demand against the latest `nightly`
+on npm and the nightly the machines run (the `t3mesh-base: v<version>` line in the newest
+release of `zekihan/t3code`; only the latest is checked when that cannot be resolved).
+`workflow_dispatch` takes `t3_versions` to check others; such a run does not touch the
+issue. While either version fails the workflow keeps one open issue, "T3 nightly
+compatibility", with the versions, the failing tests and the run's link, and it closes the
+issue when the check passes again.
+
 The homelab side keeps its usual chart tests, plus one asserting that no rendered
 Traefik middleware lists a kind `agent` identity.
 

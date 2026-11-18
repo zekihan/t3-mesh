@@ -17,6 +17,7 @@ The Android app that connects to the mesh with client certificates is planned in
 go vet ./...
 golangci-lint run
 ./scripts/go_test.sh -race ./...     # includes the hub + agents integration test
+T3_COMPAT_BINARY=$(command -v t3) go test -run '^TestT3Compat$' ./test/integration  # against a real T3
 scripts/build-release.sh v0.1.0      # agent binaries into dist/
 scripts/make-manifest.sh v0.1.0      # dist/manifest.json
 docker build -t t3-mesh-hub .
