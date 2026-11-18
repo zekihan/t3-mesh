@@ -1,6 +1,9 @@
 # t3-mesh design
 
 Status: accepted design; implemented (M0 to M4 done 2026-11-17). Date: 2026-11-16.
+Device enrollment for the Android app (hub 0.2.0) is described under
+[Enrolled-device identities](#enrolled-device-identities), [Device enrollment](#device-enrollment)
+and [Device renewal](#device-renewal).
 
 t3-mesh connects the T3 Code machines (devbox, z-arch, z-mac) to each other and to
 the phone and tablet, with client certificates as the only way in. It does not use
@@ -107,6 +110,33 @@ is a TLS server. Device certificates are unchanged. Agent certificates have no
 `Certificate` resource and no cluster Secret: the key exists only on the machine.
 Homelab tests that assume every identity has a Certificate exclude kind `agent`.
 
+### Enrolled-device identities
+
+The Android app (see the fork's `docs/android-fork.md`, item 4) enrolls with a key
+that lives in the Android Keystore and then uses its own identity on the `mesh-*`
+hosts. `libs/mtls-policy` gains a kind `enrolled device` for these identities, and
+the hub config lists them under `devices` (see [Configuration](#configuration)).
+
+- **Name.** `device-<name>-mesh`, matching
+  `^device-[a-z0-9]+(-[a-z0-9]+)*-mesh$` and at most 40 characters, with the URI SAN
+  `urn:noqer:mtls:clients:<name>`. The first two are `device-z-phone-mesh` and
+  `device-z-tablet-mesh`. One identity per device, so one device's renewal never
+  supersedes the other's.
+- **Disjoint namespaces.** A device name never starts with `agent-` and never equals
+  an existing device identity (`z-phone`, `z-tablet`, `z-arch`, `z-mac`), so the
+  kind of an identity follows from its name alone, and the hub derives the usages it
+  requests from it. The hub refuses an overlap between `devices` and the agent
+  identities in its config.
+- **Reach.** An enrolled device appears only in `mesh-*` policy entries (a chart test
+  fails when any other entry lists one) and under `api.identities`. A compromised
+  hub, which can mint these identities and nothing else, therefore reaches only the
+  mesh viewers, which it already proxies. It can never mint `z-phone`, which every
+  app policy trusts, and a KeyChain identity is refused by every endpoint that is
+  for devices only.
+- **Certificates.** `client auth` and `digital signature`, never `server auth`: a
+  device is a client of every host it uses. The hub requires the same of the leaf it
+  gets back and hands out no other.
+
 ### approver-policy
 
 cert-manager currently auto-approves every CertificateRequest. A hub allowed to
@@ -140,6 +170,33 @@ which account may `use` which policy is the whole control:
    - only the hub's ServiceAccount may `use` it, and the hub may `use` nothing else.
      Neither binding goes to a group such as `system:authenticated`.
 
+4. A second policy for the same ServiceAccount, selecting the same clients Issuer,
+   for enrolled devices:
+   - URI SANs limited to the enumerated device URIs
+     (`urn:noqer:mtls:clients:device-z-phone-mesh`, `-z-tablet-mesh`, no wildcard);
+   - common name, DNS, IP and email fields omitted;
+   - usages `client auth` and `digital signature` only, never `server auth`;
+   - duration 8760h, ECDSA P-256 keys, not a CA.
+
+   approver-policy approves a request when one policy allows all of it, so a request
+   that mixes an agent's usages or URI with a device's is denied by both. The agent
+   policy is unchanged. The hub's ClusterRole gains `use` on the second policy by name,
+   and the hub may still `use` nothing else.
+
+What the hub sends, by kind. The hub requests usages by the kind of the identity (a
+CertificateRequest never mixes them, and none is created when the CSR's URI is not
+the requested identity), and always the same everything else:
+
+| `CertificateRequest` field | Agent (`agent-<machine>`) | Enrolled device (`device-<name>-mesh`) |
+|---|---|---|
+| `metadata.generateName` | `t3-mesh-<identity>-` | `t3-mesh-<identity>-` |
+| `metadata.labels` | `t3-mesh.noqer.com/identity: <identity>`, `app.kubernetes.io/managed-by: t3-mesh-hub` | the same |
+| `spec.issuerRef` | `issuer.name`, `kind`, `group` from the hub config (`clients`, `Issuer`, `cert-manager.io`), in namespace `issuer.namespace` (`mtls-pki`) | the same |
+| `spec.usages` | `client auth`, `server auth`, `digital signature` | `client auth`, `digital signature` |
+| `spec.duration` | `8760h0m0s` | `8760h0m0s` |
+| `spec.isCA` | omitted (false) | omitted (false) |
+| `spec.request` | PEM CSR: ECDSA P-256, empty subject, exactly one URI SAN equal to the identity URI, no DNS, IP or email SAN | the same, and no requested extension other than the URI SAN |
+
 The hub adds its own checks on top: the CSR carries exactly one URI SAN and nothing
 else, the requested name must equal the requesting agent's own identity (or the
 enrollment token's identity), the identity must be listed and not disabled, and the
@@ -154,11 +211,16 @@ the test missed.
 ### Enrollment
 
 1. The operator runs `kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub
-   enroll-token agent-z-mac`. This CLI mode does not hold tokens itself: it asks the
+   enroll-token agent-z-mac`, or, for an enrolled device,
+   `... enroll-token --device device-z-phone-mesh`. This CLI mode does not hold tokens itself: it asks the
    running hub over an admin unix socket inside the pod (`/run/t3-mesh/admin.sock`,
    mode `0600`, not exposed on any port). The hub prints a single-use token bound to
    that identity, valid for 15 minutes, held hashed in the server's memory. A hub
-   restart invalidates outstanding tokens.
+   restart invalidates outstanding tokens. The argument is an agent identity, and
+   `--device` takes an identity listed under `devices`; each refuses the other kind and
+   every unknown or disabled identity, so a token is never minted for the wrong kind.
+   (The admin request carries `kind` as `agent` or `device`; one without it is an
+   agent request, as sent by earlier releases.)
 2. On the machine: `t3-mesh-agent enroll --token <token>`. The agent generates an
    ECDSA P-256 key locally in a `0600` file, connects to
    `mesh.noqer.com` without a client certificate and sends the CSR with the token.
@@ -179,7 +241,44 @@ address, and every attempt is logged.
 
 Enrollment is also the recovery path for an agent whose certificate expired, for
 example after more than 30 days offline: the hub refuses the expired certificate, so
-the operator issues a new token.
+the operator issues a new token. It is the recovery path for a device too: one that
+lost a renewal reply holds a superseded leaf and re-enrolls with a new token.
+
+#### Device enrollment
+
+A device enrolls over the same ALPN and with the same two messages, so the app
+speaks only this section. It connects to `mesh.noqer.com:443` without a client
+certificate, offering ALPN `t3-mesh-enroll/1`, and verifies the hub's Let's Encrypt
+certificate with system roots and the exact hostname. Each message is a 4-byte
+big-endian length followed by that many bytes of JSON, and the request is at most
+4 KiB. The app creates a non-exportable ECDSA P-256 key, builds a CSR with the
+identity URI as its only SAN and an empty subject (no other extension), and sends:
+
+```json
+{"type":"Enroll","body":{"token":"<token>","csr":"-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----\n"}}
+```
+
+On success the reply is:
+
+```json
+{"type":"Enrolled","body":{"certificate":"<PEM leaf>","chain":"<PEM issuer chain>","caBundle":"<PEM, one or more clients CA certificates>","caRevision":"<opaque string>"}}
+```
+
+`certificate` is exactly one certificate; `chain` is the issuing CA (the issuer's
+`status.ca`); `caBundle` is the clients CA bundle the hub trusts, which holds two CAs
+during a rollover, and `caRevision` its revision. Agents ignore the two `caBundle`
+fields (they get the same bundle in `HelloAck`), and a release before device
+enrollment omits them. Any failure is one `{"type":"Reject","body":{"reason":"enroll-failed","detail":"<short text>"}}`
+and a close. The checks run in this order: the CSR is validated first (signature,
+ECDSA P-256 key, empty subject, exactly one URI SAN, no DNS, IP or email SAN, no extra
+requested extension for a device), so a malformed request cannot burn a token; then the
+token is redeemed (single use, bound to one identity, which must be the CSR's);
+then the hub's `EnrollAllowed` admits the identity (a configured agent, or a device
+listed under `devices`, and not disabled); then the certificate is requested. A
+device is issued a certificate with `client auth` only, which the hub verifies before it
+replies. A token for one device cannot enroll the other, and a device token cannot enroll
+an agent identity or the other way round. Enrollment is rate limited per source address
+(5 attempts in 10 minutes) and every attempt is logged with the enrolled URI.
 
 ### Trust bundle
 
@@ -203,6 +302,9 @@ the old CA is gone must be re-enrolled by the operator with a new token.
 
 ### Renewal
 
+An enrolled device renews through the hub API instead, see
+[Device renewal](#device-renewal). The rest of this section is about agents.
+
 When less than 90 days remain, the agent generates a new key and sends a CSR over
 its tunnel. Starting early (device certificates use 30 days) lets an agent that is
 offline for weeks still renew without re-enrollment. An operator forces a renewal
@@ -221,6 +323,9 @@ The agent does not renew while a new version is on probation (see
 [Self-update](#self-update)), so a rollback never meets an identity written by a
 version that did not survive.
 
+The same newest-leaf rule holds for enrolled devices on the viewer hosts and the API,
+as [Newest leaf for devices](#newest-leaf-for-devices) describes.
+
 ### Revocation
 
 Disabled identities and blocked leaf fingerprints from `libs/mtls-policy` apply
@@ -238,7 +343,11 @@ hub and agents ignore an entry's `expires` date, which is only a cleanup reminde
   certificate's expiry or the end of the cache window makes a session no longer
   allowed, the hub or agent closes it at once. A long-lived T3 WebSocket therefore
   cannot outlive the permission that opened it.
-- Removing an agent from the policy is the routine way to retire a machine.
+- Removing an agent from the policy is the routine way to retire a machine. Removing
+  a device from `devices` (and from the policy entries) retires a device: its open
+  streams close and every agent drops its leaf.
+- A disabled device identity or a blocked device leaf is refused on enrollment, the
+  viewer hosts and the API like any other identity.
 
 ## Hub
 
@@ -289,8 +398,19 @@ release:
   version: v0.3.0      # what agents should run; bumped by Renovate
 api:
   host: hub.mesh.noqer.com   # optional; defaults to hub.<viewerDomain>
-  identities: [z-phone, z-tablet]   # the `mesh-hub` callers, device identities only
+  # The `mesh-hub` callers: the KeyChain identities and the enrolled devices.
+  identities: [z-phone, z-tablet, device-z-phone-mesh, device-z-tablet-mesh]
+devices: [device-z-phone-mesh, device-z-tablet-mesh]  # optional; enrolled devices allowed to enroll and renew
 ```
+
+`devices` is the list of enrolled-device identities that may enroll and renew, rendered
+by the chart from the policy entries of kind `enrolled device`. Each must match
+`^device-[a-z0-9]+(-[a-z0-9]+)*-mesh$` (at most 40 characters) and must not be an agent
+identity. Unknown fields are rejected, as everywhere in this file. When it is absent
+there is no device enrollment: no token is minted, no enrollment is admitted and no
+device leaf is admitted. `devices` is a separate field, like `api.identities`: it is
+never a rule. Deploy order is the same as for `api`: the hub release that understands
+`devices` ships first, and the chart change that renders it after it.
 
 Machine-to-machine rules come from the same `mesh-<svc>-<machine>` policy entries as
 viewer rules: `agent-z-arch` in the `mesh-t3-devbox` identities list means z-arch's
@@ -322,9 +442,9 @@ identities in an entry only grant machine-to-machine access.
 The hub takes an agent's identity only from its certificate's URI SAN; `Hello` names
 none. A tunnel is accepted only when that URI is exactly one configured
 `agent-<machine>` identity, the identity is not disabled and the leaf is not
-blocked. Any other certificate from the clients CA (a phone, a browser) gets the
-connection closed before any stream is accepted, so it can never reach the relay
-path, which bypasses the viewer controls.
+blocked. Any other certificate from the clients CA (a phone, a browser, an enrolled device)
+gets the connection closed before any stream is accepted, so it can never reach the
+relay path, which bypasses the viewer controls.
 
 The hub accepts the current and the previous tunnel protocol version (`t3-mesh/N`
 and `t3-mesh/N-1` in ALPN), so agents on the previous release keep working while a
@@ -368,11 +488,15 @@ map accepts only `mesh-<svc>-<machine>` entries and feeds the agents. A name beg
 `agent-` is invalid there, and `api.host` may not equal `viewerDomain` or sit under it
 as a viewer host.
 
-Every endpoint is `GET`-only (`405` with `Allow: GET` otherwise), any other path is
-`404`, and every response carries `Cache-Control: no-store`. A single filter,
+Every endpoint but `renew` is `GET`-only (`405` with `Allow: GET` otherwise), any
+other path is `404`, and every response carries `Cache-Control: no-store`. An enrolled
+device (a name matching the device pattern) is admitted only if it is listed under
+`devices` and its leaf, by the fingerprint header, is the newest the hub issued for
+it; otherwise it gets `403`, or `503` while the issuer cannot say which leaf is newest.
+A KeyChain identity is unaffected. A single filter,
 `visibleMachines`, decides what a caller may see: the machines whose
-`mesh-t3-<machine>` entry lists the caller. Every `/api/v1` endpoint goes through it,
-so `/api/v1/fleet` and `/api/v1/trust` reuse it.
+`mesh-t3-<machine>` entry lists the caller. Every `/api/v1` endpoint that lists
+machines goes through it, so `/api/v1/fleet` reuses it; `/api/v1/trust` lists none.
 
 `GET /api/v1/machines` returns the visible machines sorted by name:
 
@@ -402,6 +526,62 @@ itself: `LAN` if the `X-Real-IP` header, which Traefik's `traefik-real-ip`
 middleware sets at the entrypoint, is inside `homeCIDRs`, `OCI` if it is outside,
 `null` if the header is missing or not a bare IP address. The TCP peer is a Traefik
 pod and is never used.
+
+`GET /api/v1/trust` returns what an app needs to verify an agent when it connects to
+one directly, with the same admission as `/machines` and no per-machine filter:
+
+```json
+{"caBundle":"<PEM, one or more clients CA certificates>","caRevision":"<opaque string>","revokedAgents":["<sha256 hex>"]}
+```
+
+`caBundle` and `caRevision` are the hub's clients CA bundle and its revision.
+`revokedAgents` is the sorted list of blocked leaf fingerprints (lowercase hex SHA-256
+of the DER) from the policy, `[]` when none. The hub cannot tell an agent's leaf from
+another by its fingerprint, so the list holds every blocked leaf and an app compares an
+agent's leaf against it. A disabled agent identity is not in it: block its leaf to
+revoke it on devices. A CA rotation reaches an app through the revision.
+
+#### Device renewal
+
+`POST /api/v1/renew` renews an enrolled device's certificate with a new key. The
+request is `Content-Type: application/x-pem-file` (parameters such as `charset` are
+allowed) with a PEM CSR as the body, at most 16 KiB. It goes through the admission
+above and then these checks, so the caller must be:
+
+- admitted as for any `/api/v1` endpoint: the three `X-Mtls-Mesh-*` headers, identity
+  not disabled, leaf not blocked and not expired, and listed under `api.identities`;
+- listed under `devices`: a KeyChain identity such as `z-phone` is a legitimate API
+  caller and gets `403` here, whatever it posts and with any method;
+- holding the newest leaf the hub issued for its identity (`403` otherwise).
+
+The CSR follows the rules of [Device enrollment](#device-enrollment) (ECDSA P-256,
+empty subject, exactly one URI SAN, no DNS, IP or email SAN, no other requested
+extension) and must name the caller's own identity. The hub cannot see the old public
+key on this path (only the fingerprint header arrives), so it does not check that the
+key is new; the app generates a new one. The response is `200` with:
+
+```json
+{"certificate":"<PEM leaf>","chain":"<PEM issuer chain>","caBundle":"<PEM>","caRevision":"<opaque string>"}
+```
+
+Status codes: `400` for an unusable CSR, `403` for a refused caller or a CSR for another
+identity, `405` (`Allow: POST`) for another method, `413` over 16 KiB, `415` for another
+content type, `429` with `Retry-After` when renewals are limited, `502` when issuance
+failed (without detail), `503` when the newest leaf cannot be checked. Renewals are
+limited to 5 attempts per 10 minutes per identity, counting every attempt that passed
+admission, and to one at a time. A renewal outlives a client that hangs up: the hub
+finishes the issuance and records the new leaf, so a reply the app never read leaves it
+with a superseded leaf, and the recovery is re-enrollment with a new token.
+
+#### Newest leaf for devices
+
+The hub admits only the newest issued leaf of an enrolled-device identity on the viewer
+hosts and on `/api/v1`, using the fingerprint header, as it does for agent tunnels: it
+asks the issuer when its own record disagrees (it keeps none across restarts), and
+admits, with a warning, a leaf the issuer has no record of at all, as for agents. A
+leaf issued by enrollment or renewal supersedes the previous one at once: the hub closes
+the old leaf's open streams and pushes the new fingerprint to every agent. A device that
+is no longer listed under `devices` is refused and its streams are closed.
 
 Deploy order: the hub parses its config with unknown fields rejected, so the hub
 release that understands `api` ships first and the chart change that renders it comes
@@ -538,6 +718,12 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   On a network change or wake, the agent closes direct sessions whose local address
   is gone. Open streams never migrate between direct and tunnel paths; the T3 client
   reconnects its WebSocket and the new connection takes the current path.
+- **Device leaves:** the hub also pushes the newest leaf fingerprint of each enrolled
+  device (`deviceLeaves`, see the wire protocol), and the agent caches it with the rest.
+  It holds one fingerprint per device and accepts only that one (`allowDevice`), so a
+  renewed or re-enrolled device's old leaf is refused as soon as the update arrives.
+  The cache is valid for the same `cacheTTL` as the rules. The direct listener for
+  devices, which uses this, is a later milestone; today the agent only stores the data.
 - **Hub unreachable:** the agent cannot confirm home, so it uses the gateway check
   below and, if it passes, tries the cached LAN addresses. Identity checks make a
   wrong guess safe, and the dial fails fast. Cached rules allow direct traffic for at most 1 week after
@@ -661,14 +847,24 @@ length-prefixed JSON with a `type` field. The protocol version is in the ALPN.
 | Message | Direction | Content |
 |---|---|---|
 | `Hello` | agent → hub | agent version, announced services, LAN addresses, direct port, cert fingerprint |
-| `HelloAck` | hub → agent | home status, `Release`, rules, peer table, revocation list, trust bundle |
-| `Update` | hub → agent | new rules, peer table, revocation list or trust bundle after a change; agents re-check live sessions against it |
+| `HelloAck` | hub → agent | home status, `Release`, rules, peer table, revocation list, trust bundle, device leaves |
+| `Update` | hub → agent | new rules, peer table, revocation list, trust bundle or device leaves after a change; agents re-check live sessions against it |
 | `Release` | hub → agent | desired version, rollback allowed, revision; sent in `HelloAck` and again whenever the chart value changes |
 | `Ping` / `Pong` | both | liveness, round-trip time |
 | `Renew` / `Renewed` | agent → hub / hub → agent | CSR / certificate and chain |
 | `Reject` | hub → agent | reason (identity disabled, leaf not newest, unsupported version, other) before closing a session |
-| `Status` | agent → hub | recent warnings, direct-session counts, running version, last applied `Release`, policy, revocation and trust-bundle revisions, failed update versions and reasons |
-| `Enroll` / `Enrolled` | agent → hub / hub → agent | token + CSR / certificate and chain (ALPN `t3-mesh-enroll/1` only) |
+| `Status` | agent → hub | recent warnings, direct-session counts, running version, last applied `Release`, policy, revocation, trust-bundle and device-leaves revisions, failed update versions and reasons |
+| `Enroll` / `Enrolled` | agent or device → hub / hub → agent or device | token + CSR / certificate, chain, clients CA bundle and its revision (ALPN `t3-mesh-enroll/1` only) |
+
+The device leaves are `{"revision":"<opaque>","leaves":[{"identity":"device-z-phone-mesh","fingerprint":"<sha256 hex>"}]}`,
+sorted by identity, one entry per configured device the hub has issued a leaf for.
+`HelloAck.deviceLeaves` and `Update.deviceLeaves` carry it, and an absent field means
+"unchanged" (an older hub, or one that could not ask the issuer, which keeps what the
+agent has). An empty list replaces the cached one, and a device that is no longer
+configured is absent from the list. Every addition to the protocol is an optional JSON
+field that releases before it ignore, and the protocol version in the ALPN is unchanged,
+so agents of the previous release keep working while the hub is ahead of them and the
+other way round; the agent cache gains one optional key and keeps format version 1.
 
 Data streams start with one header line of JSON, then raw bytes:
 
@@ -680,9 +876,9 @@ Data streams start with one header line of JSON, then raw bytes:
 
 | Where | Change |
 |---|---|
-| `platform/cert-manager` | approver-policy, built-in approver disabled by appending to the existing `extraArgs`, one policy per issuer usable only by cert-manager, hub policy usable only by the hub, test that every issuer has a policy |
+| `platform/cert-manager` | approver-policy, built-in approver disabled by appending to the existing `extraArgs`, one policy per issuer usable only by cert-manager, hub policy usable only by the hub and a second hub policy for the enumerated device URIs, test that every issuer has a policy |
 | `platform/network-baseline` | `t3-mesh` added to the default-deny namespace list |
-| `libs/mtls-policy` | kind `agent` with three identities; `mesh-t3-<machine>` entries listing viewers and permitted agents |
+| `libs/mtls-policy` | kind `agent` with three identities; `mesh-t3-<machine>` entries listing viewers and permitted agents; kind `enrolled device` with the device identities, which only `mesh-*` entries (and `mesh-hub`) may list, and which renders the hub's `devices` list |
 | `libs/app` | a kind filter in `templates/_policy.tpl`, so rendered Traefik middlewares drop kind `agent` |
 | `zekihan/traefik-mtls-authz` | options to forward the leaf SHA-256 fingerprint and expiry in `X-Mtls-*` headers, under the same name validation and stripping as `forwardIdentityHeader`, with tests; homelab bumps the plugin version |
 | `platform/t3-mesh` (new) | hub Deployment, Services, `IngressRouteTCP` for `mesh.noqer.com`, one `IngressRoute` per viewer host with the `mtls-clients` TLS option, the policy middleware (agents excluded) and viewer headers, Let's Encrypt certificate, DNS records, RBAC, NetworkPolicy (ingress 8443/8080 from Traefik, 9090 from Gatus; egress to the API and DNS), ConfigMap, `clients-ca-bundle` ConfigMap, Gatus endpoints; chart tests that every viewer route uses `mtls-clients` and the policy middleware (without it, client-sent `X-Mtls-*` headers would reach the hub) and that no middleware lists an `agent-*` URI |
@@ -699,8 +895,8 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
 - **`/status`** (JSON) lists, per agent: connected, path (LAN or OCI), open and
   direct sessions, stream counts, version, certificate expiry, last seen, and the
-  last acknowledged `Release`, policy, revocation and trust-bundle revisions. Rotation
-  steps that wait for "every agent acknowledged" read it.
+  last acknowledged `Release`, policy, revocation, trust-bundle and device-leaves
+  revisions. Rotation steps that wait for "every agent acknowledged" read it.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
@@ -708,7 +904,9 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   `stale-config`.
 - The hub logs agent events (connect, disconnect, path change, renewal, issued
   fingerprint, update, rollback, reject, rejected peer) to stdout, so they reach
-  VictoriaLogs.
+  VictoriaLogs. It logs the same for devices: each token minted with its kind, each
+  enrollment and renewal with the enrolled URI and the old and new fingerprints, and each
+  refusal on a viewer host or the API with its reason.
 - Gatus canaries: `canary-unauthorized` must be refused on every viewer host, and a
   TLS check on `mesh.noqer.com` confirms the hub serves its certificate. A Gatus
   probe cannot speak the tunnel protocol, so rejection of unauthenticated or
@@ -720,16 +918,19 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 |---|---|
 | Unauthenticated access to a machine | T3 binds to loopback, LAN mode is off, and pre-existing non-mTLS proxies (z-arch's `caddy-t3.service`) are removed. The only routes in are the tunnel (hub-authenticated agent, Traefik-authorized viewer) and the direct listener (mTLS + cached rules). T3 pairing remains. |
 | Stolen phone or browser certificate | Reaches T3 login only; still needs T3 pairing. Cannot register as an agent or open a tunnel (tunnel admission accepts configured agent URIs only). Revoke in `libs/mtls-policy`. |
+| Stolen enrolled-device key | The key is non-exportable in the Android Keystore. A leaf is refused as soon as it is not the newest, is blocked or its identity is disabled; the hub cuts its open streams. It reaches `mesh-*` hosts only. Re-enrollment needs an operator token. |
+| KeyChain identity used on the device paths | `z-phone` and the other KeyChain identities are refused by `renew` (devices only), are not in `devices`, and cannot enroll: a token is minted only for a name listed under `devices`. |
 | Agent certificate used as a viewer | Traefik middlewares exclude kind `agent`. |
 | Local process or web page using a link port | Loopback only, `Host` and `Origin` checks on every request against DNS rebinding and cross-site requests, T3 pairing. Other local users are trusted (single-user machines). |
 | Direct listener exposed off the LAN | Binds only addresses inside `homeCIDRs`, and during a hub outage only when the default gateway's MAC matches the cached home gateway. TLS 1.3 only. |
 | In-cluster spoofing of PROXY v2 or viewer header | NetworkPolicy admits only Traefik on 8443 and 8080. |
 | Stolen agent key | Revoke in `libs/mtls-policy`; the hub cuts the tunnel and relayed streams at once; peers close live direct sessions and refuse new ones as soon as they receive the update, and stop all direct traffic at the end of the cache window. The key file is readable only by the service user. |
-| Compromised hub | Can mint only the configured agent certificates (approver-policy). Can reach every agent's services, as any relay could. T3 pairing still applies. |
+| Compromised hub | Can mint only the configured agent certificates and the enumerated device certificates (approver-policy, two policies, usable only by the hub's ServiceAccount; a device certificate has no `server auth`). Never `z-phone` or any other identity. The device identities reach only `mesh-*` hosts, which the hub already proxies. Can reach every agent's services, as any relay could. T3 pairing still applies. |
 | Spoofed home status | Decided by the hub from the tunnel's source address, not by the agent. Traefik trusts PROXY headers only from frpc. A wrong guess during an outage only causes a failed, identity-checked dial. |
 | Malicious update | minisign signature with embedded keys, dual-signed during key rotation, download URL fixed in the binary, no downgrade except a hub-marked rollback to a signed release, automatic rollback. Accepted risk: a compromised hub or chart value can roll every agent back to any older signed release at or above `minStateVersion`, including one with a known flaw. |
-| Enrollment abuse | 15-minute single-use token bound to one identity, operator access via `kubectl exec`, certificate-less connections only on the enrollment ALPN while a token is outstanding, size and time limits, rate limit, logging. |
-| Old agent leaf after renewal or re-enrollment | Hub admits only the newest issued leaf per identity; issued fingerprints are logged. |
+| Enrollment abuse | 15-minute single-use token bound to one identity, minted only for the kind it is for, operator access via `kubectl exec`, certificate-less connections only on the enrollment ALPN while a token is outstanding, size and time limits, rate limit, logging. |
+| Old agent or device leaf after renewal or re-enrollment | Hub admits only the newest issued leaf per identity (agents on the tunnel, devices on viewer hosts and the API) and closes the old leaf's streams; issued fingerprints are logged; agents are pushed the newest device leaf and accept no other. |
+| Renewal abuse | Devices only, newest leaf only, own identity only, one at a time, 5 per 10 minutes per identity, 16 KiB, no CSR extension besides the URI SAN. |
 | T3 trusting loopback clients | Every viewer and peer reaches T3 from `127.0.0.1`. The M1/M2 gates prove that an unpaired request through the agent gets nothing a remote unpaired client would not. |
 
 ## Rollout
@@ -925,6 +1126,10 @@ Traefik middleware lists a kind `agent` identity.
 | Launcher | vetted by self-test in probation; `previous-good` fallback via systemd `OnFailure` / macOS fallback daemon |
 | Direct listener during outage | also requires the cached home gateway MAC; TLS 1.3 only |
 | Enrollment surface | own ALPN, only while a token is outstanding, size and time limits |
+| Device identities | `device-<name>-mesh`, own namespace, listed under `devices`, `client auth` only, ECDSA P-256, 8760h, second approver-policy for the hub's ServiceAccount |
+| Device enrollment | same ALPN and messages as agents; the reply adds the clients CA bundle and revision; `enroll-token --device` |
+| Device renewal | `POST /api/v1/renew`, devices only, newest leaf only, limited per identity; a lost reply is recovered by re-enrollment |
+| Device leaves | newest leaf per device on viewer hosts and the API, and pushed to agents; `GET /api/v1/trust` for the clients CA and blocked leaves |
 | Agent renewal | at 90 days left; hub admits only the newest leaf per identity |
 | T3 on machines | loopback-bound, LAN mode off, other non-mTLS proxies removed before the gates |
 | Hub state | none persistent; tokens and last-seen lost on restart |

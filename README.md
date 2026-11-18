@@ -68,6 +68,22 @@ installer enables the service but starts it only once the machine is enrolled.
    sudo systemctl start t3-mesh-agent          # macOS: sudo launchctl bootstrap system /Library/LaunchDaemons/com.noqer.t3-mesh-agent.plist
    ```
 
+## Enroll a device
+
+The Android app enrolls an enrolled-device identity (`device-<name>-mesh`, listed under
+`devices` in the hub config) with a key in its Keystore. Get a single-use token, valid
+15 minutes, and type it into the app:
+
+```sh
+kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub enroll-token --device device-z-phone-mesh
+```
+
+The command refuses agent identities and every name not listed under `devices`, and an
+agent token cannot enroll a device. The app speaks the enrollment protocol and renews
+through `POST /api/v1/renew`; both are specified in
+[docs/design.md](docs/design.md#device-enrollment). A device whose renewal reply was
+lost holds a superseded leaf and re-enrolls with a new token.
+
 ## Hub image
 
 `ghcr.io/zekihan/t3-mesh-hub` (also on Docker Hub): `edge` from `main`, `X.Y.Z` and
