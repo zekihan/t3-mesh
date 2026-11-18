@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -28,10 +29,17 @@ var (
 	errCSRKeyNotP256     = errors.New("pki: CSR key is not ECDSA P-256")
 	errCSRSubject        = errors.New("pki: CSR has subject attributes")
 	errCSRSANs           = errors.New("pki: CSR has DNS, IP or email SANs")
+	errCSRExtensions     = errors.New("pki: device CSR requests extensions other than the URI SAN")
 	errURISANs           = errors.New("URI SANs, want 1")
+	errDeviceLeafCA      = errors.New("pki: device certificate is a CA")
+	errDeviceLeafUsage   = errors.New("pki: device certificate must have client auth only")
 	errNoCertBlocks      = errors.New("pki: no CERTIFICATE PEM blocks")
 	errNoPeerCert        = errors.New("pki: no peer certificate")
 )
+
+// oidSubjectAltName is the subjectAltName extension, the only one a device CSR
+// may request.
+var oidSubjectAltName = asn1.ObjectIdentifier{2, 5, 29, 17}
 
 // GenerateKey returns a new P-256 private key.
 func GenerateKey() (*ecdsa.PrivateKey, error) {
@@ -103,7 +111,9 @@ func CreateCSR(key *ecdsa.PrivateKey, identity string) ([]byte, error) {
 
 // ValidateCSR checks the CSR signature, that the key is ECDSA P-256, that it
 // has exactly one URI SAN with the clients prefix, an empty subject and no
-// DNS, IP or email SANs. It returns the parsed CSR and the identity name.
+// DNS, IP or email SANs. A CSR for an enrolled-device identity may also request
+// no extension besides that SAN, so it cannot ask for a CA or other usages. It
+// returns the parsed CSR and the identity name.
 func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -125,24 +135,70 @@ func ValidateCSR(csrPEM []byte) (*x509.CertificateRequest, string, error) {
 		return nil, "", errCSRKeyNotP256
 	}
 
+	name, err := csrIdentity(csr)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if policy.IsDevice(name) {
+		err = checkDeviceExtensions(csr)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	return csr, name, nil
+}
+
+// csrIdentity checks the CSR names (empty subject, no DNS, IP or email SANs,
+// exactly one URI) and returns the identity the URI carries.
+func csrIdentity(csr *x509.CertificateRequest) (string, error) {
 	if len(csr.Subject.Names) > 0 || len(csr.Subject.ExtraNames) > 0 {
-		return nil, "", errCSRSubject
+		return "", errCSRSubject
 	}
 
 	if len(csr.DNSNames) > 0 || len(csr.IPAddresses) > 0 || len(csr.EmailAddresses) > 0 {
-		return nil, "", errCSRSANs
+		return "", errCSRSANs
 	}
 
 	if len(csr.URIs) != 1 {
-		return nil, "", fmt.Errorf("pki: CSR has %d %w", len(csr.URIs), errURISANs)
+		return "", fmt.Errorf("pki: CSR has %d %w", len(csr.URIs), errURISANs)
 	}
 
 	name, err := policy.IdentityFromURI(csr.URIs[0].String())
 	if err != nil {
-		return nil, "", fmt.Errorf("pki: CSR: %w", err)
+		return "", fmt.Errorf("pki: CSR: %w", err)
 	}
 
-	return csr, name, nil
+	return name, nil
+}
+
+// checkDeviceExtensions refuses a device CSR that requests any extension besides
+// the URI SAN.
+func checkDeviceExtensions(csr *x509.CertificateRequest) error {
+	for _, ext := range csr.Extensions {
+		if !ext.Id.Equal(oidSubjectAltName) {
+			return fmt.Errorf("%w: %s", errCSRExtensions, ext.Id)
+		}
+	}
+
+	return nil
+}
+
+// CheckDeviceLeaf checks that an issued enrolled-device certificate is not a CA
+// and carries the client auth usage alone: a device identity must never be
+// usable to authenticate a TLS server.
+func CheckDeviceLeaf(leaf *x509.Certificate) error {
+	if leaf.IsCA {
+		return errDeviceLeafCA
+	}
+
+	if len(leaf.UnknownExtKeyUsage) > 0 || len(leaf.ExtKeyUsage) != 1 ||
+		leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+		return errDeviceLeafUsage
+	}
+
+	return nil
 }
 
 // Fingerprint returns the lowercase hex SHA-256 of the certificate DER.

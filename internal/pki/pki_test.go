@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"net"
@@ -199,6 +201,134 @@ func TestValidateCSRRejects(t *testing.T) {
 			t.Fatal("accepted")
 		}
 	})
+}
+
+func TestValidateDeviceCSR(t *testing.T) {
+	key := mustKey(t)
+	good := uri(t, policy.IdentityURI("device-z-phone-mesh"))
+
+	csrPEM := rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{good}})
+
+	_, name, err := pki.ValidateCSR(csrPEM)
+	if err != nil || name != "device-z-phone-mesh" {
+		t.Fatalf("good device CSR: %q %v", name, err)
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// basicConstraints CA:TRUE, extKeyUsage serverAuth and a request for a
+	// second SAN-like extension each ride in the extensionRequest attribute.
+	caExt := pkix.Extension{
+		Id:    asn1.ObjectIdentifier{2, 5, 29, 19},
+		Value: []byte{0x30, 0x03, 0x01, 0x01, 0xff},
+	}
+	ekuExt := pkix.Extension{
+		Id:    asn1.ObjectIdentifier{2, 5, 29, 37},
+		Value: []byte{0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01},
+	}
+
+	cases := map[string][]byte{
+		"rsa key":  rawCSR(t, rsaKey, &x509.CertificateRequest{URIs: []*url.URL{good}}),
+		"p384 key": rawCSR(t, p384, &x509.CertificateRequest{URIs: []*url.URL{good}}),
+		"dns san": rawCSR(
+			t,
+			key,
+			&x509.CertificateRequest{URIs: []*url.URL{good}, DNSNames: []string{"a.example"}},
+		),
+		"second uri": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good, uri(t, policy.IdentityURI("device-z-tablet-mesh"))},
+		}),
+		"agent uri too": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good, uri(t, policy.IdentityURI("agent-z-mac"))},
+		}),
+		"ca extension": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good}, ExtraExtensions: []pkix.Extension{caExt},
+		}),
+		"eku extension": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good}, ExtraExtensions: []pkix.Extension{ekuExt},
+		}),
+		"subject": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good}, Subject: pkix.Name{CommonName: "device-z-phone-mesh"},
+		}),
+	}
+
+	for name, csr := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := pki.ValidateCSR(csr)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
+func TestCheckDeviceLeaf(t *testing.T) {
+	ca := pkitest.NewCA(t, "ca")
+	key := mustKey(t)
+
+	csrPEM, err := pki.CreateCSR(key, "device-z-phone-mesh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sign := func(usages []x509.ExtKeyUsage) *x509.Certificate {
+		t.Helper()
+
+		certPEM, _, signErr := ca.SignCSRUsages(csrPEM, time.Hour, usages)
+		if signErr != nil {
+			t.Fatal(signErr)
+		}
+
+		certs, parseErr := pki.ParseCertsPEM(certPEM)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+
+		return certs[0]
+	}
+
+	// SignCSR picks client auth alone for a device CSR, as the hub's issuer does.
+	signed, _, err := ca.SignCSR(csrPEM, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certs, err := pki.ParseCertsPEM(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = pki.CheckDeviceLeaf(certs[0])
+	if err != nil {
+		t.Fatalf("device leaf: %v", err)
+	}
+
+	bad := map[string]*x509.Certificate{
+		"client and server": sign(
+			[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		),
+		"server only": sign([]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}),
+		"any usage":   sign([]x509.ExtKeyUsage{x509.ExtKeyUsageAny}),
+		"no usage":    sign(nil),
+		"ca":          ca.Cert,
+	}
+
+	for name, leaf := range bad {
+		t.Run(name, func(t *testing.T) {
+			err := pki.CheckDeviceLeaf(leaf)
+			if err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
 }
 
 func TestCertHelpers(t *testing.T) {
