@@ -677,6 +677,16 @@ func TestEnrollmentEndToEnd(t *testing.T) {
 func (msh *mesh) enrollDevice(identity string) string {
 	msh.t.Helper()
 
+	cert := msh.enrollDeviceCert(identity)
+
+	return pki.Fingerprint(cert.Leaf)
+}
+
+// enrollDeviceCert enrolls identity like enrollDevice and returns the leaf with
+// its key, so the test can connect as the device.
+func (msh *mesh) enrollDeviceCert(identity string) tls.Certificate {
+	msh.t.Helper()
+
 	token, _, err := msh.tokens.Create(identity)
 	if err != nil {
 		msh.t.Fatal(err)
@@ -719,7 +729,7 @@ func (msh *mesh) enrollDevice(identity string) string {
 		msh.t.Fatal(err)
 	}
 
-	return pki.Fingerprint(certs[0])
+	return tls.Certificate{Certificate: [][]byte{certs[0].Raw}, PrivateKey: key, Leaf: certs[0]}
 }
 
 func (nd *node) deviceLeaves(t *testing.T) map[string]string {

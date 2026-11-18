@@ -133,11 +133,16 @@ func directAddr() netip.Addr {
 // ---- hub configuration ----
 
 type hubCfg struct {
-	release     string
-	disabled    []string
-	blocked     []string
-	home        []string
-	devices     []string
+	release  string
+	disabled []string
+	blocked  []string
+	home     []string
+	devices  []string
+	// api lists the identities that may call the hub API.
+	api []string
+	// rulesA and rulesB add identities to the mesh-t3-a and mesh-t3-b rules.
+	rulesA      []string
+	rulesB      []string
 	noRelayRule bool
 }
 
@@ -154,10 +159,16 @@ func (hc *hubCfg) yaml() string {
 		quoted[i] = `"` + h + `"`
 	}
 
-	bIDs := "z-phone, agent-a"
-	if hc.noRelayRule {
-		bIDs = "z-phone"
+	aIDs := append([]string{"z-phone"}, hc.rulesA...)
+
+	bIDs := make([]string, 0, 2+len(hc.rulesB))
+	bIDs = append(bIDs, "z-phone")
+
+	if !hc.noRelayRule {
+		bIDs = append(bIDs, "agent-a")
 	}
+
+	bIDs = append(bIDs, hc.rulesB...)
 
 	return fmt.Sprintf(`
 machines:
@@ -166,14 +177,16 @@ machines:
 homeCIDRs: %s
 viewerDomain: %s
 release: {version: %s}
+api: {identities: %s}
 devices: %s
 policy:
   entries:
-    mesh-t3-a: {identities: [z-phone]}
-    mesh-t3-b: {identities: [%s]}
+    mesh-t3-a: {identities: %s}
+    mesh-t3-b: {identities: %s}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, list(quoted), viewerDomain, rel, list(hc.devices), bIDs, list(hc.disabled), list(hc.blocked))
+`, list(quoted), viewerDomain, rel, list(hc.api), list(hc.devices), list(aIDs), list(bIDs),
+		list(hc.disabled), list(hc.blocked))
 }
 
 // ---- mesh (hub side) ----
@@ -570,13 +583,17 @@ type node struct {
 	done   chan struct{}
 	// netCh feeds the agent's network events when nodeOpts.fakeNet is set. It is
 	// unbuffered: once a second send returns, the first event has been handled.
-	netCh       chan netwatch.Event
-	lookup      atomic.Pointer[lookupFn]
+	netCh  chan netwatch.Event
+	lookup atomic.Pointer[lookupFn]
+	// gateway is the default gateway's MAC the agent sees; tests move the machine to
+	// another network by changing it.
+	gateway     atomic.Value
 	identity    string
 	name        string
 	hubConns    []net.Conn
 	linkPort    int
 	directPort  int
+	devicePort  int
 	clock       atomic.Int64
 	lookupCalls atomic.Int64
 	dnsRecheck  time.Duration
@@ -597,6 +614,8 @@ type nodeOpts struct {
 	cacheTTL   time.Duration
 	dnsRecheck time.Duration
 	direct     bool
+	// devices turns on the listener for enrolled devices, which needs direct.
+	devices    bool
 	noIdentity bool
 	noStart    bool
 	// fakeNet replaces the OS network watcher, the hub lookup and the local
@@ -645,6 +664,12 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 		nd.directPort = freePort(t, msh.direct.String())
 	}
 
+	nd.gateway.Store(fixedGatewayMAC)
+
+	if opts.direct && opts.devices {
+		nd.devicePort = freePort(t, msh.direct.String())
+	}
+
 	nd.cfg = &agentconfig.Config{
 		Serve:    map[string]string{"t3": nd.t3.Listener.Addr().String()},
 		Links:    links,
@@ -653,6 +678,7 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 			Enabled:  opts.direct,
 			Port:     nd.directPort,
 			CacheTTL: cmpTTL(opts.cacheTTL),
+			Devices:  agentconfig.Devices{Enabled: opts.devices, Port: nd.devicePort},
 		},
 		StateDir:   filepath.Join(dir, "state"),
 		InstallDir: filepath.Join(dir, "install"),
@@ -702,6 +728,32 @@ func (nd *node) startT3(name string) {
 		}
 
 		_, _ = fmt.Fprintf(w, "t3@%s mtls=%d", name, mt)
+	})
+	// /headers describes the request as T3 got it.
+	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		_ = json.NewEncoder(w).Encode(struct {
+			Header http.Header `json:"headers"`
+			Host   string      `json:"host"`
+			Method string      `json:"method"`
+		}{Header: r.Header, Host: r.Host, Method: r.Method})
+	})
+	// /ws echoes what follows an upgrade.
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		_, _ = io.WriteString(
+			conn,
+			"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"+
+				"X-Stand-In: t3\r\n\r\n",
+		)
+		_, _ = io.Copy(conn, conn)
 	})
 	mux.HandleFunc("/hold", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "first\n")
@@ -763,11 +815,37 @@ func (msh *mesh) seedIdentity(nd *node, opts *nodeOpts) {
 func (nd *node) start() {
 	nd.m.t.Helper()
 
+	before := nd.m.tl.count()
+	errc := nd.launch()
+
+	nd.m.waitConnected(nd.name)
+
+	select {
+	case err := <-errc:
+		nd.m.t.Fatalf("agent %s exited: %v", nd.name, err)
+	default:
+	}
+
+	nd.hubConns = nd.m.tl.since(before)
+}
+
+// launch runs the agent without waiting for the hub, as after a reboot during an
+// outage. The returned channel carries its exit error.
+func (nd *node) launch() <-chan error {
+	nd.m.t.Helper()
+
+	done := make(chan struct{})
+	nd.done = done
+
 	aopts := agent.Options{
 		Config: nd.cfg, Version: "dev", Log: logger(), Now: nd.nowFn,
 		HubTLS: nd.m.hubTLS(), Health: healthStub{},
 		LocalAddrs: func() ([]netip.Addr, error) { return []netip.Addr{nd.m.direct}, nil },
-		GatewayMAC: func() (string, error) { return fixedGatewayMAC, nil },
+		GatewayMAC: func() (string, error) {
+			mac, _ := nd.gateway.Load().(string)
+
+			return mac, nil
+		},
 	}
 
 	if nd.fakeNetwork {
@@ -782,7 +860,6 @@ func (nd *node) start() {
 		nd.m.t.Fatal(err)
 	}
 
-	before := nd.m.tl.count()
 	ctx, cancel := context.WithCancel(context.Background())
 	nd.cancel = cancel
 
@@ -791,28 +868,33 @@ func (nd *node) start() {
 	go func() {
 		errc <- agt.Run(ctx)
 
-		close(nd.done)
+		close(done)
 	}()
 
 	nd.m.t.Cleanup(func() {
 		cancel()
 
 		select {
-		case <-nd.done:
+		case <-done:
 		case <-time.After(15 * time.Second):
 			nd.m.t.Errorf("agent %s did not stop", nd.name)
 		}
 	})
 
-	nd.m.waitConnected(nd.name)
+	return errc
+}
+
+// stop ends the agent and waits for it to finish; start or launch runs it again.
+func (nd *node) stop() {
+	nd.m.t.Helper()
+
+	nd.cancel()
 
 	select {
-	case err = <-errc:
-		nd.m.t.Fatalf("agent %s exited: %v", nd.name, err)
-	default:
+	case <-nd.done:
+	case <-time.After(15 * time.Second):
+		nd.m.t.Fatalf("agent %s did not stop", nd.name)
 	}
-
-	nd.hubConns = nd.m.tl.since(before)
 }
 
 // dropTunnel closes the hub side of the TCP connections this node opened at start.
