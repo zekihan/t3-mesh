@@ -287,6 +287,9 @@ machines:
 homeCIDRs: [192.168.0.0/22, fd12:3456:789a:1::/64]  # LAN IPv4 and ULA; Technitium also answers AAAA
 release:
   version: v0.3.0      # what agents should run; bumped by Renovate
+api:
+  host: hub.mesh.noqer.com   # optional; defaults to hub.<viewerDomain>
+  identities: [z-phone, z-tablet]   # the `mesh-hub` callers, device identities only
 ```
 
 Machine-to-machine rules come from the same `mesh-<svc>-<machine>` policy entries as
@@ -348,6 +351,45 @@ fleet update is in progress or rolled back.
 - **Agent-to-agent stream:** the hub checks the rule for the source agent, opens a
   stream on the target's tunnel and splices bytes. The hub does not parse the
   contents.
+
+### Hub API
+
+`hub.mesh.noqer.com` (`api.host`, default `hub.<viewerDomain>`) is served by the
+viewer listener on 8080. The listener matches this host before it maps `Host` to
+`(machine, svc)`; any other host goes through that mapping as before. `mesh.noqer.com`
+stays agent-only.
+
+Admission is the viewer-stream admission: the three `X-Mtls-Mesh-*` headers are
+required and parsed the same way, an agent identity is refused, and a disabled
+identity, a blocked leaf or an expired leaf gets `403`. The caller must also be listed
+under `api.identities`, so a valid client certificate that is not a device listed
+there gets `403` too. `api.identities` is its own field. It is never a rule: the rule
+map accepts only `mesh-<svc>-<machine>` entries and feeds the agents. A name beginning
+`agent-` is invalid there, and `api.host` may not equal `viewerDomain` or sit under it
+as a viewer host.
+
+Every endpoint is `GET`-only (`405` with `Allow: GET` otherwise), any other path is
+`404`, and every response carries `Cache-Control: no-store`. A single filter,
+`visibleMachines`, decides what a caller may see: the machines whose
+`mesh-t3-<machine>` entry lists the caller. Every `/api/v1` endpoint goes through it,
+so `/api/v1/fleet` and `/api/v1/trust` reuse it.
+
+`GET /api/v1/machines` returns the visible machines sorted by name:
+
+```json
+{"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com"}]}
+```
+
+`online` means a live tunnel session. `lastSeen` is RFC 3339 UTC, the current time
+while online and the last disconnect otherwise (as in `/status`), or `null` if the hub
+has not seen the machine since it started. `viewerUrl` is
+`https://t3.<machine>.<viewerDomain>`.
+
+Deploy order: the hub parses its config with unknown fields rejected, so the hub
+release that understands `api` ships first and the chart change that renders it comes
+after. Rolling the hub back past that release requires reverting the chart first: an
+older hub rejects the config, so it fails to start, or keeps its previous config and
+raises `/alerts/stale-config`.
 
 ### Home detection
 
@@ -827,6 +869,7 @@ Traefik middleware lists a kind `agent` identity.
 | Hostnames | `<svc>.<machine>.mesh.noqer.com`, agents dial `mesh.noqer.com` |
 | Transport | TLS + yamux, ALPN `t3-mesh/1` |
 | Viewer authorization | Traefik policy per host, agent identities excluded |
+| Hub API | `hub.mesh.noqer.com` on the viewer listener, matched before `HostTarget`; callers in `api.identities` (not a rule), same `X-Mtls-Mesh-*` admission, per-caller filter from `mesh-t3-<machine>` |
 | Viewer identity to hub | `X-Mtls-Mesh-*` headers for identity, leaf DER SHA-256 and expiry, all required; plugin extended for the last two; `mtls-clients` TLS option on every viewer route |
 | T3 pairing | kept |
 | Agent certificates | new `agent-*` identities with client and server usage |
