@@ -385,6 +385,24 @@ while online and the last disconnect otherwise (as in `/status`), or `null` if t
 has not seen the machine since it started. `viewerUrl` is
 `https://t3.<machine>.<viewerDomain>`.
 
+`GET /api/v1/fleet` returns the same visible machines, sorted by name, with the state
+`/status` reports for each, read through the same code:
+
+```json
+{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"alerts":["cert-expiry"]}]}
+```
+
+Each entry is the `/machines` object plus `agentVersion` (as the agent reported it,
+`null` if unknown), `certNotAfter` (best known leaf expiry, `null` if unknown),
+`tunnel` (`path` is `LAN` or `OCI` and `connectedSince` the live session's accept
+time, both `null` while not connected) and `alerts`, the sorted names of the
+`/status` alerts that are currently true (`cert-expiry`, `disconnected`,
+`update-failed`), `[]` when none. `caller.path` is the path of the API request
+itself: `LAN` if the `X-Real-IP` header, which Traefik's `traefik-real-ip`
+middleware sets at the entrypoint, is inside `homeCIDRs`, `OCI` if it is outside,
+`null` if the header is missing or not a bare IP address. The TCP peer is a Traefik
+pod and is never used.
+
 Deploy order: the hub parses its config with unknown fields rejected, so the hub
 release that understands `api` ships first and the chart change that renders it comes
 after. Rolling the hub back past that release requires reverting the chart first: an
