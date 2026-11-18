@@ -21,12 +21,17 @@ import (
 )
 
 const (
-	defaultHubPort   = 443
-	defaultCacheTTL  = 168 * time.Hour
-	maxLoopbackPort  = 32767
-	agentNamePrefix  = "agent-"
-	defaultStateName = "state"
-	defaultInstall   = "install"
+	defaultHubPort = 443
+	// DefaultDevicesPort is the device listener port when direct.devices names none.
+	// It sits below the Linux and macOS ephemeral ranges like the other agent ports,
+	// so an outgoing connection can never hold it and the unprivileged service user
+	// can bind it.
+	DefaultDevicesPort = 27443
+	defaultCacheTTL    = 168 * time.Hour
+	maxLoopbackPort    = 32767
+	agentNamePrefix    = "agent-"
+	defaultStateName   = "state"
+	defaultInstall     = "install"
 )
 
 var (
@@ -41,6 +46,9 @@ var (
 	)
 	errDirectPortRange     = errors.New("direct.port out of range")
 	errDirectPortCollision = errors.New("collides with a link port")
+	errDevicesPortRange    = errors.New("direct.devices.port out of range")
+	errDevicesPortShared   = errors.New("direct.devices.port collides with")
+	errDevicesNeedDirect   = errors.New("agentconfig: direct.devices needs direct.enabled")
 	errKeyFormat           = errors.New("key must be <svc>.<machine>")
 	errNotLoopback         = errors.New("must be a loopback address")
 	errHostNotLoopbackIP   = errors.New("must use host 127.0.0.1")
@@ -72,11 +80,21 @@ type Identity struct {
 	Dir  string
 }
 
-// Direct configures the hub bypass listener.
+// Direct configures the hub bypass listener and, under it, the device listener.
 type Direct struct {
-	Enabled  bool
-	Port     int
+	Devices  Devices
 	CacheTTL time.Duration
+	Port     int
+	Enabled  bool
+}
+
+// Devices configures the TLS listener enrolled devices (the Android app) connect
+// to. It runs only while Direct is enabled, under the same home gate and cache
+// window, and is on by default then: what it admits is decided by the hub's rules
+// and device leaves, and there are none until a device has enrolled.
+type Devices struct {
+	Port    int
+	Enabled bool
 }
 
 type file struct {
@@ -97,8 +115,14 @@ type identity struct {
 
 type direct struct {
 	CacheTTL *time.Duration `yaml:"cacheTTL"` //nolint:tagliatelle // key is fixed by the config format
+	Devices  *devices       `yaml:"devices"`
 	Port     int            `yaml:"port"`
 	Enabled  bool           `yaml:"enabled"`
+}
+
+type devices struct {
+	Enabled *bool `yaml:"enabled"`
+	Port    int   `yaml:"port"`
 }
 
 // Load reads and validates the configuration file at path.
@@ -290,7 +314,7 @@ func (doc *file) validateLinks() (map[int]bool, error) {
 
 func (doc *file) validateDirect(linkPorts map[int]bool) (Direct, error) {
 	if doc.Direct == nil {
-		return Direct{CacheTTL: defaultCacheTTL}, nil
+		return Direct{CacheTTL: defaultCacheTTL, Devices: Devices{Port: DefaultDevicesPort}}, nil
 	}
 
 	directCfg := Direct{
@@ -327,7 +351,71 @@ func (doc *file) validateDirect(linkPorts map[int]bool) (Direct, error) {
 		}
 	}
 
+	devs, err := doc.Direct.validateDevices(&directCfg, linkPorts)
+	if err != nil {
+		return Direct{}, err
+	}
+
+	directCfg.Devices = devs
+
 	return directCfg, nil
+}
+
+// validateDevices resolves direct.devices: on whenever direct is, unless it says
+// otherwise, on DefaultDevicesPort unless it names a port. Its port is checked
+// whenever one is configured or the listener is on, so a default that nothing
+// uses cannot fail a configuration.
+func (dir *direct) validateDevices(
+	directCfg *Direct,
+	linkPorts map[int]bool,
+) (Devices, error) {
+	devs := Devices{Enabled: directCfg.Enabled, Port: DefaultDevicesPort}
+	explicit := false
+
+	if dir.Devices != nil {
+		if dir.Devices.Port != 0 {
+			devs.Port, explicit = dir.Devices.Port, true
+		}
+
+		if dir.Devices.Enabled != nil {
+			devs.Enabled = *dir.Devices.Enabled
+		}
+	}
+
+	if devs.Enabled && !directCfg.Enabled {
+		return Devices{}, errDevicesNeedDirect
+	}
+
+	if !devs.Enabled && !explicit {
+		return devs, nil
+	}
+
+	if devs.Port < 1 || devs.Port > maxLoopbackPort {
+		return Devices{}, fmt.Errorf(
+			"agentconfig: direct.devices.port %d must be between 1 and %d: %w",
+			devs.Port,
+			maxLoopbackPort,
+			errDevicesPortRange,
+		)
+	}
+
+	if devs.Port == directCfg.Port {
+		return Devices{}, fmt.Errorf(
+			"agentconfig: %w direct.port %d",
+			errDevicesPortShared,
+			devs.Port,
+		)
+	}
+
+	if linkPorts[devs.Port] {
+		return Devices{}, fmt.Errorf(
+			"agentconfig: %w a link port %d",
+			errDevicesPortShared,
+			devs.Port,
+		)
+	}
+
+	return devs, nil
 }
 
 // validateKey checks a "<svc>.<machine>" link or serve key.
