@@ -40,6 +40,7 @@ type cfgOpts struct {
 	disabled []string
 	blocked  []string
 	api      []string
+	devices  []string
 	noCIDRs  bool
 }
 
@@ -64,6 +65,11 @@ func (opts cfgOpts) yaml() string {
 		apiIDs = "[" + strings.Join(opts.api, ",") + "]"
 	}
 
+	devices := "[]"
+	if len(opts.devices) > 0 {
+		devices = "[" + strings.Join(opts.devices, ",") + "]"
+	}
+
 	cidrs := "[127.0.0.0/8]"
 	if opts.noCIDRs {
 		cidrs = "[]"
@@ -77,13 +83,14 @@ homeCIDRs: %s
 viewerDomain: mesh.test
 release: {version: %s}
 api: {identities: %s}
+devices: %s
 policy:
   entries:
-    mesh-t3-devbox: {identities: [z-phone, z-viewer, agent-z-arch]}
-    mesh-t3-z-arch: {identities: [z-phone]}
+    mesh-t3-devbox: {identities: [z-phone, z-viewer, agent-z-arch, device-z-phone-mesh, device-z-tablet-mesh]}
+    mesh-t3-z-arch: {identities: [z-phone, device-z-phone-mesh]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, cidrs, rel, apiIDs, dis, blk)
+`, cidrs, rel, apiIDs, devices, dis, blk)
 }
 
 type env struct {
