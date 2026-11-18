@@ -38,7 +38,9 @@ const (
 )
 
 var (
-	errUsage      = errors.New("usage: t3-mesh-hub enroll-token [--admin-socket path] <identity>")
+	errUsage = errors.New(
+		"usage: t3-mesh-hub enroll-token [--admin-socket path] (<agent-identity> | --device <device-identity>)",
+	)
 	errStopped    = errors.New("stopped unexpectedly")
 	errSubcommand = errors.New("unknown subcommand")
 	errArguments  = errors.New("unexpected arguments")
@@ -233,7 +235,7 @@ func serve(args []string) error {
 	admin := &enroll.Admin{
 		Path:    opts.adminSocket,
 		Tokens:  tokens,
-		Allowed: srv.EnrollAllowed,
+		Allowed: srv.EnrollTokenAllowed,
 		Log:     log,
 	}
 
@@ -354,34 +356,64 @@ func httpResult(addr string, err error) error {
 	return fmt.Errorf("serve %s: %w", addr, err)
 }
 
-func enrollToken(args []string) error {
-	var socket string
+// enrollTokenArgs is the parsed enroll-token command line: an agent identity as
+// the one argument, or an enrolled-device identity behind --device.
+type enrollTokenArgs struct {
+	socket   string
+	kind     string
+	identity string
+}
+
+func parseEnrollToken(args []string) (enrollTokenArgs, error) {
+	var parsed enrollTokenArgs
+
+	var device string
 
 	fs := newFlagSet("enroll-token")
 	fs.StringVar(
-		&socket,
+		&parsed.socket,
 		"admin-socket",
 		enroll.DefaultAdminSocket,
 		"admin unix socket of the running hub",
 	)
+	fs.StringVar(
+		&device,
+		"device",
+		"",
+		"enrolled-device identity to mint a token for (instead of an agent identity argument)",
+	)
 
 	err := fs.Parse(args)
+	if err != nil {
+		return enrollTokenArgs{}, fmt.Errorf("enroll-token: %w", err)
+	}
+
+	switch {
+	case device != "" && fs.NArg() == 0:
+		parsed.kind, parsed.identity = enroll.KindDevice, device
+	case device == "" && fs.NArg() == 1:
+		parsed.kind, parsed.identity = enroll.KindAgent, fs.Arg(0)
+	default:
+		return enrollTokenArgs{}, errUsage
+	}
+
+	return parsed, nil
+}
+
+func enrollToken(args []string) error {
+	parsed, err := parseEnrollToken(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 
-		return fmt.Errorf("enroll-token: %w", err)
-	}
-
-	if fs.NArg() != 1 {
-		return errUsage
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	token, expires, err := enroll.RequestToken(ctx, socket, fs.Arg(0))
+	token, expires, err := enroll.RequestToken(ctx, parsed.socket, parsed.kind, parsed.identity)
 	if err != nil {
 		return fmt.Errorf("enroll-token: %w", err)
 	}

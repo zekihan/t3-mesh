@@ -322,7 +322,7 @@ func TestAdminRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	admin := &Admin{Path: path, Tokens: tk, Allowed: func(id string) error {
+	admin := &Admin{Path: path, Tokens: tk, Allowed: func(_, id string) error {
 		if id == "bad" {
 			return errNotConfigured
 		}
@@ -342,7 +342,7 @@ func TestAdminRoundTrip(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 
 	for {
-		token, expires, err = RequestToken(ctx, path, "agent-a")
+		token, expires, err = RequestToken(ctx, path, KindAgent, "agent-a")
 		if err == nil || time.Now().After(deadline) {
 			break
 		}
@@ -370,7 +370,7 @@ func TestAdminRoundTrip(t *testing.T) {
 		t.Fatalf("redeem: %q %v", id, err)
 	}
 
-	_, _, err = RequestToken(ctx, path, "bad")
+	_, _, err = RequestToken(ctx, path, KindAgent, "bad")
 	if err == nil {
 		t.Fatal("disallowed identity got a token")
 	}
@@ -380,5 +380,148 @@ func TestAdminRoundTrip(t *testing.T) {
 	err = <-errc
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// serveAdmin runs an Admin on a temp socket and returns the socket path.
+func serveAdmin(t *testing.T, admin *Admin) string {
+	t.Helper()
+
+	admin.Path = filepath.Join(t.TempDir(), "admin.sock")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errc := make(chan error, 1)
+
+	go func() { errc <- admin.Serve(ctx) }()
+
+	t.Cleanup(func() {
+		cancel()
+
+		err := <-errc
+		if err != nil {
+			t.Error(err)
+		}
+	})
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	timeout := time.After(5 * time.Second)
+
+	for {
+		_, err := os.Stat(admin.Path)
+		if err == nil {
+			return admin.Path
+		}
+
+		select {
+		case <-timeout:
+			t.Fatal("admin socket did not appear")
+		case <-ticker.C:
+		}
+	}
+}
+
+func adminRaw(t *testing.T, path, line string) string {
+	t.Helper()
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(t.Context(), "unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	_, err = conn.Write([]byte(line + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 1024)
+
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(buf[:n])
+}
+
+func TestAdminKinds(t *testing.T) {
+	type call struct{ kind, identity string }
+
+	var (
+		mu    sync.Mutex
+		calls []call
+	)
+
+	tk := NewTokens(time.Now)
+	path := serveAdmin(t, &Admin{Tokens: tk, Allowed: func(kind, identity string) error {
+		mu.Lock()
+
+		calls = append(calls, call{kind, identity})
+
+		mu.Unlock()
+
+		if identity == "refused" {
+			return errNotConfigured
+		}
+
+		return nil
+	}})
+
+	ctx := t.Context()
+
+	token, _, err := RequestToken(ctx, path, KindDevice, "device-z-phone-mesh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := tk.Redeem(token)
+	if err != nil || id != "device-z-phone-mesh" {
+		t.Fatalf("redeem: %q %v", id, err)
+	}
+
+	_, _, err = RequestToken(ctx, path, KindDevice, "refused")
+	if err == nil {
+		t.Fatal("refused device got a token")
+	}
+
+	// A release before device enrollment sends no kind: it is an agent token.
+	reply := adminRaw(t, path, `{"op":"enroll-token","identity":"agent-a"}`)
+	if !strings.Contains(reply, `"token"`) {
+		t.Fatalf("legacy request: %s", reply)
+	}
+
+	for _, bad := range []string{
+		`{"op":"enroll-token","identity":"agent-a","kind":"phone"}`,
+		`{"op":"enroll-token","identity":"agent-a","kind":"DEVICE"}`,
+		`{"op":"enroll-token","identity":"","kind":"device"}`,
+		`{"op":"other","identity":"agent-a","kind":"agent"}`,
+		`not json`,
+	} {
+		if reply := adminRaw(t, path, bad); !strings.Contains(reply, `"bad request"`) {
+			t.Errorf("%s -> %s", bad, reply)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	want := []call{
+		{KindDevice, "device-z-phone-mesh"}, {KindDevice, "refused"}, {KindAgent, "agent-a"},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("Allowed calls = %v, want %v", calls, want)
+	}
+
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Errorf("Allowed call %d = %v, want %v", i, calls[i], want[i])
+		}
 	}
 }

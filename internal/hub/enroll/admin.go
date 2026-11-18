@@ -23,6 +23,13 @@ const (
 	adminSocketMode  = 0o600
 )
 
+// Token kinds. A token is bound to one identity of its kind; the kind decides
+// which identities the hub agrees to mint a token for.
+const (
+	KindAgent  = "agent"
+	KindDevice = "device"
+)
+
 var (
 	errAdminRefused   = errors.New("enroll: hub refused")
 	errMalformedReply = errors.New("enroll: malformed reply")
@@ -31,6 +38,14 @@ var (
 type adminRequest struct {
 	Op       string `json:"op"`
 	Identity string `json:"identity"`
+	// Kind is KindAgent or KindDevice; absent means KindAgent, as sent by
+	// releases before device enrollment.
+	Kind string `json:"kind,omitempty"`
+}
+
+func (req adminRequest) valid() bool {
+	return req.Op == "enroll-token" && req.Identity != "" &&
+		(req.Kind == KindAgent || req.Kind == KindDevice)
 }
 
 type adminReply struct {
@@ -41,8 +56,9 @@ type adminReply struct {
 
 // Admin serves the enroll-token admin protocol on a unix socket.
 type Admin struct {
-	Tokens  *Tokens
-	Allowed func(identity string) error
+	Tokens *Tokens
+	// Allowed decides whether a token may be minted for identity of the given kind.
+	Allowed func(kind, identity string) error
 	Log     *slog.Logger
 	Path    string
 }
@@ -125,19 +141,29 @@ func (admin *Admin) handle(conn net.Conn) {
 		line,
 		&req,
 	)
-	if err != nil || req.Op != "enroll-token" ||
-		req.Identity == "" {
+	if err != nil {
+		admin.reply(conn, adminReply{Error: "bad request"})
+
+		return
+	}
+
+	if req.Kind == "" {
+		req.Kind = KindAgent
+	}
+
+	if !req.valid() {
 		admin.reply(conn, adminReply{Error: "bad request"})
 
 		return
 	}
 
 	if admin.Allowed != nil {
-		err = admin.Allowed(req.Identity)
+		err = admin.Allowed(req.Kind, req.Identity)
 		if err != nil {
 			admin.log().Warn(
 				"Enroll token refused",
 				slog.Any("identity", req.Identity),
+				slog.String("kind", req.Kind),
 				slog.Any("error", err),
 			)
 			admin.reply(conn, adminReply{Error: err.Error()})
@@ -151,6 +177,7 @@ func (admin *Admin) handle(conn net.Conn) {
 		admin.log().Error(
 			"Enroll token creation failed",
 			slog.Any("identity", req.Identity),
+			slog.String("kind", req.Kind),
 			slog.Any("error", err),
 		)
 		admin.reply(conn, adminReply{Error: "internal error"})
@@ -161,6 +188,7 @@ func (admin *Admin) handle(conn net.Conn) {
 	admin.log().Info(
 		"Enroll token created",
 		slog.Any("identity", req.Identity),
+		slog.String("kind", req.Kind),
 		slog.Any("expires", expires),
 	)
 	admin.reply(conn, adminReply{Token: token, Expires: expires.UTC().Format(time.RFC3339)})
@@ -179,8 +207,12 @@ func (admin *Admin) reply(conn net.Conn, r adminReply) {
 	)
 }
 
-// RequestToken asks the running hub for an enrollment token for identity.
-func RequestToken(ctx context.Context, socketPath, identity string) (string, time.Time, error) {
+// RequestToken asks the running hub for an enrollment token for identity of the
+// given kind (KindAgent or KindDevice).
+func RequestToken(
+	ctx context.Context,
+	socketPath, kind, identity string,
+) (string, time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, adminDeadline)
 	defer cancel()
 
@@ -200,7 +232,7 @@ func RequestToken(ctx context.Context, socketPath, identity string) (string, tim
 		)
 	}
 
-	data, err := json.Marshal(adminRequest{Op: "enroll-token", Identity: identity})
+	data, err := json.Marshal(adminRequest{Op: "enroll-token", Identity: identity, Kind: kind})
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("enroll: marshal request: %w", err)
 	}

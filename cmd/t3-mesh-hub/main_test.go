@@ -61,6 +61,61 @@ func TestRunEnrollTokenRequiresOneIdentity(t *testing.T) {
 	}
 }
 
+func TestParseEnrollToken(t *testing.T) {
+	cases := []struct {
+		want enrollTokenArgs
+		name string
+		args []string
+	}{
+		{
+			name: "agent",
+			args: []string{"agent-z-mac"},
+			want: enrollTokenArgs{
+				socket: enroll.DefaultAdminSocket, kind: enroll.KindAgent, identity: "agent-z-mac",
+			},
+		},
+		{
+			name: "device",
+			args: []string{"--device", "device-z-phone-mesh"},
+			want: enrollTokenArgs{
+				socket: enroll.DefaultAdminSocket, kind: enroll.KindDevice,
+				identity: "device-z-phone-mesh",
+			},
+		},
+		{
+			name: "socket",
+			args: []string{"--admin-socket", "/tmp/a.sock", "--device=device-z-tablet-mesh"},
+			want: enrollTokenArgs{
+				socket: "/tmp/a.sock", kind: enroll.KindDevice, identity: "device-z-tablet-mesh",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseEnrollToken(tc.args)
+			if err != nil || got != tc.want {
+				t.Fatalf("parseEnrollToken(%v) = %+v, %v; want %+v", tc.args, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEnrollTokenUsage(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"--device", "device-z-phone-mesh", "agent-z-mac"},
+		{"--device", "device-z-phone-mesh", "extra"},
+		{"agent-z-mac", "agent-z-arch"},
+		{"--admin-socket", "/tmp/a.sock"},
+	} {
+		_, err := parseEnrollToken(args)
+		if !errors.Is(err, errUsage) {
+			t.Errorf("parseEnrollToken(%v) = %v, want usage error", args, err)
+		}
+	}
+}
+
 func TestRunVersionRejectsArguments(t *testing.T) {
 	err := run([]string{"version", "extra"})
 	if !errors.Is(err, errArguments) {

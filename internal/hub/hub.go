@@ -44,6 +44,9 @@ var (
 	errConfigRequired  = errors.New("hub: Config is required")
 	errIssuerRequired  = errors.New("hub: Issuer is required")
 	errUnknownIdentity = errors.New("hub: not a configured agent identity")
+	errUnknownDevice   = errors.New("hub: not a configured enrolled-device identity")
+	errNotEnrollable   = errors.New("hub: not a configured agent or enrolled-device identity")
+	errUnknownKind     = errors.New("hub: unknown enrollment kind")
 	errUnsupportedALPN = errors.New("hub: unsupported ALPN")
 	errNeedClientCert  = errors.New("hub: tunnel needs a client certificate")
 )
@@ -154,11 +157,39 @@ func (server *Server) Ready() bool {
 }
 
 // EnrollAllowed reports whether identity may enroll: a configured agent
-// identity that is not disabled.
+// identity or a configured enrolled device, that is not disabled.
 func (server *Server) EnrollAllowed(identity string) error {
 	snap := server.cfg.Current()
-	if _, ok := snap.MachineForIdentity(identity); !ok {
-		return fmt.Errorf("%w: %q", errUnknownIdentity, identity)
+	if _, agent := snap.MachineForIdentity(identity); !agent && !snap.Device(identity) {
+		return fmt.Errorf("%w: %q", errNotEnrollable, identity)
+	}
+
+	err := policy.Revoked(snap.Revocations, identity, "")
+	if err != nil {
+		return fmt.Errorf("hub: %w", err)
+	}
+
+	return nil
+}
+
+// EnrollTokenAllowed reports whether the operator may mint an enrollment token
+// for identity as the given kind (enroll.KindAgent or enroll.KindDevice). The
+// kinds do not overlap: an agent name is refused as a device and the other way
+// round, so a token is never minted for an identity of the wrong kind.
+func (server *Server) EnrollTokenAllowed(kind, identity string) error {
+	snap := server.cfg.Current()
+
+	switch kind {
+	case enroll.KindAgent:
+		if _, ok := snap.MachineForIdentity(identity); !ok {
+			return fmt.Errorf("%w: %q", errUnknownIdentity, identity)
+		}
+	case enroll.KindDevice:
+		if !snap.Device(identity) {
+			return fmt.Errorf("%w: %q", errUnknownDevice, identity)
+		}
+	default:
+		return fmt.Errorf("%w: %q", errUnknownKind, kind)
 	}
 
 	err := policy.Revoked(snap.Revocations, identity, "")
