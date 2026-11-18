@@ -23,6 +23,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/policy"
 )
 
 const (
@@ -54,6 +57,8 @@ var (
 	errNoCACerts        = errors.New("issuer: CA file holds no certificates")
 	errInvalidIdentity  = errors.New("issuer: invalid identity")
 	errEmptyCSR         = errors.New("issuer: empty CSR")
+	errUnknownKind      = errors.New("issuer: identity is neither an agent nor an enrolled device")
+	errCSRIdentity      = errors.New("issuer: CSR identity differs from the requested identity")
 	errNoRequestName    = errors.New("issuer: API server returned a request without a name")
 	errNoCertInPEM      = errors.New("no certificate in PEM")
 	errRequestFailed    = errors.New("certificate request failed")
@@ -77,6 +82,17 @@ func (e *statusError) Unwrap() error { return e.err }
 
 var identityRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
+// usagesFor returns the CertificateRequest usages for an identity kind. An agent
+// is also a TLS server (its direct listener); an enrolled device never is, and
+// the device approver-policy denies any request that adds server auth.
+func usagesFor(kind policy.Kind) []string {
+	if kind == policy.KindDevice {
+		return []string{"client auth", "digital signature"}
+	}
+
+	return []string{"client auth", "server auth", "digital signature"}
+}
+
 // IssuerRef names the cert-manager issuer that signs requests.
 type IssuerRef struct{ Name, Kind, Group string }
 
@@ -97,7 +113,8 @@ type Config struct {
 type Issuer interface {
 	// Issue creates a CertificateRequest for identity with the given CSR PEM,
 	// waits until it is Ready or Denied/Failed, and returns the leaf PEM and
-	// the chain PEM (status.ca).
+	// the chain PEM (status.ca). The usages follow the identity's kind, and the
+	// CSR must carry exactly that identity's URI.
 	Issue(ctx context.Context, identity string, csrPEM []byte) (certPEM, chainPEM []byte, err error)
 	// Newest returns the lowercase hex SHA-256 of the DER of the newest issued
 	// leaf for identity, or "" if none.
@@ -264,6 +281,23 @@ func (k8s *K8s) Issue(ctx context.Context, identity string, csrPEM []byte) ([]by
 		return nil, nil, errEmptyCSR
 	}
 
+	kind, ok := policy.KindOf(identity)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %q", errUnknownKind, identity)
+	}
+
+	// The request is built from the identity's kind and the CSR is checked against
+	// it, so a CertificateRequest never mixes an agent's usages or URI with a
+	// device's, whatever the caller passes.
+	_, csrIdentity, err := pki.ValidateCSR(csrPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("issuer: %w", err)
+	}
+
+	if csrIdentity != identity {
+		return nil, nil, fmt.Errorf("%w: %q, want %q", errCSRIdentity, csrIdentity, identity)
+	}
+
 	body := certificateRequest{
 		APIVersion: "cert-manager.io/v1",
 		Kind:       "CertificateRequest",
@@ -278,7 +312,7 @@ func (k8s *K8s) Issue(ctx context.Context, identity string, csrPEM []byte) ([]by
 			Request:   csrPEM,
 			IssuerRef: issuerRef(k8s.cfg.Issuer),
 			Duration:  k8s.cfg.Duration.String(),
-			Usages:    []string{"client auth", "server auth", "digital signature"},
+			Usages:    usagesFor(kind),
 		},
 	}
 

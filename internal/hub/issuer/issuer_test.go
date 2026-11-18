@@ -6,9 +6,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -17,6 +20,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,7 +28,26 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/policy"
 )
+
+func testCSR(t *testing.T, identity string) []byte {
+	t.Helper()
+
+	key, err := pki.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csr, err := pki.CreateCSR(key, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return csr
+}
 
 func testCert(t *testing.T, cn string) ([]byte, string) {
 	t.Helper()
@@ -90,7 +113,7 @@ const crPath = "/apis/cert-manager.io/v1/namespaces/mtls-pki/certificaterequests
 func TestIssuePollsToReady(t *testing.T) {
 	certPEM, fp := testCert(t, "leaf")
 	caPEM, _ := testCert(t, "ca")
-	csr := []byte("-----BEGIN CERTIFICATE REQUEST-----\nabc\n-----END CERTIFICATE REQUEST-----\n")
+	csr := testCSR(t, "agent-z-mac")
 
 	var (
 		mu     sync.Mutex
@@ -169,7 +192,7 @@ func TestIssuePollsToReady(t *testing.T) {
 		}
 	}
 
-	assertPostedRequest(t, posted)
+	assertPostedRequest(t, posted, csr)
 }
 
 func asMap(t *testing.T, v any) map[string]any {
@@ -183,7 +206,7 @@ func asMap(t *testing.T, v any) map[string]any {
 	return m
 }
 
-func assertPostedRequest(t *testing.T, posted map[string]any) {
+func assertPostedRequest(t *testing.T, posted map[string]any, csr []byte) {
 	t.Helper()
 
 	if posted["apiVersion"] != "cert-manager.io/v1" || posted["kind"] != "CertificateRequest" {
@@ -201,15 +224,13 @@ func assertPostedRequest(t *testing.T, posted map[string]any) {
 		t.Errorf("labels %v", labels)
 	}
 
-	assertPostedSpec(t, asMap(t, posted["spec"]))
+	assertPostedSpec(t, asMap(t, posted["spec"]), csr)
 }
 
-func assertPostedSpec(t *testing.T, spec map[string]any) {
+func assertPostedSpec(t *testing.T, spec map[string]any, csr []byte) {
 	t.Helper()
 
-	const wantRequest = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tLS0KYWJjCi0t" +
-		"LS0tRU5EIENFUlRJRklDQVRFIFJFUVVFU1QtLS0tLQo="
-	if spec["request"] != wantRequest {
+	if spec["request"] != base64.StdEncoding.EncodeToString(csr) {
 		t.Errorf("request %v", spec["request"])
 	}
 
@@ -265,7 +286,7 @@ func TestIssueDenied(t *testing.T) {
 
 			k := newIssuer(t, srv, tokenFile(t, "tok"), nil)
 
-			_, _, err := k.Issue(t.Context(), "agent-a", []byte("csr"))
+			_, _, err := k.Issue(t.Context(), "agent-a", testCSR(t, "agent-a"))
 			if err == nil || !strings.Contains(err.Error(), "no policy allows it") {
 				t.Fatalf("err = %v", err)
 			}
@@ -281,7 +302,7 @@ func TestIssueCreateError(t *testing.T) {
 
 	k := newIssuer(t, srv, tokenFile(t, "tok"), nil)
 
-	_, _, err := k.Issue(t.Context(), "agent-a", []byte("csr"))
+	_, _, err := k.Issue(t.Context(), "agent-a", testCSR(t, "agent-a"))
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("err = %v", err)
 	}
@@ -302,7 +323,7 @@ func TestIssueContextTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	_, _, err := k.Issue(ctx, "agent-a", []byte("csr"))
+	_, _, err := k.Issue(ctx, "agent-a", testCSR(t, "agent-a"))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
 	}
@@ -314,7 +335,7 @@ func TestIssueInvalidIdentity(t *testing.T) {
 
 	k := newIssuer(t, srv, tokenFile(t, "tok"), nil)
 	for _, id := range []string{"", "Agent", "a/b", "-a", strings.Repeat("a", 41)} {
-		_, _, err := k.Issue(t.Context(), id, []byte("csr"))
+		_, _, err := k.Issue(t.Context(), id, testCSR(t, "agent-a"))
 		if err == nil {
 			t.Errorf("identity %q accepted", id)
 		}
@@ -615,5 +636,372 @@ func TestPruneNotFoundIsSuccess(t *testing.T) {
 
 	if got := deleted(); !slices.Equal(got, []string{"c", "d"}) {
 		t.Fatalf("deleted = %v", got)
+	}
+}
+
+// recordingAPI is a Kubernetes API stand-in that records every CertificateRequest
+// the issuer creates and answers it with a certificate as soon as it is read.
+type recordingAPI struct {
+	srv    *httptest.Server
+	cert   []byte
+	posted []map[string]any
+	mu     sync.Mutex
+}
+
+func newRecordingAPI(t *testing.T) *recordingAPI {
+	t.Helper()
+
+	api := &recordingAPI{}
+	api.cert, _ = testCert(t, "leaf")
+
+	api.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+
+		if r.Method == http.MethodPost {
+			var body map[string]any
+
+			err := json.NewDecoder(r.Body).Decode(&body)
+			if err != nil {
+				t.Error(err)
+			}
+
+			api.posted = append(api.posted, body)
+
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"cr-1"}}`))
+
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"metadata": map[string]any{"name": "cr-1"},
+			"status": map[string]any{
+				"certificate": api.cert,
+				"conditions":  []map[string]string{{"type": "Ready", "status": "True"}},
+			},
+		})
+	}))
+
+	t.Cleanup(api.srv.Close)
+
+	return api
+}
+
+func (api *recordingAPI) requests() []map[string]any {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	return slices.Clone(api.posted)
+}
+
+// postedCSR decodes the CSR of a recorded CertificateRequest.
+func postedCSR(t *testing.T, posted map[string]any) *x509.CertificateRequest {
+	t.Helper()
+
+	raw, err := base64.StdEncoding.DecodeString(asString(t, asMap(t, posted["spec"])["request"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatal("posted request is not PEM")
+	}
+
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return csr
+}
+
+func asString(t *testing.T, v any) string {
+	t.Helper()
+
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf("%v is not a string", v)
+	}
+
+	return s
+}
+
+func postedUsages(t *testing.T, posted map[string]any) []string {
+	t.Helper()
+
+	list, ok := asMap(t, posted["spec"])["usages"].([]any)
+	if !ok {
+		t.Fatalf("usages %v is not a list", asMap(t, posted["spec"])["usages"])
+	}
+
+	out := make([]string, 0, len(list))
+	for _, u := range list {
+		out = append(out, asString(t, u))
+	}
+
+	return out
+}
+
+func rawCSR(t *testing.T, key any, tmpl *x509.CertificateRequest) []byte {
+	t.Helper()
+
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return u
+}
+
+func TestIssueDeviceRequest(t *testing.T) {
+	api := newRecordingAPI(t)
+	k := newIssuer(t, api.srv, tokenFile(t, "tok"), nil)
+
+	cert, _, err := k.Issue(t.Context(), "device-z-phone-mesh", testCSR(t, "device-z-phone-mesh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(cert, api.cert) {
+		t.Error("certificate mismatch")
+	}
+
+	reqs := api.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d requests created", len(reqs))
+	}
+
+	meta := asMap(t, reqs[0]["metadata"])
+	if meta["generateName"] != "t3-mesh-device-z-phone-mesh-" {
+		t.Errorf("generateName %v", meta["generateName"])
+	}
+
+	labels := asMap(t, meta["labels"])
+	if labels[LabelIdentity] != "device-z-phone-mesh" || labels[LabelManagedBy] != ManagedByValue {
+		t.Errorf("labels %v", labels)
+	}
+
+	assertDeviceSpec(t, reqs[0])
+	assertDeviceCSR(t, postedCSR(t, reqs[0]))
+}
+
+// assertDeviceSpec checks the exact set the device approver-policy allows: client
+// auth and digital signature, never server auth; 8760h; the clients issuer; not a CA.
+func assertDeviceSpec(t *testing.T, posted map[string]any) {
+	t.Helper()
+
+	spec := asMap(t, posted["spec"])
+
+	got := postedUsages(t, posted)
+	if !slices.Equal(got, []string{"client auth", "digital signature"}) {
+		t.Errorf("usages %v", got)
+	}
+
+	if spec["duration"] != "8760h0m0s" {
+		t.Errorf("duration %v", spec["duration"])
+	}
+
+	if isCA, present := spec["isCA"]; present && isCA != false {
+		t.Errorf("isCA %v", isCA)
+	}
+
+	ref := asMap(t, spec["issuerRef"])
+	if ref["name"] != "clients" || ref["kind"] != "Issuer" || ref["group"] != "cert-manager.io" {
+		t.Errorf("issuerRef %v", ref)
+	}
+}
+
+func assertDeviceCSR(t *testing.T, csr *x509.CertificateRequest) {
+	t.Helper()
+
+	if len(csr.URIs) != 1 || csr.URIs[0].String() != "urn:noqer:mtls:clients:device-z-phone-mesh" ||
+		len(csr.DNSNames) != 0 || len(csr.IPAddresses) != 0 || len(csr.EmailAddresses) != 0 {
+		t.Errorf("CSR SANs %v %v", csr.URIs, csr.DNSNames)
+	}
+
+	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P256() {
+		t.Errorf("CSR key %T", csr.PublicKey)
+	}
+}
+
+func TestIssueAgentKeepsItsUsages(t *testing.T) {
+	api := newRecordingAPI(t)
+	k := newIssuer(t, api.srv, tokenFile(t, "tok"), nil)
+
+	_, _, err := k.Issue(t.Context(), "agent-z-mac", testCSR(t, "agent-z-mac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqs := api.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d requests created", len(reqs))
+	}
+
+	want := []string{"client auth", "server auth", "digital signature"}
+	if got := postedUsages(t, reqs[0]); !slices.Equal(got, want) {
+		t.Errorf("usages %v", got)
+	}
+}
+
+// Every request the hub creates carries the usages and the URI of exactly one
+// kind, and a call that would mix them creates no request at all. The homelab
+// policies deny a mixed request, so the hub must never send one.
+func TestIssueNeverMixesKinds(t *testing.T) {
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := pki.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentURI := mustURL(t, "urn:noqer:mtls:clients:agent-z-mac")
+	deviceURI := mustURL(t, "urn:noqer:mtls:clients:device-z-phone-mesh")
+	phoneURI := mustURL(t, "urn:noqer:mtls:clients:z-phone")
+	caExt := pkix.Extension{
+		Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Value: []byte{0x30, 0x03, 0x01, 0x01, 0xff},
+	}
+
+	cases := []struct {
+		name     string
+		identity string
+		csr      []byte
+		wantErr  bool
+	}{
+		{name: "agent", identity: "agent-z-mac", csr: testCSR(t, "agent-z-mac")},
+		{name: "device", identity: "device-z-phone-mesh", csr: testCSR(t, "device-z-phone-mesh")},
+		{
+			name: "agent name with a device CSR", identity: "agent-z-mac", wantErr: true,
+			csr: testCSR(t, "device-z-phone-mesh"),
+		},
+		{
+			name: "device name with an agent CSR", identity: "device-z-phone-mesh", wantErr: true,
+			csr: testCSR(t, "agent-z-mac"),
+		},
+		{
+			name:     "device name with an agent and a device URI",
+			identity: "device-z-phone-mesh",
+			wantErr:  true,
+			csr: rawCSR(
+				t,
+				key,
+				&x509.CertificateRequest{URIs: []*url.URL{deviceURI, agentURI}},
+			),
+		},
+		{
+			name:     "agent name with an agent and a device URI",
+			identity: "agent-z-mac",
+			wantErr:  true,
+			csr: rawCSR(
+				t,
+				key,
+				&x509.CertificateRequest{URIs: []*url.URL{agentURI, deviceURI}},
+			),
+		},
+		{
+			name:     "device name with a KeyChain identity URI",
+			identity: "device-z-phone-mesh",
+			wantErr:  true,
+			csr:      rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{phoneURI}}),
+		},
+		{
+			name: "KeyChain identity", identity: "z-phone", wantErr: true,
+			csr: rawCSR(t, key, &x509.CertificateRequest{URIs: []*url.URL{phoneURI}}),
+		},
+		{
+			name: "device lookalike", identity: "device-z-phone", wantErr: true,
+			csr: testCSR(t, "device-z-phone"),
+		},
+		{
+			name: "device with P-384 key", identity: "device-z-phone-mesh", wantErr: true,
+			csr: rawCSR(t, p384, &x509.CertificateRequest{URIs: []*url.URL{deviceURI}}),
+		},
+		{
+			name: "device with RSA key", identity: "device-z-phone-mesh", wantErr: true,
+			csr: rawCSR(t, rsaKey, &x509.CertificateRequest{URIs: []*url.URL{deviceURI}}),
+		},
+		{
+			name: "device with a DNS SAN", identity: "device-z-phone-mesh", wantErr: true,
+			csr: rawCSR(t, key, &x509.CertificateRequest{
+				URIs: []*url.URL{deviceURI}, DNSNames: []string{"a.example"},
+			}),
+		},
+		{
+			name: "device asking to be a CA", identity: "device-z-phone-mesh", wantErr: true,
+			csr: rawCSR(t, key, &x509.CertificateRequest{
+				URIs: []*url.URL{deviceURI}, ExtraExtensions: []pkix.Extension{caExt},
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newRecordingAPI(t)
+			k := newIssuer(t, api.srv, tokenFile(t, "tok"), nil)
+
+			_, _, err := k.Issue(t.Context(), tc.identity, tc.csr)
+			reqs := api.requests()
+
+			if tc.wantErr {
+				if err == nil || len(reqs) != 0 {
+					t.Fatalf("err = %v, %d requests created", err, len(reqs))
+				}
+
+				return
+			}
+
+			if err != nil || len(reqs) != 1 {
+				t.Fatalf("err = %v, %d requests created", err, len(reqs))
+			}
+
+			checkOneKind(t, reqs[0])
+		})
+	}
+}
+
+// checkOneKind asserts the invariant the two homelab policies rely on: the
+// usages and the URI of a created request belong to the same kind.
+func checkOneKind(t *testing.T, posted map[string]any) {
+	t.Helper()
+
+	csr := postedCSR(t, posted)
+	if len(csr.URIs) != 1 {
+		t.Fatalf("CSR has %d URIs", len(csr.URIs))
+	}
+
+	name, err := policy.IdentityFromURI(csr.URIs[0].String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hasServerAuth := slices.Contains(postedUsages(t, posted), "server auth")
+
+	switch {
+	case policy.IsAgent(name) && !hasServerAuth, policy.IsDevice(name) && hasServerAuth:
+		t.Errorf("%s requested with usages %v", name, postedUsages(t, posted))
+	case !policy.IsAgent(name) && !policy.IsDevice(name):
+		t.Errorf("request for %q, which is neither an agent nor a device", name)
 	}
 }

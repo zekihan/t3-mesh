@@ -166,9 +166,32 @@ func (ca *CA) IssueServer(tb testing.TB, hosts ...string) tls.Certificate {
 	return tc
 }
 
-// SignCSR signs a CSR, keeping the SANs it carries, with clientAuth and
-// serverAuth for d. The chain is the CA certificate.
+// SignCSR signs a CSR, keeping the SANs it carries, for dur, as the hub's
+// issuer does by kind: an enrolled-device CSR gets clientAuth only, any other
+// gets clientAuth and serverAuth. The chain is the CA certificate.
 func (ca *CA) SignCSR(csrPEM []byte, dur time.Duration) ([]byte, []byte, error) {
+	usages := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+
+	block, _ := pem.Decode(csrPEM)
+	if block != nil {
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		if err == nil && len(csr.URIs) == 1 {
+			name, nameErr := policy.IdentityFromURI(csr.URIs[0].String())
+			if nameErr == nil && policy.IsDevice(name) {
+				usages = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+			}
+		}
+	}
+
+	return ca.SignCSRUsages(csrPEM, dur, usages)
+}
+
+// SignCSRUsages signs a CSR like SignCSR with the given extended key usages.
+func (ca *CA) SignCSRUsages(
+	csrPEM []byte,
+	dur time.Duration,
+	usages []x509.ExtKeyUsage,
+) ([]byte, []byte, error) {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
 		return nil, nil, errNoCSRBlock
@@ -197,7 +220,7 @@ func (ca *CA) SignCSR(csrPEM []byte, dur time.Duration) ([]byte, []byte, error) 
 		NotBefore:      now.Add(-time.Minute),
 		NotAfter:       now.Add(dur),
 		KeyUsage:       x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:    usages,
 		URIs:           csr.URIs,
 		DNSNames:       csr.DNSNames,
 		IPAddresses:    csr.IPAddresses,
