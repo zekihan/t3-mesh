@@ -239,7 +239,9 @@ func TestAPIRejections(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Every path and method is refused alike, so nothing leaks to a
 			// caller that is not admitted.
-			for _, path := range []string{"/api/v1/machines", "/api/v1/fleet", "/api/v1/nope", "/"} {
+			for _, path := range []string{
+				"/api/v1/machines", "/api/v1/fleet", "/api/v1/trust", "/api/v1/renew", "/api/v1/nope", "/",
+			} {
 				resp := harness.api(http.MethodGet, apiHost, tc.viewer, tc.fp, tc.notAfter, path)
 				if resp.status != http.StatusForbidden {
 					t.Errorf("GET %s: status %d, want 403", path, resp.status)
@@ -250,7 +252,7 @@ func TestAPIRejections(t *testing.T) {
 				}
 			}
 
-			for _, path := range []string{"/api/v1/machines", "/api/v1/fleet"} {
+			for _, path := range []string{"/api/v1/machines", "/api/v1/fleet", "/api/v1/trust", "/api/v1/renew"} {
 				resp := harness.api(
 					http.MethodPost, apiHost, tc.viewer, tc.fp, tc.notAfter, path,
 				)
@@ -301,7 +303,7 @@ func TestAPIRoutingAndMethods(t *testing.T) {
 	for _, method := range []string{
 		http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodHead,
 	} {
-		for _, path := range []string{"/api/v1/machines", "/api/v1/fleet"} {
+		for _, path := range []string{"/api/v1/machines", "/api/v1/fleet", "/api/v1/trust"} {
 			resp := harness.api(method, apiHost, "z-phone", viewerFP, farFuture, path)
 			if resp.status != http.StatusMethodNotAllowed ||
 				resp.header.Get("Allow") != http.MethodGet ||
@@ -649,5 +651,124 @@ func TestAPIFleetIgnoresPeerAddress(t *testing.T) {
 	got = decodeFleet(t, harness.fleet("z-phone", "").body).Caller.Path
 	if got != nil {
 		t.Errorf("path = %v, want null without X-Real-IP", *got)
+	}
+}
+
+func (harness *env) trust(viewer, fp string) apiResponse {
+	harness.t.Helper()
+
+	return harness.api(http.MethodGet, apiHost, viewer, fp, farFuture, "/api/v1/trust")
+}
+
+func TestAPITrust(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{api: []string{"z-phone"}})
+
+	resp := harness.trust("z-phone", viewerFP)
+	if resp.status != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.status, resp.body)
+	}
+
+	if resp.header.Get("Cache-Control") != "no-store" ||
+		resp.header.Get("Content-Type") != "application/json" {
+		t.Fatalf("headers = %v", resp.header)
+	}
+
+	// Exactly these three fields, and an empty list is [], never null.
+	var raw map[string]json.RawMessage
+
+	err := json.Unmarshal([]byte(resp.body), &raw)
+	if err != nil || len(raw) != 3 || string(raw["revokedAgents"]) != "[]" {
+		t.Fatalf("body = %s (%v)", resp.body, err)
+	}
+
+	var doc apiTrust
+
+	err = json.Unmarshal([]byte(resp.body), &doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if doc.CABundle != string(harness.ca.CertPEM) || doc.CARevision != "trust-1" {
+		t.Fatalf("trust = %+v", doc)
+	}
+}
+
+func TestAPITrustListsBlockedLeaves(t *testing.T) {
+	harness := newEnv(t)
+	blocked := []string{strings.Repeat("c", 64), strings.Repeat("b", 64)}
+	harness.setConfig(cfgOpts{api: []string{"z-phone"}, blocked: blocked})
+
+	var doc apiTrust
+
+	err := json.Unmarshal([]byte(harness.trust("z-phone", viewerFP).body), &doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{
+		strings.Repeat("b", 64),
+		strings.Repeat("c", 64),
+	}; !slices.Equal(
+		doc.RevokedAgents,
+		want,
+	) {
+		t.Fatalf("revokedAgents = %v, want %v", doc.RevokedAgents, want)
+	}
+}
+
+func TestAPITrustFollowsConfigReload(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{api: []string{"z-phone"}})
+
+	writeFile(t, filepath.Join(harness.paths.TrustDir, hubconfig.RevFile), "trust-2")
+	harness.watcher.Reload(harness.srv.OnConfigChange)
+
+	var doc apiTrust
+
+	err := json.Unmarshal([]byte(harness.trust("z-phone", viewerFP).body), &doc)
+	if err != nil || doc.CARevision != "trust-2" {
+		t.Fatalf("trust = %+v (%v)", doc, err)
+	}
+}
+
+// Trust is admitted exactly like /machines: the same headers, the same revocation
+// and the same api.identities list, and an enrolled device only with its newest leaf.
+func TestAPITrustAdmission(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{devices: bothDevices, api: []string{"z-phone", devPhone}})
+
+	for _, tc := range []struct {
+		notAfter time.Time
+		name     string
+		viewer   string
+		fp       string
+	}{
+		{name: "no headers"},
+		{name: "unlisted", viewer: "z-viewer", fp: viewerFP, notAfter: farFuture},
+		{name: "agent", viewer: "agent-z-arch", fp: viewerFP, notAfter: farFuture},
+		{name: "expired", viewer: "z-phone", fp: viewerFP, notAfter: time.Now().Add(-time.Minute)},
+		{name: "device not on the API list", viewer: devTablet, fp: viewerFP, notAfter: farFuture},
+	} {
+		resp := harness.api(http.MethodGet, apiHost, tc.viewer, tc.fp, tc.notAfter, "/api/v1/trust")
+		if resp.status != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", tc.name, resp.status)
+		}
+	}
+
+	oldFP := harness.newDeviceFP(devPhone)
+	newFP := harness.newDeviceFP(devPhone)
+
+	if code := harness.trust(devPhone, newFP).status; code != http.StatusOK {
+		t.Errorf("newest device leaf got %d", code)
+	}
+
+	if code := harness.trust(devPhone, oldFP).status; code != http.StatusForbidden {
+		t.Errorf("superseded device leaf got %d", code)
+	}
+
+	resp := harness.api(http.MethodPost, apiHost, "z-phone", viewerFP, farFuture, "/api/v1/trust")
+	if resp.status != http.StatusMethodNotAllowed || resp.header.Get("Allow") != http.MethodGet {
+		t.Errorf("POST: status %d, Allow %q", resp.status, resp.header.Get("Allow"))
 	}
 }
