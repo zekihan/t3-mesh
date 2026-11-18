@@ -574,6 +574,11 @@ func (sess *session) desiredState() (desired, bool) {
 	home := snap.IsHome(sess.source)
 	want.devices = sess.s.deviceLeaves(sess.ctx, snap)
 
+	if want.devices == nil {
+		// The issuer could not say; ask again soon rather than wait for the next change.
+		time.AfterFunc(sess.s.deviceRetry, sess.kickNow)
+	}
+
 	sess.s.mu.Lock()
 	if home != sess.home {
 		sess.home = home

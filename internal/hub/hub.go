@@ -82,6 +82,7 @@ type Server struct {
 	releaseRev   string
 	wg           sync.WaitGroup
 	sweepInt     time.Duration
+	deviceRetry  time.Duration
 	nextID       uint64
 	proxyTO      time.Duration
 	mu           sync.Mutex
@@ -101,16 +102,17 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server := &Server{
-		cfg:      opts.Config,
-		issuer:   opts.Issuer,
-		tokens:   opts.Tokens,
-		log:      opts.Log,
-		now:      opts.Now,
-		proxyTO:  opts.ProxyHeaderTimeout,
-		sweepInt: defaultSweepEvery,
-		machines: map[string]*machineState{},
-		newest:   map[string]string{},
-		tracked:  map[*tracked]struct{}{},
+		cfg:         opts.Config,
+		issuer:      opts.Issuer,
+		tokens:      opts.Tokens,
+		log:         opts.Log,
+		now:         opts.Now,
+		proxyTO:     opts.ProxyHeaderTimeout,
+		sweepInt:    defaultSweepEvery,
+		deviceRetry: deviceLeavesRetry,
+		machines:    map[string]*machineState{},
+		newest:      map[string]string{},
+		tracked:     map[*tracked]struct{}{},
 	}
 	if server.log == nil {
 		server.log = slog.New(slog.DiscardHandler)
