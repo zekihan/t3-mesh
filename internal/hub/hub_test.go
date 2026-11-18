@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -94,7 +95,33 @@ policy:
 `, cidrs, rel, apiIDs, devices, dis, blk)
 }
 
+// swapHandler is a slog handler whose destination a test can replace while the
+// hub is running.
+type swapHandler struct {
+	cur atomic.Pointer[slog.Handler]
+}
+
+func (sh *swapHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return (*sh.cur.Load()).Enabled(ctx, level)
+}
+
+//nolint:gocritic // slog.Handler fixes the signature
+func (sh *swapHandler) Handle(ctx context.Context, rec slog.Record) error {
+	return (*sh.cur.Load()).Handle(ctx, rec) //nolint:wrapcheck // the wrapped handler's own error
+}
+
+func (sh *swapHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return (*sh.cur.Load()).WithAttrs(attrs)
+}
+
+func (sh *swapHandler) WithGroup(name string) slog.Handler {
+	return (*sh.cur.Load()).WithGroup(name)
+}
+
+func (sh *swapHandler) set(handler slog.Handler) { sh.cur.Store(&handler) }
+
 type env struct {
+	logs    *swapHandler
 	t       *testing.T
 	ca      *pkitest.CA
 	watcher *hubconfig.Watcher
@@ -128,7 +155,8 @@ func newEnv(t *testing.T) *env {
 func newEnvIssuer(t *testing.T, mk func(*env) issuer.Issuer) *env {
 	t.Helper()
 
-	harness := &env{t: t, ca: pkitest.NewCA(t, "clients"), dir: t.TempDir()}
+	harness := &env{t: t, ca: pkitest.NewCA(t, "clients"), dir: t.TempDir(), logs: &swapHandler{}}
+	harness.logs.set(slog.DiscardHandler)
 	harness.paths = hubconfig.Paths{
 		ConfigDir: filepath.Join(harness.dir, "config"),
 		TrustDir:  filepath.Join(harness.dir, "trust"),
@@ -179,7 +207,7 @@ func newEnvIssuer(t *testing.T, mk func(*env) issuer.Issuer) *env {
 	}
 
 	harness.srv, err = New(Options{
-		Config: harness.watcher, Issuer: iss,
+		Config: harness.watcher, Issuer: iss, Log: slog.New(harness.logs),
 		Now: func() time.Time { return time.Now().Add(time.Duration(harness.offset.Load())) },
 	})
 	if err != nil {
@@ -1074,6 +1102,12 @@ func TestRevocationBlockedViewerLeaf(t *testing.T) {
 func rawViewer(t *testing.T, e *env, head string) (net.Conn, *bufio.Reader) {
 	t.Helper()
 
+	return rawViewerAs(t, e, "z-phone", viewerFP, head)
+}
+
+func rawViewerAs(t *testing.T, e *env, viewer, fp, head string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
 	var dialer net.Dialer
 
 	conn, err := dialer.DialContext(t.Context(), "tcp", e.viewer.Listener.Addr().String())
@@ -1084,7 +1118,7 @@ func rawViewer(t *testing.T, e *env, head string) (net.Conn, *bufio.Reader) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	hdr := http.Header{}
-	setViewerHeaders(hdr, "z-phone", viewerFP, farFuture)
+	setViewerHeaders(hdr, viewer, fp, farFuture)
 
 	var sb strings.Builder
 	sb.WriteString(head)

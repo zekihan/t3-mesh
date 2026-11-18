@@ -1,16 +1,19 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -936,5 +939,79 @@ func TestDeviceLeavesRetriedAfterFailure(t *testing.T) {
 	got := leavesOf(arch.nextDeviceLeaves().DeviceLeaves)
 	if !maps.Equal(got, map[string]string{devPhone: pki.Fingerprint(phone.Leaf)}) {
 		t.Fatalf("leaves after the retry = %v", got)
+	}
+}
+
+// logged returns the info-level records the hub wrote while f ran.
+func (harness *env) logged(f func()) string {
+	harness.t.Helper()
+
+	var buf lockedBuffer
+
+	harness.srv.log = slog.New(
+		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}),
+	)
+	defer func() { harness.srv.log = slog.New(slog.DiscardHandler) }()
+
+	f()
+
+	return buf.String()
+}
+
+type lockedBuffer struct {
+	buf bytes.Buffer
+	mu  sync.Mutex
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	return lb.buf.Write(p) //nolint:wrapcheck // a bytes.Buffer write never fails
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	return lb.buf.String()
+}
+
+// The hub logs the enrolled URI for a device's chat socket and for its streams,
+// and keeps a KeyChain viewer's plain requests out of the info log.
+func TestViewerStreamsLogTheEnrolledURI(t *testing.T) {
+	harness := deviceEnv(t)
+	fp := harness.newDeviceFP(devPhone)
+
+	out := harness.logged(func() {
+		// A WebSocket, as T3's chat socket.
+		conn, rd := rawViewerAs(t, harness, devPhone, fp, "GET /ws HTTP/1.1\r\n"+
+			"Host: t3.devbox.mesh.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n")
+		defer func() { _ = conn.Close() }()
+
+		line, err := rd.ReadString('\n')
+		if err != nil || !strings.Contains(line, "101") {
+			t.Fatalf("upgrade: %q, %v", line, err)
+		}
+
+		// A plain streaming request, as a device stream.
+		stream, closeStream := openStreamAs(t, harness, devPhone, fp, "/stream", farFuture)
+		defer closeStream()
+
+		_ = stream
+	})
+
+	const uri = "urn:noqer:mtls:clients:" + devPhone
+
+	if strings.Count(out, `"uri":"`+uri+`"`) != 2 ||
+		!strings.Contains(out, `"upgrade":true`) || !strings.Contains(out, `"upgrade":false`) {
+		t.Fatalf("log = %s", out)
+	}
+
+	plain := harness.logged(func() {
+		harness.get("t3.devbox.mesh.test", "z-phone", viewerFP, farFuture, "/hdr")
+	})
+	if strings.Contains(plain, "Viewer stream") {
+		t.Fatalf("a plain KeyChain request was logged at info: %s", plain)
 	}
 }
