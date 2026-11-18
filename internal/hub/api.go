@@ -90,6 +90,8 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/api/v1/renew":
+		server.serveRenew(w, r, snap, caller)
 	case "/api/v1/machines":
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
