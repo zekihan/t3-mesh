@@ -46,6 +46,14 @@ type deviceRig struct {
 func newDeviceRig(t *testing.T, tweak func(*hubCfg)) *deviceRig {
 	t.Helper()
 
+	return newDeviceRigOn(t, tweak, "")
+}
+
+// newDeviceRigOn is newDeviceRig with node a serving the T3 at t3Addr, or its
+// stand-in when empty.
+func newDeviceRigOn(t *testing.T, tweak func(*hubCfg), t3Addr string) *deviceRig {
+	t.Helper()
+
 	cfg := hubCfg{
 		devices: []string{phoneDevice, tabletDevice},
 		rulesA:  []string{phoneDevice},
@@ -60,7 +68,7 @@ func newDeviceRig(t *testing.T, tweak func(*hubCfg)) *deviceRig {
 	skipNoDirect(t, msh)
 
 	rig := &deviceRig{msh: msh}
-	rig.a = msh.newNode("a", &nodeOpts{direct: true, devices: true, fakeNet: true})
+	rig.a = msh.newNode("a", &nodeOpts{direct: true, devices: true, fakeNet: true, t3Addr: t3Addr})
 	rig.a.waitDeviceListening()
 
 	rig.phone = msh.enrollDeviceCert(phoneDevice)

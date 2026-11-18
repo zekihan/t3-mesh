@@ -608,7 +608,10 @@ type nodeOpts struct {
 	notAfter time.Time
 	// hubName dials the hub by this name instead of 127.0.0.1, so the agent
 	// runs the DNS re-resolve check.
-	hubName    string
+	hubName string
+	// t3Addr is the host:port of a real T3 server to serve, in place of the
+	// stand-in the node starts otherwise.
+	t3Addr     string
 	links      []string
 	directPort int
 	cacheTTL   time.Duration
@@ -649,7 +652,12 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 		done:     make(chan struct{}),
 	}
 
-	nd.startT3(name)
+	t3Addr := opts.t3Addr
+	if t3Addr == "" {
+		nd.startT3(name)
+
+		t3Addr = nd.t3.Listener.Addr().String()
+	}
 
 	dir := t.TempDir()
 	nd.linkPort = freePort(t, "127.0.0.1")
@@ -671,7 +679,7 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 	}
 
 	nd.cfg = &agentconfig.Config{
-		Serve:    map[string]string{"t3": nd.t3.Listener.Addr().String()},
+		Serve:    map[string]string{"t3": t3Addr},
 		Links:    links,
 		Identity: agentconfig.Identity{Name: nd.identity, Dir: filepath.Join(dir, "identity")},
 		Direct: agentconfig.Direct{
