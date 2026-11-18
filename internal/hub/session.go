@@ -74,8 +74,8 @@ func (m *machineState) newestLive() *session {
 
 // sentState is what the agent already has; used only by the push loop.
 type sentState struct {
-	rules, revs, trust, release, peers, cidrs string
-	home                                      bool
+	rules, revs, trust, release, peers, cidrs, devices string
+	home                                               bool
 }
 
 type session struct {
@@ -556,6 +556,8 @@ type desired struct {
 	trust   proto.TrustBundle
 	release proto.Release
 	peers   proto.PeerTable
+	// Nil when the issuer could not say, and then nothing is sent.
+	devices *proto.DeviceLeaves
 	cidrs   []string
 	home    bool
 }
@@ -570,6 +572,7 @@ func (sess *session) desiredState() (desired, bool) {
 
 	snap := sess.s.cfg.Current()
 	home := snap.IsHome(sess.source)
+	want.devices = sess.s.deviceLeaves(sess.ctx, snap)
 
 	sess.s.mu.Lock()
 	if home != sess.home {
@@ -599,6 +602,7 @@ func (sess *session) sendHelloAck() error {
 	err := sess.ctrl.Send(proto.HelloAck{
 		Machine: sess.machine, Home: want.home, Release: want.release, Rules: want.rules,
 		Peers: want.peers, Revocations: want.revs, TrustBundle: want.trust, HomeCIDRs: want.cidrs,
+		DeviceLeaves: want.devices,
 	})
 	if err != nil {
 		return fmt.Errorf("hub: send HelloAck: %w", err)
@@ -608,6 +612,10 @@ func (sess *session) sendHelloAck() error {
 		rules: want.rules.Revision, revs: want.revs.Revision, trust: want.trust.Revision,
 		release: want.release.Revision, peers: want.peers.Revision, home: want.home,
 		cidrs: strings.Join(want.cidrs, ","),
+	}
+
+	if want.devices != nil {
+		sess.sent.devices = want.devices.Revision
 	}
 
 	return nil
@@ -644,6 +652,39 @@ func (sess *session) push() error {
 		sess.s.kickAll()
 	}
 
+	upd, dirt := sess.diff(&want)
+	if dirt {
+		err := sess.ctrl.Send(upd)
+		if err != nil {
+			return fmt.Errorf("hub: send Update: %w", err)
+		}
+
+		sess.sent.rules = want.rules.Revision
+		sess.sent.revs = want.revs.Revision
+		sess.sent.trust = want.trust.Revision
+		sess.sent.peers = want.peers.Revision
+		sess.sent.home = want.home
+		sess.sent.cidrs = strings.Join(want.cidrs, ",")
+
+		if want.devices != nil {
+			sess.sent.devices = want.devices.Revision
+		}
+	}
+
+	if want.release.Revision != sess.sent.release {
+		err := sess.ctrl.Send(want.release)
+		if err != nil {
+			return fmt.Errorf("hub: send Release: %w", err)
+		}
+
+		sess.sent.release = want.release.Revision
+	}
+
+	return nil
+}
+
+// diff builds the Update holding what differs from what the agent already has.
+func (sess *session) diff(want *desired) (proto.Update, bool) {
 	var (
 		upd  proto.Update
 		dirt bool
@@ -665,6 +706,10 @@ func (sess *session) push() error {
 		upd.Peers, dirt = &want.peers, true
 	}
 
+	if want.devices != nil && want.devices.Revision != sess.sent.devices {
+		upd.DeviceLeaves, dirt = want.devices, true
+	}
+
 	if want.home != sess.sent.home {
 		h := want.home
 		upd.Home, dirt = &h, true
@@ -679,30 +724,7 @@ func (sess *session) push() error {
 		upd.HomeCIDRs, dirt = &list, true
 	}
 
-	if dirt {
-		err := sess.ctrl.Send(upd)
-		if err != nil {
-			return fmt.Errorf("hub: send Update: %w", err)
-		}
-
-		sess.sent.rules = want.rules.Revision
-		sess.sent.revs = want.revs.Revision
-		sess.sent.trust = want.trust.Revision
-		sess.sent.peers = want.peers.Revision
-		sess.sent.home = want.home
-		sess.sent.cidrs = strings.Join(want.cidrs, ",")
-	}
-
-	if want.release.Revision != sess.sent.release {
-		err := sess.ctrl.Send(want.release)
-		if err != nil {
-			return fmt.Errorf("hub: send Release: %w", err)
-		}
-
-		sess.sent.release = want.release.Revision
-	}
-
-	return nil
+	return upd, dirt
 }
 
 // Builds the peer table for the given session; server.mu must be held.

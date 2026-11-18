@@ -75,6 +75,7 @@ type Server struct {
 	enrollH      *enroll.Handler
 	log          *slog.Logger
 	newest       map[string]string
+	deviceKnown  map[string]bool
 	tokens       *enroll.Tokens
 	renewals     *renewLimiter
 	machines     map[string]*machineState
@@ -124,6 +125,7 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server.renewals = newRenewLimiter(server.now)
+	server.deviceKnown = map[string]bool{}
 	server.started = server.now()
 	server.releaseSince = server.started
 	server.releaseRev = opts.Config.Current().Release.Revision

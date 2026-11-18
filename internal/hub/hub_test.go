@@ -239,6 +239,7 @@ func eventually(t *testing.T, cond func() bool) {
 }
 
 type agent struct {
+	ack      proto.HelloAck
 	cert     tls.Certificate
 	t        *testing.T
 	conn     *tls.Conn
@@ -248,7 +249,6 @@ type agent struct {
 	backend  *httptest.Server
 	identity string
 	fp       string
-	ack      proto.HelloAck
 }
 
 func backendHandler(body string) http.Handler {

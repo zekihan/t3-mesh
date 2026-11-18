@@ -52,10 +52,11 @@ type servicesStatus struct {
 }
 
 type ackedStatus struct {
-	Release     string `json:"release"`
-	Rules       string `json:"rules"`
-	Revocations string `json:"revocations"`
-	TrustBundle string `json:"trustBundle"`
+	Release      string `json:"release"`
+	Rules        string `json:"rules"`
+	Revocations  string `json:"revocations"`
+	TrustBundle  string `json:"trustBundle"`
+	DeviceLeaves string `json:"deviceLeaves"`
 }
 
 type machineStatus struct {
@@ -87,6 +88,7 @@ type statusDoc struct {
 	Rules          string                   `json:"rulesRevision"`
 	Revocations    string                   `json:"revocationRevision"`
 	TrustBundle    string                   `json:"trustBundleRevision"`
+	DeviceLeaves   string                   `json:"deviceLeavesRevision"`
 	StaleReason    string                   `json:"staleReason,omitempty"`
 	ConfigError    string                   `json:"configError,omitempty"`
 	Stale          bool                     `json:"stale"`
@@ -111,7 +113,8 @@ func (server *Server) serveStatus(w http.ResponseWriter, req *http.Request) {
 		Now: now.UTC(), StartedAt: server.started.UTC(),
 		PolicyRevision: snap.PolicyRevision, Rules: snap.Rules.Revision,
 		Revocations: snap.Revocations.Revision, TrustBundle: snap.TrustBundle.Revision,
-		Release: snap.Release, Stale: stale, StaleReason: reason,
+		DeviceLeaves: server.deviceLeavesKnown(snap).Revision,
+		Release:      snap.Release, Stale: stale, StaleReason: reason,
 		Machines: map[string]machineStatus{},
 	}
 
@@ -192,6 +195,7 @@ func (server *Server) machineStatusLocked(
 		out.Acked = ackedStatus{
 			Release: st.ReleaseRevision, Rules: st.RulesRevision,
 			Revocations: st.RevocationRevision, TrustBundle: st.TrustBundleRevision,
+			DeviceLeaves: st.DeviceLeavesRevision,
 		}
 		out.AgentWarnings = st.Warnings
 		out.FailedUpdates = nonNilFU(st.FailedUpdates)

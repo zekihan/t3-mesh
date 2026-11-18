@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/policy"
+	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
 var (
@@ -79,14 +83,93 @@ func (server *Server) deviceCurrent(snap *hubconfig.Snapshot, identity, fp strin
 }
 
 // noteIssued records a certificate the hub has just issued. A new device leaf
-// supersedes the old one at once: the old leaf's open streams are closed.
+// supersedes the old one at once: the old leaf's open streams are closed, and
+// every agent is sent the new fingerprint.
 func (server *Server) noteIssued(identity, fp string) {
 	server.setNewest(identity, fp)
 	server.pruneAsync(identity)
 
 	if policy.IsDevice(identity) {
 		server.enforce()
+		server.kickAll()
 	}
+}
+
+// knowDevice makes sure the hub has asked the issuer for the newest leaf of a
+// configured device once since it started. What the hub has issued since then is
+// already recorded, so later calls cost nothing.
+func (server *Server) knowDevice(ctx context.Context, identity string) error {
+	server.nmu.Lock()
+	known := server.deviceKnown[identity]
+	server.nmu.Unlock()
+
+	if known {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, newestTimeout)
+	defer cancel()
+
+	got, err := server.issuer.Newest(ctx, identity)
+	if err != nil {
+		return fmt.Errorf("hub: newest leaf lookup: %w", err)
+	}
+
+	server.nmu.Lock()
+	defer server.nmu.Unlock()
+
+	// Never replace a leaf issued while the lookup ran.
+	if got != "" && server.newest[identity] == "" {
+		server.newest[identity] = got
+	}
+
+	server.deviceKnown[identity] = true
+
+	return nil
+}
+
+// deviceLeaves is the newest leaf of every configured device that has one. It
+// returns nil when the issuer could not say for some device, so that an agent
+// keeps what it has rather than losing a device's leaf to a lookup failure.
+func (server *Server) deviceLeaves(
+	ctx context.Context,
+	snap *hubconfig.Snapshot,
+) *proto.DeviceLeaves {
+	for _, identity := range snap.Devices {
+		err := server.knowDevice(ctx, identity)
+		if err != nil {
+			server.log.WarnContext(
+				ctx,
+				"Device leaves unavailable",
+				slog.String("identity", identity),
+				slog.Any("error", err),
+			)
+
+			return nil
+		}
+	}
+
+	return server.deviceLeavesKnown(snap)
+}
+
+// deviceLeavesKnown builds the list from what the hub already knows, in the
+// sorted order of the configured devices.
+func (server *Server) deviceLeavesKnown(snap *hubconfig.Snapshot) *proto.DeviceLeaves {
+	leaves := make([]proto.DeviceLeaf, 0, len(snap.Devices))
+
+	server.nmu.Lock()
+	for _, identity := range snap.Devices {
+		if fp := server.newest[identity]; fp != "" {
+			leaves = append(leaves, proto.DeviceLeaf{Identity: identity, Fingerprint: fp})
+		}
+	}
+	server.nmu.Unlock()
+
+	//nolint:errcheck,errchkjson // DeviceLeaf holds only strings, so Marshal cannot fail
+	data, _ := json.Marshal(leaves)
+	sum := sha256.Sum256(data)
+
+	return &proto.DeviceLeaves{Revision: hex.EncodeToString(sum[:8]), Leaves: leaves}
 }
 
 // refuse answers a refused viewer or API request: 403 for an admission failure,
