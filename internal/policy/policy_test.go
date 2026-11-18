@@ -91,3 +91,53 @@ func TestCheckLeafIgnoresRules(t *testing.T) {
 		}
 	}
 }
+
+func TestIsDevice(t *testing.T) {
+	for _, name := range []string{
+		"device-z-phone-mesh", "device-z-tablet-mesh", "device-a1-mesh", "device-a-b-c-mesh",
+		"device-mesh-mesh",
+	} {
+		if !IsDevice(name) {
+			t.Errorf("IsDevice(%q) = false", name)
+		}
+	}
+
+	for _, name := range []string{
+		"", "z-phone", "z-tablet", "agent-z-mac", "device-mesh", "device--mesh", "device-z-phone",
+		"device-z-phone-mesh-", "device-Z-phone-mesh", "device-z_phone-mesh", "device-z-phone-mesh\n",
+		"xdevice-z-phone-mesh", "device-z--phone-mesh", "device--z-mesh", "device-z-phone-meshx",
+		"agent-device-z-mesh",
+	} {
+		if IsDevice(name) {
+			t.Errorf("IsDevice(%q) = true", name)
+		}
+	}
+}
+
+func TestKindOf(t *testing.T) {
+	cases := map[string]struct {
+		kind Kind
+		ok   bool
+	}{
+		"agent-z-mac":         {KindAgent, true},
+		"device-z-phone-mesh": {KindDevice, true},
+		"z-phone":             {"", false},
+		"device-z-phone":      {"", false},
+		"":                    {"", false},
+	}
+
+	for name, want := range cases {
+		kind, ok := KindOf(name)
+		if kind != want.kind || ok != want.ok {
+			t.Errorf("KindOf(%q) = %q, %v; want %q, %v", name, kind, ok, want.kind, want.ok)
+		}
+	}
+}
+
+func TestKindsAreDisjoint(t *testing.T) {
+	for _, name := range []string{"agent-device-x-mesh", "device-agent-mesh", "agent-x-mesh"} {
+		if IsAgent(name) && IsDevice(name) {
+			t.Errorf("%q is both an agent and a device", name)
+		}
+	}
+}
