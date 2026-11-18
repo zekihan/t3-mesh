@@ -140,6 +140,7 @@ func New(opts Options) (*Server, error) {
 				slog.String("via", "enrollment"),
 			)
 		},
+		Trust:   func() proto.TrustBundle { return server.cfg.Current().TrustBundle },
 		Limiter: enroll.NewLimiter(server.now),
 		Log:     server.log,
 		Now:     server.now,

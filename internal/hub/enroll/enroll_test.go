@@ -2,9 +2,18 @@ package enroll
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/pem"
 	"errors"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +24,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/hub/issuer/issuertest"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/pki/pkitest"
+	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
@@ -47,6 +57,7 @@ type env struct {
 	tokens *Tokens
 	h      *Handler
 	fake   *issuertest.Fake
+	ca     *pkitest.CA
 	issued []string
 }
 
@@ -55,7 +66,7 @@ func newEnv(t *testing.T) *env {
 
 	ca := pkitest.NewCA(t, "test")
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
-	harness := &env{clk: clk, tokens: NewTokens(clk.Now)}
+	harness := &env{clk: clk, tokens: NewTokens(clk.Now), ca: ca}
 	harness.fake = &issuertest.Fake{Sign: func(csr []byte) ([]byte, []byte, error) {
 		return ca.SignCSR(csr, time.Hour)
 	}}
@@ -65,8 +76,11 @@ func newEnv(t *testing.T) *env {
 		Issuer:   harness.fake,
 		Allowed:  func(string) error { return nil },
 		OnIssued: func(id, fp string) { harness.issued = append(harness.issued, id+" "+fp) },
-		Limiter:  lim,
-		Now:      clk.Now,
+		Trust: func() proto.TrustBundle {
+			return proto.TrustBundle{Revision: "rev-9", PEM: string(ca.CertPEM)}
+		},
+		Limiter: lim,
+		Now:     clk.Now,
 	}
 
 	return harness
@@ -523,5 +537,213 @@ func TestAdminKinds(t *testing.T) {
 		if calls[i] != want[i] {
 			t.Errorf("Allowed call %d = %v, want %v", i, calls[i], want[i])
 		}
+	}
+}
+
+const devPhone = "device-z-phone-mesh"
+
+func rawCSR(t *testing.T, key any, tmpl *x509.CertificateRequest) []byte {
+	t.Helper()
+
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+func identityURL(t *testing.T, identity string) *url.URL {
+	t.Helper()
+
+	u, err := url.Parse(policy.IdentityURI(identity))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return u
+}
+
+func TestDeviceSuccess(t *testing.T) {
+	harness := newEnv(t)
+	token, _, _ := harness.tokens.Create(devPhone)
+	msg := harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, devPhone))})
+
+	en, ok := msg.(proto.Enrolled)
+	if !ok {
+		t.Fatalf("got %#v", msg)
+	}
+
+	certs, err := pki.ParseCertsPEM([]byte(en.Certificate))
+	if err != nil || len(certs) != 1 {
+		t.Fatalf("certs: %v", err)
+	}
+
+	leaf := certs[0]
+
+	err = pki.CheckDeviceLeaf(leaf)
+	if err != nil {
+		t.Fatalf("leaf: %v", err)
+	}
+
+	if id, _ := pki.CertIdentity(leaf); id != devPhone {
+		t.Fatalf("identity %q", id)
+	}
+
+	if len(harness.issued) != 1 || harness.issued[0] != devPhone+" "+pki.Fingerprint(leaf) {
+		t.Fatalf("issued %v", harness.issued)
+	}
+
+	// The reply carries the clients CA bundle and its revision, and the chain.
+	if en.CABundle != string(harness.ca.CertPEM) || en.CARevision != "rev-9" ||
+		en.Chain != string(harness.ca.CertPEM) {
+		t.Fatalf("reply = %+v", en)
+	}
+
+	pool, err := pki.PoolFromPEM([]byte(en.CABundle))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = pki.VerifyPeer([][]byte{leaf.Raw}, pool, x509.ExtKeyUsageClientAuth, time.Now())
+	if err != nil {
+		t.Fatalf("leaf does not verify against the bundle: %v", err)
+	}
+
+	if harness.tokens.Outstanding() {
+		t.Fatal("token still outstanding")
+	}
+}
+
+func TestAgentReplyAlsoCarriesTrust(t *testing.T) {
+	harness := newEnv(t)
+	token, _, _ := harness.tokens.Create("agent-a")
+
+	en, ok := harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, "agent-a"))}).(proto.Enrolled)
+	if !ok || en.CABundle != string(harness.ca.CertPEM) || en.CARevision != "rev-9" {
+		t.Fatalf("reply = %+v", en)
+	}
+}
+
+func TestDeviceCSRRejected(t *testing.T) {
+	good := identityURL(t, devPhone)
+
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := pki.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caExt := pkix.Extension{
+		Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Value: []byte{0x30, 0x03, 0x01, 0x01, 0xff},
+	}
+
+	cases := map[string][]byte{
+		"p384 key": rawCSR(t, p384, &x509.CertificateRequest{URIs: []*url.URL{good}}),
+		"rsa key":  rawCSR(t, rsaKey, &x509.CertificateRequest{URIs: []*url.URL{good}}),
+		"dns san": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good}, DNSNames: []string{"a.example"},
+		}),
+		"second uri": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good, identityURL(t, "agent-z-mac")},
+		}),
+		"ca request": rawCSR(t, key, &x509.CertificateRequest{
+			URIs: []*url.URL{good}, ExtraExtensions: []pkix.Extension{caExt},
+		}),
+	}
+
+	for name, csr := range cases {
+		t.Run(name, func(t *testing.T) {
+			harness := newEnv(t)
+			token, _, _ := harness.tokens.Create(devPhone)
+
+			wantReject(t, harness.run(t, proto.Enroll{Token: token, CSR: string(csr)}))
+
+			if len(harness.issued) != 0 {
+				t.Fatal("issued for a bad CSR")
+			}
+
+			// Like any malformed request, it does not burn the token.
+			if !harness.tokens.Outstanding() {
+				t.Fatal("token burned by a bad CSR")
+			}
+		})
+	}
+}
+
+func TestTokenBoundToOneDevice(t *testing.T) {
+	harness := newEnv(t)
+	token, _, _ := harness.tokens.Create(devPhone)
+
+	wantReject(
+		t,
+		harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, "device-z-tablet-mesh"))}),
+	)
+
+	if len(harness.issued) != 0 || harness.tokens.Outstanding() {
+		t.Fatalf("issued %v, outstanding %v", harness.issued, harness.tokens.Outstanding())
+	}
+}
+
+func TestTokenKindsDoNotCross(t *testing.T) {
+	cases := map[string][2]string{
+		"agent token, device CSR": {"agent-a", devPhone},
+		"device token, agent CSR": {devPhone, "agent-a"},
+	}
+
+	for name, ids := range cases {
+		t.Run(name, func(t *testing.T) {
+			harness := newEnv(t)
+			token, _, _ := harness.tokens.Create(ids[0])
+
+			wantReject(
+				t,
+				harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, ids[1]))}),
+			)
+
+			if len(harness.issued) != 0 {
+				t.Fatal("issued across kinds")
+			}
+		})
+	}
+}
+
+func TestDeviceDisabledOrUnconfigured(t *testing.T) {
+	harness := newEnv(t)
+	harness.h.Allowed = func(string) error { return errNotConfigured }
+	token, _, _ := harness.tokens.Create(devPhone)
+
+	wantReject(t, harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, devPhone))}))
+
+	if len(harness.issued) != 0 {
+		t.Fatal("issued for an identity that may not enroll")
+	}
+}
+
+// A device certificate that could also authenticate a TLS server is never handed out.
+func TestDeviceLeafWithServerAuthRefused(t *testing.T) {
+	harness := newEnv(t)
+	harness.fake.Sign = func(csr []byte) ([]byte, []byte, error) {
+		return harness.ca.SignCSRUsages(
+			csr,
+			time.Hour,
+			[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		)
+	}
+	token, _, _ := harness.tokens.Create(devPhone)
+
+	wantReject(t, harness.run(t, proto.Enroll{Token: token, CSR: string(csrFor(t, devPhone))}))
+
+	if len(harness.issued) != 0 {
+		t.Fatal("OnIssued called for a device leaf with server auth")
 	}
 }
