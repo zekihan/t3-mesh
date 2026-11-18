@@ -9,10 +9,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
+)
+
+const (
+	// The issuer lookup for one device while a session is being set up is bounded,
+	// so that a slow API server cannot hold a HelloAck past the agent's wait for it.
+	deviceLookupTimeout = 3 * time.Second
+	// A session waits this long before asking again after a lookup failed.
+	deviceLeavesRetry = 30 * time.Second
 )
 
 var (
@@ -107,7 +116,7 @@ func (server *Server) knowDevice(ctx context.Context, identity string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, newestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, deviceLookupTimeout)
 	defer cancel()
 
 	got, err := server.issuer.Newest(ctx, identity)

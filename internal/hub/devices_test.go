@@ -910,3 +910,31 @@ func TestStatusShowsAckedDeviceLeaves(t *testing.T) {
 		return doc.DeviceLeaves == rev && doc.Machines["z-arch"].Acked.DeviceLeaves == rev
 	})
 }
+
+// A failed lookup is retried on its own, so an agent is not left with a stale
+// list until the next unrelated change.
+func TestDeviceLeavesRetriedAfterFailure(t *testing.T) {
+	harness := newEnv(t)
+	harness.srv.deviceRetry = 50 * time.Millisecond
+
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	harness.fake.SetNewestErr(errLookupBoom)
+	harness.setConfig(cfgOpts{devices: bothDevices})
+
+	phone := harness.newCert(devPhone, farFuture)
+
+	// Several retries fail before the issuer recovers.
+	select {
+	case m := <-arch.msgs:
+		t.Fatalf("unexpected message while the issuer was down: %#v", m)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	harness.fake.SetNewestErr(nil)
+
+	got := leavesOf(arch.nextDeviceLeaves().DeviceLeaves)
+	if !maps.Equal(got, map[string]string{devPhone: pki.Fingerprint(phone.Leaf)}) {
+		t.Fatalf("leaves after the retry = %v", got)
+	}
+}
