@@ -42,7 +42,7 @@ const (
 	maxResponseBytes = 4 << 20
 
 	// Longest identity accepted, and longest API error body quoted in errors.
-	maxIdentityLen   = 40
+	maxIdentityLen   = policy.MaxIdentityLen
 	maxErrorBodySize = 512
 
 	tlsHandshakeTimeout = 10 * time.Second
