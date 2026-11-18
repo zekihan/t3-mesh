@@ -103,6 +103,8 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	server.logViewerStream(r, &pol)
+
 	// Revocation cancels the request and aborts the viewer's connection, so a
 	// pending request or an upgraded WebSocket ends even if the machine's
 	// service never hangs up.
@@ -174,6 +176,31 @@ func (server *Server) serveViewer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rp.ServeHTTP(w, r)
+}
+
+// logViewerStream records an admitted viewer stream with the identity URI it was
+// opened under. Every WebSocket upgrade and every stream of an enrolled device is
+// logged at info, so a device's chat socket and streams can be told from the log;
+// the many plain requests of other viewers stay at debug.
+func (server *Server) logViewerStream(r *http.Request, pol *policy.Session) {
+	upgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+
+	level := slog.LevelDebug
+	if upgrade || policy.IsDevice(pol.Identity) {
+		level = slog.LevelInfo
+	}
+
+	server.log.Log(
+		r.Context(),
+		level,
+		"Viewer stream",
+		slog.String("kind", "viewer"),
+		slog.String("viewer", pol.Identity),
+		slog.String("uri", policy.IdentityURI(pol.Identity)),
+		slog.String("fingerprint", pol.Fingerprint),
+		slog.String("target", policy.Target(pol.Svc, pol.Machine)),
+		slog.Bool("upgrade", upgrade),
+	)
 }
 
 func viewerIdentity(r *http.Request) (string, string, time.Time, bool) {
