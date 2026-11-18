@@ -153,6 +153,11 @@ type HelloAck struct { //nolint:govet // JSON field order is the wire format
 	// DeviceLeaves is nil when the hub could not tell or predates enrollment of
 	// devices; the agent then keeps what it has cached.
 	DeviceLeaves *DeviceLeaves `json:"deviceLeaves,omitempty"`
+	// ViewerDomain is the domain viewer hosts live under, as the hub config has it
+	// (lowercase, no trailing dot). The agent's device listener accepts only
+	// t3.<machine>.<ViewerDomain>. Empty from a hub that predates it, and the
+	// agent then keeps what it has cached.
+	ViewerDomain string `json:"viewerDomain,omitempty"`
 }
 
 // Update carries changed state. Nil fields are unchanged.
@@ -166,6 +171,8 @@ type Update struct {
 	HomeCIDRs *[]string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // wire protocol field name
 	// DeviceLeaves is nil when unchanged.
 	DeviceLeaves *DeviceLeaves `json:"deviceLeaves,omitempty"`
+	// ViewerDomain is nil when unchanged.
+	ViewerDomain *string `json:"viewerDomain,omitempty"`
 }
 
 // Release is the desired agent version.

@@ -229,3 +229,49 @@ func TestDeviceLeavesAreIgnoredByOlderReaders(t *testing.T) {
 		t.Fatalf("decode without leaves: %+v (%v)", current, err)
 	}
 }
+
+func TestViewerDomainWireFormat(t *testing.T) {
+	domain := "mesh.noqer.com"
+
+	data, err := json.Marshal(Update{ViewerDomain: &domain})
+	if err != nil || string(data) != `{"viewerDomain":"mesh.noqer.com"}` {
+		t.Fatalf("Update = %s (%v)", data, err)
+	}
+
+	// Unchanged and unknown are both absent, so an older agent sees nothing new.
+	data, err = json.Marshal(HelloAck{})
+	if err != nil || strings.Contains(string(data), "viewerDomain") {
+		t.Fatalf("HelloAck without a domain = %s (%v)", data, err)
+	}
+
+	var buf bytes.Buffer
+
+	err = WriteMessage(&buf, HelloAck{Machine: "z-mac", ViewerDomain: domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadMessage(&buf, MaxMessageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ack, ok := got.(HelloAck)
+	if !ok || ack.ViewerDomain != domain {
+		t.Fatalf("HelloAck round trip = %#v", got)
+	}
+
+	var legacy struct {
+		Machine string `json:"machine"`
+	}
+
+	data, err = json.Marshal(HelloAck{Machine: "z-mac", ViewerDomain: domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = json.Unmarshal(data, &legacy)
+	if err != nil || legacy.Machine != "z-mac" {
+		t.Fatalf("legacy decode: %+v (%v)", legacy, err)
+	}
+}

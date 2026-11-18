@@ -39,10 +39,14 @@ type Cache struct {
 	// agent about. The field is optional and the format version stays 1: a release
 	// before it ignores the key when reading and drops it when it next saves,
 	// and the hub sends the list again at the next HelloAck.
-	DeviceLeaves  proto.DeviceLeaves `json:"deviceLeaves,omitzero"`
-	HomeCIDRs     []string           `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // persisted key
-	FormatVersion int                `json:"formatVersion"`
-	Home          bool               `json:"home"`
+	DeviceLeaves proto.DeviceLeaves `json:"deviceLeaves,omitzero"`
+	// ViewerDomain is the domain the hub says viewer hosts live under. It is
+	// optional like DeviceLeaves: a release before it ignores the key and drops it
+	// at its next save, and the hub sends it again at the next HelloAck.
+	ViewerDomain  string   `json:"viewerDomain,omitempty"`
+	HomeCIDRs     []string `json:"homeCIDRs,omitempty"` //nolint:tagliatelle // persisted key
+	FormatVersion int      `json:"formatVersion"`
+	Home          bool     `json:"home"`
 }
 
 // Load reads the cache in dir. A missing file yields an empty cache. A file written
@@ -198,16 +202,25 @@ func (cache *Cache) Apply(update proto.Update) {
 	if update.DeviceLeaves != nil {
 		cache.DeviceLeaves = cloneDeviceLeaves(update.DeviceLeaves)
 	}
+
+	if update.ViewerDomain != nil {
+		cache.ViewerDomain = *update.ViewerDomain
+	}
 }
 
 func cloneDeviceLeaves(in *proto.DeviceLeaves) proto.DeviceLeaves {
 	return proto.DeviceLeaves{Revision: in.Revision, Leaves: slices.Clone(in.Leaves)}
 }
 
-// ApplyAck copies the device leaves of a HelloAck into the cache. A nil list
-// means the hub could not tell or predates them, and the cached one stays.
+// ApplyAck copies the device leaves and the viewer domain of a HelloAck into the
+// cache. A nil list or an empty domain means the hub could not tell or predates
+// them, and the cached one stays.
 func (cache *Cache) ApplyAck(ack *proto.HelloAck) {
 	if ack.DeviceLeaves != nil {
 		cache.DeviceLeaves = cloneDeviceLeaves(ack.DeviceLeaves)
+	}
+
+	if ack.ViewerDomain != "" {
+		cache.ViewerDomain = ack.ViewerDomain
 	}
 }

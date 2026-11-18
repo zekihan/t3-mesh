@@ -38,12 +38,14 @@ import (
 const viewerFP = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type cfgOpts struct {
-	release  string
-	disabled []string
-	blocked  []string
-	api      []string
-	devices  []string
-	noCIDRs  bool
+	release string
+	// viewerDomain defaults to mesh.test.
+	viewerDomain string
+	disabled     []string
+	blocked      []string
+	api          []string
+	devices      []string
+	noCIDRs      bool
 }
 
 //nolint:gocritic // test options are passed by value so call sites stay literals
@@ -77,12 +79,17 @@ func (opts cfgOpts) yaml() string {
 		cidrs = "[]"
 	}
 
+	domain := opts.viewerDomain
+	if domain == "" {
+		domain = "mesh.test"
+	}
+
 	return fmt.Sprintf(`
 machines:
   devbox: {identity: agent-devbox, services: {t3: {kind: http}}}
   z-arch: {identity: agent-z-arch, services: {t3: {kind: http}}}
 homeCIDRs: %s
-viewerDomain: mesh.test
+viewerDomain: %s
 release: {version: %s}
 api: {identities: %s}
 devices: %s
@@ -92,7 +99,7 @@ policy:
     mesh-t3-z-arch: {identities: [z-phone, device-z-phone-mesh]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, cidrs, rel, apiIDs, devices, dis, blk)
+`, cidrs, domain, rel, apiIDs, devices, dis, blk)
 }
 
 // swapHandler is a slog handler whose destination a test can replace while the
@@ -1616,5 +1623,36 @@ func TestOfflinePeerKeepsLastAddrs(t *testing.T) {
 	q := again.ack.Peers.Peers[0]
 	if q.Home || q.DirectPort != 27400 || len(q.LANAddrs) != 1 {
 		t.Fatalf("ack peer = %+v", q)
+	}
+}
+
+func TestViewerDomainReachesAgents(t *testing.T) {
+	harness := newEnv(t)
+	arch := harness.connect("agent-z-arch", "arch-body")
+
+	if arch.ack.ViewerDomain != "mesh.test" {
+		t.Fatalf("ack viewer domain = %q, want mesh.test", arch.ack.ViewerDomain)
+	}
+
+	// A change of the domain is pushed, and nothing else is sent for it.
+	harness.setConfig(cfgOpts{viewerDomain: "mesh.example"})
+
+	upd := asUpdate(t, arch.next(func(m proto.Message) bool {
+		u, ok := m.(proto.Update)
+
+		return ok && u.ViewerDomain != nil
+	}))
+	if *upd.ViewerDomain != "mesh.example" {
+		t.Fatalf("viewer domain = %q, want mesh.example", *upd.ViewerDomain)
+	}
+
+	if upd.Rules != nil || upd.Peers != nil || upd.Home != nil {
+		t.Fatalf("a domain change carried more: %+v", upd)
+	}
+
+	// A reconnecting agent gets the current one in its ack.
+	again := harness.connect("agent-z-arch", "arch-body")
+	if again.ack.ViewerDomain != "mesh.example" {
+		t.Fatalf("ack viewer domain = %q, want mesh.example", again.ack.ViewerDomain)
 	}
 }
