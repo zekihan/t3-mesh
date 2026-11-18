@@ -578,3 +578,71 @@ func TestDeviceLeavesStayCompatible(t *testing.T) {
 		t.Fatalf("empty leaves not omitted: %s (%v)", data, err)
 	}
 }
+
+func TestViewerDomainFromAckAndUpdate(t *testing.T) {
+	cache := &Cache{FormatVersion: FormatVersion}
+
+	cache.ApplyAck(&proto.HelloAck{ViewerDomain: "mesh.noqer.com"})
+
+	if cache.ViewerDomain != "mesh.noqer.com" {
+		t.Fatalf("ViewerDomain = %q", cache.ViewerDomain)
+	}
+
+	// A hub that predates the field sends none and must not clear it.
+	cache.ApplyAck(&proto.HelloAck{})
+	cache.Apply(proto.Update{})
+
+	if cache.ViewerDomain != "mesh.noqer.com" {
+		t.Fatalf("an ack or update without it cleared the domain: %q", cache.ViewerDomain)
+	}
+
+	changed := "mesh.example"
+	cache.Apply(proto.Update{ViewerDomain: &changed})
+
+	if cache.ViewerDomain != changed {
+		t.Fatalf("update did not replace the domain: %q", cache.ViewerDomain)
+	}
+}
+
+// The key keeps the format at version 1: the previous release reads the file and
+// ignores it, and this release reads a file written before it.
+func TestViewerDomainStaysCompatible(t *testing.T) {
+	dir := t.TempDir()
+	cache := sampleCache(t)
+	cache.ViewerDomain = "mesh.noqer.com"
+
+	err := Save(dir, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil || loaded.ViewerDomain != "mesh.noqer.com" || loaded.FormatVersion != 1 {
+		t.Fatalf("round trip: %+v, %v", loaded, err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var legacy struct {
+		Machine       string `json:"machine"`
+		FormatVersion int    `json:"formatVersion"`
+	}
+
+	err = json.Unmarshal(raw, &legacy)
+	if err != nil || legacy.Machine != "z-arch" || legacy.FormatVersion != 1 {
+		t.Fatalf("previous release cannot read the file: %+v, %v", legacy, err)
+	}
+
+	old, err := Load(writeCache(t, `{"formatVersion": 1, "machine": "m"}`))
+	if err != nil || old.ViewerDomain != "" {
+		t.Fatalf("old file: %+v, %v", old, err)
+	}
+
+	data, err := json.Marshal(&Cache{FormatVersion: 1})
+	if err != nil || strings.Contains(string(data), "viewerDomain") {
+		t.Fatalf("empty domain not omitted: %s (%v)", data, err)
+	}
+}

@@ -74,8 +74,8 @@ func (m *machineState) newestLive() *session {
 
 // sentState is what the agent already has; used only by the push loop.
 type sentState struct {
-	rules, revs, trust, release, peers, cidrs, devices string
-	home                                               bool
+	rules, revs, trust, release, peers, cidrs, devices, viewerDomain string
+	home                                                             bool
 }
 
 type session struct {
@@ -557,9 +557,10 @@ type desired struct {
 	release proto.Release
 	peers   proto.PeerTable
 	// Nil when the issuer could not say, and then nothing is sent.
-	devices *proto.DeviceLeaves
-	cidrs   []string
-	home    bool
+	devices      *proto.DeviceLeaves
+	viewerDomain string
+	cidrs        []string
+	home         bool
 }
 
 // desiredState computes what the agent should hold now. It updates the
@@ -593,6 +594,7 @@ func (sess *session) desiredState() (desired, bool) {
 	want.revs = snap.Revocations
 	want.trust = snap.TrustBundle
 	want.release = snap.Release
+	want.viewerDomain = snap.ViewerDomain
 
 	for _, p := range snap.HomePrefixes {
 		want.cidrs = append(want.cidrs, p.String())
@@ -607,7 +609,7 @@ func (sess *session) sendHelloAck() error {
 	err := sess.ctrl.Send(proto.HelloAck{
 		Machine: sess.machine, Home: want.home, Release: want.release, Rules: want.rules,
 		Peers: want.peers, Revocations: want.revs, TrustBundle: want.trust, HomeCIDRs: want.cidrs,
-		DeviceLeaves: want.devices,
+		DeviceLeaves: want.devices, ViewerDomain: want.viewerDomain,
 	})
 	if err != nil {
 		return fmt.Errorf("hub: send HelloAck: %w", err)
@@ -616,7 +618,7 @@ func (sess *session) sendHelloAck() error {
 	sess.sent = sentState{
 		rules: want.rules.Revision, revs: want.revs.Revision, trust: want.trust.Revision,
 		release: want.release.Revision, peers: want.peers.Revision, home: want.home,
-		cidrs: strings.Join(want.cidrs, ","),
+		cidrs: strings.Join(want.cidrs, ","), viewerDomain: want.viewerDomain,
 	}
 
 	if want.devices != nil {
@@ -670,6 +672,7 @@ func (sess *session) push() error {
 		sess.sent.peers = want.peers.Revision
 		sess.sent.home = want.home
 		sess.sent.cidrs = strings.Join(want.cidrs, ",")
+		sess.sent.viewerDomain = want.viewerDomain
 
 		if want.devices != nil {
 			sess.sent.devices = want.devices.Revision
@@ -713,6 +716,11 @@ func (sess *session) diff(want *desired) (proto.Update, bool) {
 
 	if want.devices != nil && want.devices.Revision != sess.sent.devices {
 		upd.DeviceLeaves, dirt = want.devices, true
+	}
+
+	if want.viewerDomain != sess.sent.viewerDomain {
+		domain := want.viewerDomain
+		upd.ViewerDomain, dirt = &domain, true
 	}
 
 	if want.home != sess.sent.home {
