@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -67,9 +68,12 @@ type View struct {
 	Revocations    proto.Revocations
 	Peers          []proto.Peer
 	DeviceLeaves   proto.DeviceLeaves
-	HomePrefixes   []netip.Prefix
-	SelfHome       bool
-	HubConnected   bool
+	// ViewerDomain is the domain the hub says viewer hosts live under; the device
+	// listener accepts only t3.<Self>.<ViewerDomain> as Host.
+	ViewerDomain string
+	HomePrefixes []netip.Prefix
+	SelfHome     bool
+	HubConnected bool
 }
 
 // allowDevice reports whether fingerprint is the newest leaf this agent knows
@@ -109,21 +113,32 @@ type Options struct {
 	GatewayMAC func() (string, error)
 	LocalAddrs func() ([]netip.Addr, error)
 	Dial       func(ctx context.Context, network, addr string) (net.Conn, error)
-	Port       int
+	// OnDeviceChange is called, outside any lock, when the set of addresses the
+	// device listener is bound on has changed.
+	OnDeviceChange func()
+	Port           int
+	// DevicePort is the port of the listener for enrolled devices; zero switches
+	// it off. It is also off when Serve has no "t3" target to proxy to.
+	DevicePort int
 	CacheTTL   time.Duration
 }
 
 // Manager runs the direct listeners, dialer and live-session tracking.
 type Manager struct {
-	ctx       context.Context //nolint:containedctx // root context of the listeners
-	log       *slog.Logger
-	cancel    context.CancelFunc
-	listeners map[netip.Addr]net.Listener
-	sessions  map[*session]struct{}
-	pending   map[net.Conn]struct{}
-	failures  map[string]time.Time
+	ctx         context.Context //nolint:containedctx // root context of the listeners
+	devSrv      *http.Server
+	devSlots    chan struct{}
+	sessions    map[*session]struct{}
+	pending     map[net.Conn]struct{}
+	failures    map[string]time.Time
+	devSessions map[*deviceSession]struct{}
+	devQueue    *connQueue
+	log         *slog.Logger
+	cancel      context.CancelFunc
 	// The last logged listen decision; guarded by reconcileMu.
 	lastDecision string
+	agentLn      listenSet
+	deviceLn     listenSet
 	opts         Options
 	wg           sync.WaitGroup
 	reconcileMu  sync.Mutex
@@ -131,7 +146,19 @@ type Manager struct {
 	closed       bool
 }
 
+// listenSet is the listeners one kind of access is accepted on, by address. Both
+// kinds bind the same addresses, under the same gate, on their own port. A zero
+// port means the kind is off.
+type listenSet struct {
+	byAddr map[netip.Addr]net.Listener
+	serve  func(net.Conn)
+	name   string
+	port   int
+}
+
 // New returns a started Manager. Call Reconcile to bind listeners.
+//
+//nolint:gocritic // Options is passed by value in the public API
 func New(opts Options) *Manager {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
@@ -159,15 +186,21 @@ func New(opts Options) *Manager {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	mgr := &Manager{
-		opts:      opts,
-		log:       opts.Log.With(slog.String("component", "direct")),
-		ctx:       ctx,
-		cancel:    cancel,
-		listeners: make(map[netip.Addr]net.Listener),
-		sessions:  make(map[*session]struct{}),
-		pending:   make(map[net.Conn]struct{}),
-		failures:  make(map[string]time.Time),
+		opts:        opts,
+		log:         opts.Log.With(slog.String("component", "direct")),
+		ctx:         ctx,
+		cancel:      cancel,
+		sessions:    make(map[*session]struct{}),
+		pending:     make(map[net.Conn]struct{}),
+		failures:    make(map[string]time.Time),
+		devSessions: make(map[*deviceSession]struct{}),
 	}
+	mgr.agentLn = listenSet{
+		name: "Direct", port: opts.Port, serve: mgr.serve,
+		byAddr: make(map[netip.Addr]net.Listener),
+	}
+
+	mgr.startDevices()
 
 	mgr.wg.Add(1)
 
@@ -240,12 +273,26 @@ func (mgr *Manager) Close() error {
 	}
 
 	mgr.closed = true
-	lns := mgr.listeners
-	mgr.listeners = make(map[netip.Addr]net.Listener)
+
+	var lns []net.Listener
+
+	for _, set := range []*listenSet{&mgr.agentLn, &mgr.deviceLn} {
+		for _, l := range set.byAddr {
+			lns = append(lns, l)
+		}
+
+		set.byAddr = make(map[netip.Addr]net.Listener)
+	}
+
 	sess := make([]*session, 0, len(mgr.sessions))
 
 	for s := range mgr.sessions {
 		sess = append(sess, s)
+	}
+
+	devs := make([]*deviceSession, 0, len(mgr.devSessions))
+	for s := range mgr.devSessions {
+		devs = append(devs, s)
 	}
 
 	pend := make([]net.Conn, 0, len(mgr.pending))
@@ -264,6 +311,12 @@ func (mgr *Manager) Close() error {
 	for _, s := range sess {
 		_ = s.close()
 	}
+
+	for _, s := range devs {
+		s.abort()
+	}
+
+	mgr.stopDevices()
 
 	for _, c := range pend {
 		_ = c.Close()
@@ -298,7 +351,11 @@ func (mgr *Manager) Reconcile(ctx context.Context) {
 		want = listenAddrs(local, view.HomePrefixes)
 	}
 
-	mgr.syncListeners(ctx, want, view.Self)
+	mgr.syncListeners(ctx, &mgr.agentLn, want, view.Self)
+
+	if mgr.syncListeners(ctx, &mgr.deviceLn, want, view.Self) && mgr.opts.OnDeviceChange != nil {
+		mgr.opts.OnDeviceChange()
+	}
 
 	if ok && err == nil && len(want) == 0 {
 		ok, reason = false, "no local address in the home prefixes"
@@ -319,6 +376,13 @@ func (mgr *Manager) Reconcile(ctx context.Context) {
 
 			return ""
 		})
+		mgr.closeDeviceWhere(func(s *deviceSession) string {
+			if _, there := present[s.local]; !there {
+				return "local address gone"
+			}
+
+			return ""
+		})
 	}
 
 	mgr.recheck(true)
@@ -329,8 +393,8 @@ func (mgr *Manager) Listening() []netip.AddrPort {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
-	out := make([]netip.AddrPort, 0, len(mgr.listeners))
-	for _, l := range mgr.listeners {
+	out := make([]netip.AddrPort, 0, len(mgr.agentLn.byAddr))
+	for _, l := range mgr.agentLn.byAddr {
 		if ta, ok := l.Addr().(*net.TCPAddr); ok {
 			out = append(out, ta.AddrPort())
 		}
@@ -460,49 +524,65 @@ func (mgr *Manager) logDecision(ctx context.Context, ok bool, reason string) {
 	mgr.log.InfoContext(ctx, "Direct inactive", slog.String("reason", reason))
 }
 
-func (mgr *Manager) syncListeners(ctx context.Context, want map[netip.Addr]struct{}, self string) {
+// syncListeners binds and closes listeners of set so they match want, and reports
+// whether the set of bound addresses changed. A set whose port is zero binds none.
+func (mgr *Manager) syncListeners(
+	ctx context.Context,
+	set *listenSet,
+	want map[netip.Addr]struct{},
+	self string,
+) bool {
+	if set.port == 0 {
+		return false
+	}
+
 	mgr.mu.Lock()
 	if mgr.closed {
 		mgr.mu.Unlock()
 
-		return
+		return false
 	}
 
 	var stale []net.Listener
 
-	for a, l := range mgr.listeners {
+	for a, l := range set.byAddr {
 		if _, ok := want[a]; !ok {
 			stale = append(stale, l)
 
-			delete(mgr.listeners, a)
+			delete(set.byAddr, a)
 		}
 	}
 
 	var add []netip.Addr
 
 	for a := range want {
-		if _, ok := mgr.listeners[a]; !ok {
+		if _, ok := set.byAddr[a]; !ok {
 			add = append(add, a)
 		}
 	}
 
 	mgr.mu.Unlock()
 
-	for _, l := range stale {
-		mgr.log.InfoContext(ctx, "Direct listener closed", slog.String("addr", l.Addr().String()))
+	for _, lis := range stale {
+		mgr.log.InfoContext(
+			ctx,
+			set.name+" listener closed",
+			slog.String("addr", lis.Addr().String()),
+		)
 
-		_ = l.Close()
+		_ = lis.Close()
 	}
 
+	changed := len(stale) > 0
 	lc := net.ListenConfig{KeepAliveConfig: keepAlive()}
 
 	for _, addr := range add {
-		port := uint16(mgr.opts.Port) //nolint:gosec // port validated by config
+		port := uint16(set.port) //nolint:gosec // port validated by config
 		ap := netip.AddrPortFrom(addr, port)
 
 		ln, err := lc.Listen(ctx, "tcp", ap.String())
 		if err != nil {
-			mgr.log.WarnContext(ctx, "Direct listen failed", slog.String("addr", ap.String()),
+			mgr.log.WarnContext(ctx, set.name+" listen failed", slog.String("addr", ap.String()),
 				slog.Any("err", err),
 			)
 
@@ -515,19 +595,24 @@ func (mgr *Manager) syncListeners(ctx context.Context, want map[netip.Addr]struc
 
 			_ = ln.Close()
 
-			return
+			return changed
 		}
 
-		mgr.listeners[addr] = ln
+		set.byAddr[addr] = ln
+
 		mgr.wg.Add(1)
 		mgr.mu.Unlock()
 
-		mgr.log.InfoContext(ctx, "Direct listener open", slog.String("addr", ap.String()),
+		changed = true
+
+		mgr.log.InfoContext(ctx, set.name+" listener open", slog.String("addr", ap.String()),
 			slog.String("self", self),
 		)
 
-		go mgr.acceptLoop(ln) //nolint:contextcheck // listeners run on the manager ctx
+		go mgr.acceptLoop(ln, set.serve)
 	}
+
+	return changed
 }
 
 func (mgr *Manager) register(sess *session) bool {
@@ -578,6 +663,9 @@ func (mgr *Manager) recheck(checkGateway bool) {
 		}
 
 		return ""
+	})
+	mgr.closeDeviceWhere(func(s *deviceSession) string {
+		return mgr.deviceVerdict(s, view, now, ok, reason)
 	})
 }
 

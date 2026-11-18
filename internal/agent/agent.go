@@ -262,6 +262,9 @@ func (agent *Agent) Run(ctx context.Context) error {
 			Now:        agent.now,
 			GatewayMAC: agent.gatewayMAC,
 			LocalAddrs: agent.localAddrs,
+
+			DevicePort:     agent.devicePort(),
+			OnDeviceChange: func() { signal(agent.statusNudge) },
 		})
 
 		defer func() { _ = agent.direct.Close() }()
@@ -439,12 +442,22 @@ func (agent *Agent) view() direct.View {
 		Revocations:    agent.cache.Revocations,
 		Peers:          agent.cache.Peers.Peers,
 		DeviceLeaves:   agent.cache.DeviceLeaves,
+		ViewerDomain:   agent.cache.ViewerDomain,
 		SelfHome:       agent.cache.Home,
 		HubConnected:   agent.cur != nil,
 		LastHubContact: agent.cache.LastHubContact,
 		HomeGatewayMAC: agent.cache.HomeGatewayMAC,
 		HomePrefixes:   prefixes,
 	}
+}
+
+// devicePort is the port of the listener for enrolled devices, zero when it is off.
+func (agent *Agent) devicePort() int {
+	if !agent.cfg.Direct.Devices.Enabled {
+		return 0
+	}
+
+	return agent.cfg.Direct.Devices.Port
 }
 
 func (agent *Agent) identity() tls.Certificate {
