@@ -63,3 +63,31 @@ func TestIdentityFromURI(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckLeafIgnoresRules(t *testing.T) {
+	now := time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC)
+	revs := proto.Revocations{
+		DisabledIdentities:  []string{"z-tablet"},
+		BlockedFingerprints: []string{"aa"},
+	}
+	sess := Session{Identity: "z-phone", Fingerprint: "bb", NotAfter: now.Add(time.Hour)}
+
+	err := CheckLeaf(revs, sess, now)
+	if err != nil {
+		t.Fatalf("unlisted identity refused: %v", err)
+	}
+
+	for want, mod := range map[error]func(s *Session){
+		ErrDisabled: func(s *Session) { s.Identity = "z-tablet" },
+		ErrBlocked:  func(s *Session) { s.Fingerprint = "AA" },
+		ErrExpired:  func(s *Session) { s.NotAfter = now },
+	} {
+		s := sess
+		mod(&s)
+
+		err := CheckLeaf(revs, s, now)
+		if !errors.Is(err, want) {
+			t.Errorf("err = %v, want %v", err, want)
+		}
+	}
+}

@@ -96,10 +96,11 @@ type Session struct {
 	Machine     string
 }
 
-// Check returns nil when s is still allowed at now under rules and revs.
+// CheckLeaf returns nil when the identity is not disabled, the leaf is not
+// blocked and the certificate has not expired at now. It ignores the rules.
 //
 //nolint:gocritic // exported API takes Session by value
-func Check(rules proto.Rules, revs proto.Revocations, sess Session, now time.Time) error {
+func CheckLeaf(revs proto.Revocations, sess Session, now time.Time) error {
 	err := Revoked(revs, sess.Identity, sess.Fingerprint)
 	if err != nil {
 		return err
@@ -112,6 +113,18 @@ func Check(rules proto.Rules, revs proto.Revocations, sess Session, now time.Tim
 			sess.Identity,
 			sess.NotAfter.Format(time.RFC3339),
 		)
+	}
+
+	return nil
+}
+
+// Check returns nil when s is still allowed at now under rules and revs.
+//
+//nolint:gocritic // exported API takes Session by value
+func Check(rules proto.Rules, revs proto.Revocations, sess Session, now time.Time) error {
+	err := CheckLeaf(revs, sess, now)
+	if err != nil {
+		return err
 	}
 
 	if !Allowed(rules, sess.Identity, sess.Svc, sess.Machine) {
