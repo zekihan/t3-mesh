@@ -11,17 +11,30 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/policy"
+	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
 // apiSvc is the service whose policy entry decides which machines a caller may
 // see: a machine is listed only when its mesh-t3-<machine> entry lists the caller.
 const apiSvc = "t3"
 
+// apiDirect is where an enrolled device may reach a machine directly on the LAN:
+// the address is an IP literal (IPv6 without brackets or zone) and the port that of
+// the agent's listener for enrolled devices.
+type apiDirect struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+}
+
 type apiMachine struct {
-	LastSeen  *string `json:"lastSeen"`
-	Name      string  `json:"name"`
-	ViewerURL string  `json:"viewerUrl"`
-	Online    bool    `json:"online"`
+	LastSeen *string `json:"lastSeen"`
+	// Direct is null unless the hub marks the machine home and its agent reports
+	// the listener for enrolled devices bound.
+	Direct        *apiDirect `json:"direct"`
+	Name          string     `json:"name"`
+	ViewerURL     string     `json:"viewerUrl"`
+	AgentIdentity string     `json:"agentIdentity"`
+	Online        bool       `json:"online"`
 }
 
 type apiMachines struct {
@@ -164,16 +177,74 @@ func visibleMachines(snap *hubconfig.Snapshot, caller string) []string {
 // the current time while online and the last disconnect otherwise.
 func apiMachineOf(snap *hubconfig.Snapshot, name string, st *machineStatus) apiMachine {
 	entry := apiMachine{
-		Name:      name,
-		Online:    st.Connected,
-		ViewerURL: "https://" + policy.Target(apiSvc, name) + "." + snap.ViewerDomain,
+		Name:          name,
+		Online:        st.Connected,
+		ViewerURL:     "https://" + policy.Target(apiSvc, name) + "." + snap.ViewerDomain,
+		AgentIdentity: st.Identity,
 	}
 
 	if st.LastSeen != nil {
 		entry.LastSeen = formatTime(st.LastSeen)
 	}
 
+	if st.Connected && st.Path == pathLAN {
+		entry.Direct = directRoute(snap, st.DeviceListener, st.source)
+	}
+
 	return entry
+}
+
+// directRoute chooses the address an enrolled device should dial for a machine that
+// is home and reports its device listener bound, or nil when there is none. Only
+// addresses the home gate considers home qualify (inside homeCIDRs, so a wrong or
+// hostile report cannot point a phone outside the LAN), IPv4 is preferred to IPv6
+// (the viewer path stays reachable on either, but a literal IPv4 needs no scope
+// and is what the LAN VIP and Technitium records lead with), and within a family the
+// address the tunnel arrived from wins, then the lowest.
+func directRoute(
+	snap *hubconfig.Snapshot,
+	listener *proto.DeviceListener,
+	source netip.Addr,
+) *apiDirect {
+	if listener == nil {
+		return nil
+	}
+
+	var v4, v6 []netip.Addr
+
+	for _, text := range listener.Addrs {
+		addr, err := netip.ParseAddr(text)
+		if err != nil {
+			continue
+		}
+
+		addr = addr.Unmap().WithZone("")
+		if !snap.IsHome(addr) || addr.IsUnspecified() || addr.IsMulticast() ||
+			addr.IsLinkLocalUnicast() {
+			continue
+		}
+
+		if addr.Is4() {
+			v4 = append(v4, addr)
+		} else {
+			v6 = append(v6, addr)
+		}
+	}
+
+	for _, family := range [][]netip.Addr{v4, v6} {
+		if len(family) == 0 {
+			continue
+		}
+
+		pick := slices.MinFunc(family, netip.Addr.Compare)
+		if slices.Contains(family, source.Unmap()) {
+			pick = source.Unmap()
+		}
+
+		return &apiDirect{Address: pick.String(), Port: listener.Port}
+	}
+
+	return nil
 }
 
 func formatTime(t *time.Time) *string {

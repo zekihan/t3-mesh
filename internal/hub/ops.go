@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -60,6 +61,11 @@ type ackedStatus struct {
 }
 
 type machineStatus struct {
+	// DeviceListener is where the live session's agent says it accepts enrolled
+	// devices; nil while it does not.
+	DeviceListener *proto.DeviceListener `json:"deviceListener,omitempty"`
+	// The live session's tunnel source address, for the API.
+	source         netip.Addr
 	CertNotAfter   *time.Time           `json:"certNotAfter,omitempty"`
 	Alerts         map[string]bool      `json:"alerts"`
 	ConnectedSince *time.Time           `json:"connectedSince,omitempty"`
@@ -74,6 +80,7 @@ type machineStatus struct {
 	FailedUpdates  []proto.FailedUpdate `json:"failedUpdates"`
 	LinkStreams    int64                `json:"linkStreams"`
 	DirectSessions int                  `json:"directSessions"`
+	DeviceSessions int                  `json:"deviceSessions"`
 	OpenStreams    int64                `json:"openStreams"`
 	Sessions       int                  `json:"sessions"`
 	Connected      bool                 `json:"connected"`
@@ -179,6 +186,8 @@ func (server *Server) machineStatusLocked(
 		out.Path = pathName(live.home)
 		out.ConnectedSince = ptrTime(live.accepted)
 		out.LastSeen = ptrTime(now)
+		out.DeviceListener = live.device
+		out.source = live.source
 	} else {
 		out.LastSeen = ptrTime(ms.lastSeen)
 	}
@@ -192,6 +201,7 @@ func (server *Server) machineStatusLocked(
 
 	if st := ms.status; st != nil {
 		out.DirectSessions = st.DirectSessions
+		out.DeviceSessions = st.DeviceSessions
 		out.Acked = ackedStatus{
 			Release: st.ReleaseRevision, Rules: st.RulesRevision,
 			Revocations: st.RevocationRevision, TrustBundle: st.TrustBundleRevision,

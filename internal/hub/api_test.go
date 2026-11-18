@@ -772,3 +772,32 @@ func TestAPITrustAdmission(t *testing.T) {
 		t.Errorf("POST: status %d, Allow %q", resp.status, resp.header.Get("Allow"))
 	}
 }
+
+// jsonHasNull reports whether the named machine's object holds key with an
+// explicit null, not an absent key.
+func jsonHasNull(t *testing.T, body, machine, key string) bool {
+	t.Helper()
+
+	var doc struct {
+		Machines []map[string]json.RawMessage `json:"machines"`
+	}
+
+	err := json.Unmarshal([]byte(body), &doc)
+	if err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+
+	for _, m := range doc.Machines {
+		if string(m["name"]) != `"`+machine+`"` {
+			continue
+		}
+
+		raw, ok := m[key]
+
+		return ok && string(raw) == "null"
+	}
+
+	t.Fatalf("no machine %q in %s", machine, body)
+
+	return false
+}

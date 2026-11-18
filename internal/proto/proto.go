@@ -220,6 +220,14 @@ type FailedUpdate struct {
 	Final    bool   `json:"final"`
 }
 
+// DeviceListener says where an agent's listener for enrolled devices accepts
+// connections: its port and the addresses it is bound on, which lie inside the
+// home prefixes.
+type DeviceListener struct {
+	Addrs []string `json:"addrs"`
+	Port  int      `json:"port"`
+}
+
 // Status is the agent's periodic report.
 type Status struct { //nolint:govet // JSON field order is the wire format
 	Version             string   `json:"version"`
@@ -230,9 +238,15 @@ type Status struct { //nolint:govet // JSON field order is the wire format
 	RevocationRevision  string   `json:"revocationRevision"`
 	TrustBundleRevision string   `json:"trustBundleRevision"`
 	// DeviceLeavesRevision is empty from a release that does not hold device leaves.
-	DeviceLeavesRevision string         `json:"deviceLeavesRevision,omitempty"`
-	FailedUpdates        []FailedUpdate `json:"failedUpdates,omitempty"`
-	CertNotAfter         string         `json:"certNotAfter,omitempty"`
+	DeviceLeavesRevision string `json:"deviceLeavesRevision,omitempty"`
+	// DeviceListener is nil while the listener for enrolled devices is not bound
+	// (the machine is away, the gate is closed, or it is switched off), and from a
+	// release that has none. The agent sends a Status whenever it changes.
+	DeviceListener *DeviceListener `json:"deviceListener,omitempty"`
+	FailedUpdates  []FailedUpdate  `json:"failedUpdates,omitempty"`
+	CertNotAfter   string          `json:"certNotAfter,omitempty"`
+	// DeviceSessions is the number of open connections from enrolled devices.
+	DeviceSessions int `json:"deviceSessions,omitempty"`
 }
 
 // Enroll requests a first certificate with a single-use token.
