@@ -601,7 +601,7 @@ func (harness *env) get(
 	setViewerHeaders(req.Header, viewer, fp, notAfter)
 	req.Header.Set("Origin", "https://"+host)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oneShotClient.Do(req)
 	if err != nil {
 		harness.t.Fatal(err)
 	}
@@ -632,6 +632,11 @@ func setViewerHeaders(header http.Header, viewer, fp string, notAfter time.Time)
 }
 
 var farFuture = time.Now().Add(24 * time.Hour)
+
+// oneShotClient never reuses a connection. A stream the hub cuts on revocation
+// can leave its connection with an expired read deadline, so a request that
+// picked that connection from the shared pool would fail for no reason of its own.
+var oneShotClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 func TestViewerProxy(t *testing.T) {
 	e := newEnv(t)
