@@ -724,6 +724,9 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
   renewed or re-enrolled device's old leaf is refused as soon as the update arrives.
   The cache is valid for the same `cacheTTL` as the rules. The direct listener for
   devices, which uses this, is a later milestone; today the agent only stores the data.
+  The hub learns each device's newest leaf from its own issuances and, once after it
+  starts, from the issuer; when the issuer cannot be asked it sends no list (so an agent
+  never loses a leaf to an outage) and asks again after 30 s.
 - **Hub unreachable:** the agent cannot confirm home, so it uses the gateway check
   below and, if it passes, tries the cached LAN addresses. Identity checks make a
   wrong guess safe, and the dial fails fast. Cached rules allow direct traffic for at most 1 week after
@@ -906,7 +909,11 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   fingerprint, update, rollback, reject, rejected peer) to stdout, so they reach
   VictoriaLogs. It logs the same for devices: each token minted with its kind, each
   enrollment and renewal with the enrolled URI and the old and new fingerprints, and each
-  refusal on a viewer host or the API with its reason.
+  refusal on a viewer host or the API with its reason. Every WebSocket upgrade, and every
+  stream an enrolled device opens, is logged at info as `Viewer stream` with the identity
+  URI (`uri`), the leaf fingerprint, the target and whether it is an upgrade, so a device's
+  chat socket and its streams can be told apart in the log. The many plain requests of
+  other viewers stay at debug.
 - Gatus canaries: `canary-unauthorized` must be refused on every viewer host, and a
   TLS check on `mesh.noqer.com` confirms the hub serves its certificate. A Gatus
   probe cannot speak the tunnel protocol, so rejection of unauthenticated or
