@@ -57,6 +57,15 @@ func (conn *hubConn) lastStatus() (proto.Status, bool) {
 	return conn.statuses[len(conn.statuses)-1], true
 }
 
+func (conn *hubConn) sendControl(t *testing.T, msg proto.Message) {
+	t.Helper()
+
+	err := conn.ctrl.Send(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // openStream opens a hub -> agent data stream with the given header.
 func (conn *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
 	t.Helper()
@@ -978,6 +987,84 @@ func TestUpdateApplied(t *testing.T) {
 
 		return ok && st.RulesRevision == "rules2"
 	})
+}
+
+func TestRetiringSessionCannotOverwriteHubState(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
+	lookingUp := make(chan struct{})
+	lookupDone := make(chan struct{})
+
+	finishLookup := sync.OnceFunc(func() { close(lookupDone) })
+	defer finishLookup()
+
+	rig.agent.gatewayMAC = func() (string, error) {
+		close(lookingUp)
+		<-lookupDone
+
+		return "aa:bb:cc:dd:ee:ff", nil
+	}
+	rig.start()
+	first := rig.hub.waitConn(t, 1)
+
+	waitFor(t, "first session adopted", func() bool { return rig.agent.current() != nil })
+
+	old := rig.agent.current()
+
+	// Keep the first tunnel draining after the replacement is adopted.
+	stream, err := rig.agent.dialTunnel(t.Context(), "z-arch", "t3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	home := true
+	first.sendControl(t, proto.Update{
+		Home:        &home,
+		Revocations: &proto.Revocations{Revision: "old-update"},
+	})
+
+	select {
+	case <-lookingUp:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old session did not start applying its update")
+	}
+
+	rig.hub.mu.Lock()
+	rig.hub.ack.Revocations.Revision = "new-revocations"
+	rig.hub.ack.Release.Revision = "new-release"
+	rig.hub.mu.Unlock()
+
+	if !rig.agent.replaceSession(t.Context(), "test handoff") {
+		t.Fatal("could not replace the tunnel")
+	}
+
+	first.sendControl(t, proto.Release{Version: "v1.0.0", Revision: "old-release"})
+	// The renewal channel confirms the old control loop processed both messages.
+	first.sendControl(t, proto.Renewed{})
+
+	finishLookup()
+
+	select {
+	case <-old.renewCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old session did not drain its control messages")
+	}
+
+	status := rig.agent.buildStatus()
+	if status.RevocationRevision != "new-revocations" || status.ReleaseRevision != "new-release" {
+		t.Errorf("status revisions = %q, %q, want new-revocations, new-release",
+			status.RevocationRevision, status.ReleaseRevision)
+	}
+
+	cached, err := state.Load(rig.cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cached.Home || cached.Revocations.Revision != "new-revocations" {
+		t.Errorf("persisted home = %t, revocations = %q, want false, new-revocations",
+			cached.Home, cached.Revocations.Revision)
+	}
 }
 
 func TestUpdateDeviceLeaves(t *testing.T) {

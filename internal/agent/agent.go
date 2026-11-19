@@ -489,6 +489,10 @@ func (agent *Agent) warn(msg string) {
 }
 
 func (agent *Agent) saveCache() {
+	// Take the snapshot in write order so a delayed save cannot restore older state.
+	agent.saveMu.Lock()
+	defer agent.saveMu.Unlock()
+
 	agent.mu.Lock()
 	if agent.cache == nil {
 		agent.mu.Unlock()
@@ -499,9 +503,6 @@ func (agent *Agent) saveCache() {
 	cache := *agent.cache
 	agent.lastSave = agent.now()
 	agent.mu.Unlock()
-
-	agent.saveMu.Lock()
-	defer agent.saveMu.Unlock()
 
 	err := state.Save(agent.cfg.StateDir, &cache)
 	if err != nil {
