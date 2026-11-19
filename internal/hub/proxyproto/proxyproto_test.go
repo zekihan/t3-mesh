@@ -8,7 +8,9 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -628,6 +630,62 @@ func TestHeaderTimeoutClosesConnection(t *testing.T) {
 	}
 
 	assertClosedByServer(t, client)
+}
+
+func TestHeaderTimeoutSurvivesDeadlineChanges(t *testing.T) {
+	tests := []struct {
+		update func(*Conn) error
+		name   string
+	}{
+		{
+			name:   "clear read deadline",
+			update: func(conn *Conn) error { return conn.SetReadDeadline(time.Time{}) },
+		},
+		{
+			name: "extend both deadlines",
+			update: func(conn *Conn) error {
+				return conn.SetDeadline(time.Now().Add(time.Minute))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const timeout = time.Second
+
+				server, client := net.Pipe()
+				defer server.Close()
+				defer client.Close()
+
+				conn := &Conn{inner: server, timeout: timeout}
+				parsed := make(chan error, 1)
+
+				go func() {
+					_, err := conn.Source()
+					parsed <- err
+				}()
+
+				synctest.Wait() // Source has set the deadline and is waiting for the header.
+
+				err := tt.update(conn)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				<-time.After(timeout + time.Nanosecond)
+				synctest.Wait()
+
+				select {
+				case err := <-parsed:
+					if !errors.Is(err, os.ErrDeadlineExceeded) {
+						t.Fatalf("Source error = %v, want deadline exceeded", err)
+					}
+				default:
+					t.Fatal("Source still blocked after the header timeout")
+				}
+			})
+		})
+	}
 }
 
 func TestListenDefaultTimeout(t *testing.T) {

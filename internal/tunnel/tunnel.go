@@ -56,13 +56,13 @@ type Control struct {
 	err      error
 	msgs     chan proto.Message
 	done     chan struct{}
+	sending  chan struct{}
 	waiters  map[uint64]chan time.Duration
 	now      func() time.Time
 	limit    int
 	seq      atomic.Uint64
 	lastPong atomic.Int64
 	errOnce  sync.Once
-	mu       sync.Mutex
 	waitMu   sync.Mutex
 }
 
@@ -73,6 +73,7 @@ func NewControl(conn net.Conn) *Control {
 		limit:   proto.MaxMessageSize,
 		msgs:    make(chan proto.Message, messageBuffer),
 		done:    make(chan struct{}),
+		sending: make(chan struct{}, 1),
 		waiters: make(map[uint64]chan time.Duration),
 		now:     time.Now,
 	}
@@ -105,28 +106,11 @@ func (ctl *Control) Err() error {
 
 // Send writes one message. Safe for concurrent use.
 func (ctl *Control) Send(msg proto.Message) error {
-	select {
-	case <-ctl.done:
+	if !ctl.acquireSend(nil) {
 		return ErrClosed
-	default:
 	}
 
-	ctl.mu.Lock()
-	defer ctl.mu.Unlock()
-
-	err := ctl.conn.SetWriteDeadline(ctl.now().Add(PingInterval))
-	if err != nil {
-		return fmt.Errorf("tunnel: set deadline: %w", err)
-	}
-
-	err = proto.WriteMessage(ctl.conn, msg)
-	if err != nil {
-		ctl.fail(err)
-
-		return fmt.Errorf("tunnel: write message: %w", err)
-	}
-
-	return nil
+	return ctl.write(msg)
 }
 
 // Close closes the control stream.
@@ -137,7 +121,16 @@ func (ctl *Control) Close() error {
 }
 
 // PingNow sends a ping and waits for its Pong, returning the round-trip time.
+// The context bounds the wait for both the send and the reply.
 func (ctl *Control) PingNow(ctx context.Context) (time.Duration, error) {
+	if !ctl.acquireSend(ctx.Done()) {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("tunnel: ping: %w", ctx.Err())
+		}
+
+		return 0, ErrClosed
+	}
+
 	seq := ctl.seq.Add(1)
 	ch := make(chan time.Duration, 1)
 
@@ -151,14 +144,27 @@ func (ctl *Control) PingNow(ctx context.Context) (time.Duration, error) {
 		ctl.waitMu.Unlock()
 	}()
 
-	err := ctl.Send(proto.Ping{Seq: seq, SentUnixNano: ctl.now().UnixNano()})
-	if err != nil {
-		return 0, err
-	}
+	ping := proto.Ping{Seq: seq, SentUnixNano: ctl.now().UnixNano()}
+	sendErr := make(chan error, 1)
+	// A yamux stream deadline cannot interrupt every kind of transport write.
+	go func() {
+		if ctx.Err() != nil {
+			<-ctl.sending
+
+			return
+		}
+
+		err := ctl.write(ping)
+		if err != nil {
+			sendErr <- err
+		}
+	}()
 
 	select {
 	case rtt := <-ch:
 		return rtt, nil
+	case err := <-sendErr:
+		return 0, err
 	case <-ctl.done:
 		return 0, ErrClosed
 	case <-ctx.Done():
@@ -211,6 +217,42 @@ func (ctl *Control) RunLiveness(ctx context.Context, interval time.Duration, max
 // LastPong returns when the last Pong arrived.
 func (ctl *Control) LastPong() time.Time {
 	return time.Unix(0, ctl.lastPong.Load())
+}
+
+func (ctl *Control) acquireSend(canceled <-chan struct{}) bool {
+	select {
+	case <-canceled:
+		return false
+	case <-ctl.done:
+		return false
+	case ctl.sending <- struct{}{}:
+		return true
+	}
+}
+
+// write releases the send slot after the transport returns, even if the caller stops waiting.
+func (ctl *Control) write(msg proto.Message) error {
+	defer func() { <-ctl.sending }()
+
+	select {
+	case <-ctl.done:
+		return ErrClosed
+	default:
+	}
+
+	err := ctl.conn.SetWriteDeadline(ctl.now().Add(PingInterval))
+	if err != nil {
+		return fmt.Errorf("tunnel: set deadline: %w", err)
+	}
+
+	err = proto.WriteMessage(ctl.conn, msg)
+	if err != nil {
+		ctl.fail(err)
+
+		return fmt.Errorf("tunnel: write message: %w", err)
+	}
+
+	return nil
 }
 
 func (ctl *Control) read() {
