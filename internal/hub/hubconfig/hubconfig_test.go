@@ -473,6 +473,32 @@ func TestValidation(t *testing.T) {
 	}
 }
 
+func TestPolicyRejectsAmbiguousEntry(t *testing.T) {
+	const cfgYAML = `
+machines:
+  mac:   {identity: agent-mac,   services: {t3-z: {kind: http}}}
+  z-mac: {identity: agent-z-mac, services: {t3: {kind: http}}}
+viewerDomain: mesh.test
+release: {version: v0.3.0}
+api: {identities: [z-phone]}
+`
+
+	_, err := parseConfig([]byte(cfgYAML))
+	if err != nil {
+		t.Fatalf("machines without an ambiguous policy entry: %v", err)
+	}
+
+	_, err = parseConfig([]byte(cfgYAML + `
+policy:
+  entries:
+    mesh-t3-z-mac: {identities: [z-phone]}
+`))
+	if !errors.Is(err, ErrInvalid) ||
+		!strings.Contains(err.Error(), "policy entry \"mesh-t3-z-mac\" is ambiguous") {
+		t.Fatalf("want ambiguous policy entry error, got %v", err)
+	}
+}
+
 func TestTrustAndCertErrors(t *testing.T) {
 	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	write(t, fix.p.TrustDir, TrustFile, "not pem")

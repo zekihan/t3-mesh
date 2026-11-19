@@ -476,21 +476,32 @@ func (cfg *config) parseAPI(raw *rawConfig) error {
 
 func (cfg *config) parsePolicy(raw *rawConfig) error {
 	// Entry names are "mesh-<svc>-<machine>"; both parts may contain dashes, so
-	// match against the configured pairs instead of splitting.
-	known := map[string]string{}
+	// collect all configured pairs that could match each name.
+	known := map[string][]string{}
 
 	for machine, m := range cfg.machines {
 		for svc := range m.Services {
-			known["mesh-"+svc+"-"+machine] = policy.Target(svc, machine)
+			name := "mesh-" + svc + "-" + machine
+			known[name] = append(known[name], policy.Target(svc, machine))
 		}
 	}
 
 	allow := map[string][]string{}
 
 	for name, entry := range raw.Policy.Entries {
-		target, ok := known[name]
-		if !ok {
+		targets := known[name]
+		if len(targets) == 0 {
 			return invalid("policy entry %q matches no configured mesh-<svc>-<machine>", name)
+		}
+
+		if len(targets) > 1 {
+			slices.Sort(targets)
+
+			return invalid(
+				"policy entry %q is ambiguous: matches %s",
+				name,
+				strings.Join(targets, ", "),
+			)
 		}
 
 		if len(entry.Identities) == 0 {
@@ -503,7 +514,7 @@ func (cfg *config) parsePolicy(raw *rawConfig) error {
 			}
 		}
 
-		allow[target] = sortedUnique(entry.Identities)
+		allow[targets[0]] = sortedUnique(entry.Identities)
 	}
 
 	cfg.rules = proto.Rules{Allow: allow, Revision: jsonRevision(allow)}
