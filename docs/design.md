@@ -564,7 +564,7 @@ revoke it on devices. A CA rotation reaches an app through the revision.
 `POST /api/v1/renew` renews an enrolled device's certificate with a new key. The
 request is `Content-Type: application/x-pem-file` (parameters such as `charset` are
 allowed) with a PEM CSR as the body, at most 16 KiB. It goes through the admission
-above and then these checks, so the caller must be:
+above and the hub allows 10 seconds to read an admitted renewal's body. The caller must be:
 
 - admitted as for any `/api/v1` endpoint: the three `X-Mtls-Mesh-*` headers, identity
   not disabled, leaf not blocked and not expired, and listed under `api.identities`;
@@ -583,9 +583,10 @@ key is new; the app generates a new one. The response is `200` with:
 ```
 
 Status codes: `400` for an unusable CSR, `403` for a refused caller or a CSR for another
-identity, `405` (`Allow: POST`) for another method, `413` over 16 KiB, `415` for another
-content type, `429` with `Retry-After` when renewals are limited, `502` when issuance
-failed (without detail), `503` when the newest leaf cannot be checked. Renewals are
+identity, `405` (`Allow: POST`) for another method, `408` when the body read times out,
+`413` over 16 KiB, `415` for another content type, `429` with `Retry-After` when
+renewals are limited, `502` when issuance fails (without detail), and `503` when the
+newest leaf cannot be checked. Renewals are
 limited to 5 attempts per 10 minutes per identity, counting every attempt that passed
 admission, and to one at a time. A renewal outlives a client that hangs up: the hub
 finishes the issuance and records the new leaf, so a reply the app never read leaves it

@@ -13,11 +13,14 @@ import (
 	"encoding/pem"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/hub/issuer/issuertest"
@@ -226,6 +229,36 @@ func TestRenewAcceptsCharsetParameter(t *testing.T) {
 	if resp.status != http.StatusOK {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
+}
+
+type renewDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+
+	deadline time.Time
+}
+
+func (rec *renewDeadlineRecorder) SetReadDeadline(deadline time.Time) error {
+	rec.deadline = deadline
+
+	return nil
+}
+
+func TestRenewBodyReadTimeout(t *testing.T) {
+	harness, fp := renewEnv(t)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+apiHost+
+		"/api/v1/renew", iotest.ErrReader(os.ErrDeadlineExceeded))
+	req.Header.Set("Content-Type", pemType)
+	setViewerHeaders(req.Header, devPhone, fp, farFuture)
+
+	rec := &renewDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	harness.srv.ViewerHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestTimeout || rec.deadline.IsZero() {
+		t.Fatalf("status %d, read deadline %v: %s", rec.Code, rec.deadline, rec.Body)
+	}
+
+	noIssuance(t, harness, devPhone, fp)
 }
 
 // The KeyChain identities are API callers, and the renewal endpoint refuses them.

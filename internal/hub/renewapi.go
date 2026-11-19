@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ const (
 	renewContentType = "application/x-pem-file"
 	// The largest renewal request body.
 	renewMaxBody = 16 << 10
+	// Bound the time a device holds its renewal slot while sending the CSR.
+	renewBodyTimeout = 10 * time.Second
 
 	// Each identity may attempt renewalMax renewals per renewalWindow. Every
 	// attempt that passes admission counts, whether or not it succeeds, so a
@@ -132,18 +135,43 @@ func (server *Server) serveRenew(
 	}
 	defer end()
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, renewMaxBody))
-	if err != nil {
-		if _, tooBig := errors.AsType[*http.MaxBytesError](err); tooBig {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
-		} else {
-			http.Error(w, "unreadable request", http.StatusBadRequest)
-		}
+	body, ok := readRenewBody(w, r)
+	if ok {
+		server.renewDevice(w, r, snap, caller, body)
+	}
+}
 
-		return
+func readRenewBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	rc := http.NewResponseController(w)
+
+	err := rc.SetReadDeadline(time.Now().Add(renewBodyTimeout))
+	if err != nil {
+		http.Error(w, "could not set request deadline", http.StatusInternalServerError)
+
+		return nil, false
 	}
 
-	server.renewDevice(w, r, snap, caller, body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, renewMaxBody))
+	if err == nil {
+		// The body deadline ends before issuance or a subsequent request.
+		//nolint:errcheck // a closed connection has no deadline to clear
+		_ = rc.SetReadDeadline(time.Time{})
+
+		return body, true
+	}
+
+	_, tooBig := errors.AsType[*http.MaxBytesError](err)
+
+	switch {
+	case tooBig:
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		http.Error(w, "request body timed out", http.StatusRequestTimeout)
+	default:
+		http.Error(w, "unreadable request", http.StatusBadRequest)
+	}
+
+	return nil, false
 }
 
 // renewDevice validates the CSR, has it issued and answers with the new leaf.
