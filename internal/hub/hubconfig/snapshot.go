@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -277,6 +278,13 @@ func parseConfig(data []byte) (*config, error) {
 
 	err := dec.Decode(&raw)
 	if err != nil {
+		return nil, invalid("parse %s: %v", ConfigFile, err)
+	}
+
+	switch err = dec.Decode(&yaml.Node{}); {
+	case err == nil:
+		return nil, invalid("parse %s: expected a single YAML document", ConfigFile)
+	case !errors.Is(err, io.EOF):
 		return nil, invalid("parse %s: %v", ConfigFile, err)
 	}
 

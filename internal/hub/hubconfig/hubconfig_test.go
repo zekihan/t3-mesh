@@ -573,6 +573,33 @@ func TestReloadKeepsPreviousOnFailure(t *testing.T) {
 	}
 }
 
+func TestReloadRejectsMultipleYAMLDocuments(t *testing.T) {
+	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
+
+	watcher, err := NewWatcher(fix.p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := watcher.Current()
+
+	write(
+		t,
+		fix.p.ConfigDir,
+		ConfigFile,
+		goodConfig+"---\npolicy:\n  disabledIdentities: [z-phone]\n",
+	)
+	watcher.Reload(nil)
+
+	if !errors.Is(watcher.LastError(), ErrInvalid) {
+		t.Errorf("reload error = %v, want ErrInvalid", watcher.LastError())
+	}
+
+	if watcher.Current() != first {
+		t.Error("invalid reload replaced the active snapshot")
+	}
+}
+
 func TestStalePolicy(t *testing.T) {
 	fix := newFixture(t, goodConfig, time.Now().Add(time.Hour*24*90))
 	clock := time.Now()

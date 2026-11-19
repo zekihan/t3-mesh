@@ -67,6 +67,26 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+func TestParseSingleYAMLDocument(t *testing.T) {
+	_, err := Parse([]byte("---\n" + validDoc + "...\n# trailing comment\n"))
+	if err != nil {
+		t.Fatalf("Parse rejected a single document with markers and comments: %v", err)
+	}
+
+	for name, tail := range map[string]string{
+		"second config":    "---\nhub: other.example\n",
+		"empty document":   "---\n",
+		"malformed config": "---\nhub: [\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(validDoc + tail))
+			if err == nil {
+				t.Fatal("Parse accepted content after the first document")
+			}
+		})
+	}
+}
+
 func TestParseDefaults(t *testing.T) {
 	doc := `
 identity:
