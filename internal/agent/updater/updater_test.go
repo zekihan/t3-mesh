@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -66,6 +67,10 @@ func (f *fakeHealth) has(prefix string) bool {
 
 	return false
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 var _ HealthSink = (*launcher.Health)(nil)
 
@@ -473,6 +478,62 @@ func TestUpdateStagesAndRestarts(t *testing.T) {
 
 	if len(testEnv.health.get()) != 1 {
 		t.Fatal("installed twice")
+	}
+}
+
+func TestUpdateSkipsSupersededDownload(t *testing.T) {
+	testEnv := newEnv(t)
+	newRunning(t, testEnv)
+	opts := testEnv.opts("v1.0.0")
+	opts.Hooks.LastHelloAck = time.Now
+
+	updater, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := testEnv.dl.Client.Transport
+	testEnv.dl.Client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp, transportErr := transport.RoundTrip(req)
+		if transportErr != nil {
+			return nil, fmt.Errorf("release fixture: %w", transportErr)
+		}
+
+		if req.URL.Path == "/v1.2.0/agent-linux-amd64" {
+			updater.OnRelease(proto.Release{Version: "v1.1.0", Revision: "r2"})
+		}
+
+		return resp, nil
+	})
+
+	updater.OnRelease(proto.Release{Version: "v1.2.0", Revision: "r1"})
+	updater.check(t.Context())
+
+	cur, err := testEnv.layout.Current()
+	if err != nil || cur != "v1.0.0" {
+		t.Fatalf("current after superseded download = %q, %v, want v1.0.0", cur, err)
+	}
+
+	if got := testEnv.health.get(); len(got) != 0 {
+		t.Fatalf("health messages after superseded download = %v, want none", got)
+	}
+
+	staging := filepath.Join(testEnv.layout.Dir, ".staging-v1.2.0")
+
+	_, err = os.Stat(staging)
+	if !os.IsNotExist(err) {
+		t.Fatalf("staging file after superseded download: %v, want not exist", err)
+	}
+
+	updater.check(t.Context())
+
+	cur, err = testEnv.layout.Current()
+	if err != nil || cur != "v1.1.0" {
+		t.Fatalf("current after checking latest release = %q, %v, want v1.1.0", cur, err)
+	}
+
+	if got := testEnv.health.get(); len(got) != 1 || got[0] != "restart" {
+		t.Fatalf("health messages after checking latest release = %v, want a restart", got)
 	}
 }
 

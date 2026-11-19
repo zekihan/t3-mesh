@@ -554,7 +554,7 @@ func (updater *Updater) check(ctx context.Context) {
 		return
 	}
 
-	err = updater.install(ctx, rel.Version)
+	err = updater.install(ctx, *rel)
 	if err != nil {
 		updater.log.WarnContext(
 			ctx,
@@ -565,7 +565,8 @@ func (updater *Updater) check(ctx context.Context) {
 	}
 }
 
-func (updater *Updater) install(ctx context.Context, version string) error {
+func (updater *Updater) install(ctx context.Context, rel proto.Release) error {
+	version := rel.Version
 	updater.log.InfoContext(ctx, "Fetching manifest", slog.String("version", version))
 
 	manifest, err := updater.o.Downloader.Fetch(ctx, version)
@@ -593,20 +594,11 @@ func (updater *Updater) install(ctx context.Context, version string) error {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	updater.log.InfoContext(ctx, "Staging", slog.String("version", version))
-
-	err = updater.o.Layout.Stage(version, tmp)
-	if err != nil {
+	switched, err := updater.stageUpdate(ctx, rel, tmp)
+	if err != nil || !switched {
 		_ = os.Remove(tmp)
 
-		return fmt.Errorf("stage: %w", err)
-	}
-
-	updater.log.InfoContext(ctx, "Switching current", slog.String("version", version))
-
-	err = updater.o.Layout.SetCurrent(version)
-	if err != nil {
-		return fmt.Errorf("set current: %w", err)
+		return err
 	}
 
 	updater.log.InfoContext(ctx, "Requesting restart", slog.String("version", version))
@@ -626,4 +618,40 @@ func (updater *Updater) install(ctx context.Context, version string) error {
 	updater.mu.Unlock()
 
 	return nil
+}
+
+func (updater *Updater) stageUpdate(
+	ctx context.Context,
+	rel proto.Release,
+	tmp string,
+) (bool, error) {
+	updater.mu.Lock()
+	defer updater.mu.Unlock()
+
+	version := rel.Version
+	if *updater.rel != rel {
+		updater.log.InfoContext(
+			ctx,
+			"Discarding superseded update",
+			slog.String("version", version),
+		)
+
+		return false, nil
+	}
+
+	updater.log.InfoContext(ctx, "Staging", slog.String("version", version))
+
+	err := updater.o.Layout.Stage(version, tmp)
+	if err != nil {
+		return false, fmt.Errorf("stage: %w", err)
+	}
+
+	updater.log.InfoContext(ctx, "Switching current", slog.String("version", version))
+
+	err = updater.o.Layout.SetCurrent(version)
+	if err != nil {
+		return false, fmt.Errorf("set current: %w", err)
+	}
+
+	return true, nil
 }
