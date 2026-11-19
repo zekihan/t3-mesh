@@ -191,6 +191,33 @@ func TestHubForms(t *testing.T) {
 	}
 }
 
+func TestPackagedConfigWithIPv6Hub(t *testing.T) {
+	const host, addr = "2001:db8::1", "[2001:db8::1]:8443"
+
+	render := strings.NewReplacer("@NAME@", "agent-test", "@HUB@", addr)
+
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			path := filepath.Join("..", "..", "..", "packaging", platform, "agent.yaml.example")
+
+			template, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Parse([]byte(render.Replace(string(template))))
+			if err != nil {
+				t.Fatalf("Parse rendered installer config: %v", err)
+			}
+
+			if gotHost, gotAddr := cfg.HubHost(), cfg.HubAddr(); gotHost != host ||
+				gotAddr != addr {
+				t.Fatalf("hub = %q, %q, want %q, %q", gotHost, gotAddr, host, addr)
+			}
+		})
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	tests := []struct {
 		name string
