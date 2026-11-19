@@ -33,10 +33,9 @@ var ErrKeyMismatch = errors.New("pki: certificate does not match key")
 //
 // PromoteNext renames next-key.pem over key.pem and then next-cert.pem over
 // cert.pem. A crash between the two renames leaves a new key with the old
-// certificate; the pair is never loadable as mismatched. Load detects the
-// mismatch and, when next-cert.pem matches key.pem, finishes the promotion by
-// renaming it into place. A crash before the first rename leaves the old pair
-// intact with next-* still present.
+// certificate. When the current pair cannot be loaded, Load can finish the
+// promotion by renaming a next-cert.pem that matches key.pem into place. A crash
+// before the first rename leaves the old pair intact with next-* still present.
 type Store struct{ Dir string }
 
 // EnsureDir creates the directory with mode 0700 and narrows a wider mode.
@@ -117,13 +116,12 @@ func matches(cert *x509.Certificate, key *ecdsa.PrivateKey) bool {
 	return ok && pub.Equal(key.Public())
 }
 
-// Load returns the current identity. If key.pem and cert.pem do not match
-// because a promotion was interrupted, it completes the promotion when
-// next-cert.pem matches key.pem.
+// Load returns the current identity. If the current pair cannot be loaded, it
+// completes an interrupted promotion when next-cert.pem matches key.pem.
 func (store Store) Load() (tls.Certificate, *x509.Certificate, error) {
 	tc, leaf, err := store.loadPair(keyFile, certFile)
-	if !errors.Is(err, ErrKeyMismatch) {
-		return tc, leaf, err
+	if err == nil {
+		return tc, leaf, nil
 	}
 
 	_, _, nextErr := store.loadPair(keyFile, nextCertFile)

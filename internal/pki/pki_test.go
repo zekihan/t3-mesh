@@ -695,6 +695,48 @@ func TestPromoteCrashRecovery(t *testing.T) {
 	}
 }
 
+func TestRecoverPromotionWithDamagedCertificate(t *testing.T) {
+	store, ca, _ := saved(t)
+	certPath := filepath.Join(store.Dir, "cert.pem")
+
+	err := os.WriteFile(certPath, []byte("incomplete certificate"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := mustKey(t)
+	cert, chain := issue(t, ca, newKey, "agent-a")
+
+	err = store.SaveNext(newKey, cert, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = store.Load()
+	if err == nil {
+		t.Fatal("Load accepted the staged certificate before the key was promoted")
+	}
+
+	err = os.Rename(filepath.Join(store.Dir, "next-key.pem"), filepath.Join(store.Dir, "key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tc, _, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load after interrupted promotion: %v", err)
+	}
+
+	if !sameKey(tc.PrivateKey, newKey) {
+		t.Fatal("Load recovered the wrong key")
+	}
+
+	_, err = os.Stat(filepath.Join(store.Dir, "next-cert.pem"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("next-cert.pem after recovery: %v, want it moved to cert.pem", err)
+	}
+}
+
 func TestLoadMismatchWithoutNext(t *testing.T) {
 	store, _, _ := saved(t)
 
