@@ -85,6 +85,26 @@ func TestReadLineLeavesRest(t *testing.T) {
 	}
 }
 
+func TestReadLineRejectsTrailingData(t *testing.T) {
+	for _, suffix := range []string{`{}`, "garbage", "\u00a0"} {
+		var hdr StreamHeader
+
+		err := ReadLine(strings.NewReader(`{"svc":"t3"} `+suffix+"\n"), &hdr)
+		if err == nil {
+			t.Errorf("ReadLine accepted trailing data %q", suffix)
+		}
+	}
+}
+
+func TestReadLineAllowsTrailingJSONWhitespace(t *testing.T) {
+	var hdr StreamHeader
+
+	err := ReadLine(strings.NewReader("{\"svc\":\"t3\"} \t\r\n"), &hdr)
+	if err != nil || hdr.Svc != "t3" {
+		t.Fatalf("ReadLine got %+v, %v; want service t3", hdr, err)
+	}
+}
+
 // The app speaks the enrollment protocol from the documented JSON, so the exact
 // bytes of both messages are pinned here.
 func TestEnrollWireFormat(t *testing.T) {
