@@ -3,8 +3,10 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -453,6 +455,39 @@ func TestKnownGoodCrashRestarts(t *testing.T) {
 
 	if c, _ := en.l.Current(); c != "good" {
 		t.Fatal(c)
+	}
+}
+
+func TestShutdownDuringChildStartKeepsProbation(t *testing.T) {
+	en := newEnv(t, map[string]string{"good": BehaviourOK, "new": BehaviourOK}, "new", "good")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	en.cfg.Command = func(path string, args []string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, path, args...)
+
+		cancel()
+
+		return cmd
+	}
+
+	mustNoErr(t, Run(ctx, en.cfg))
+
+	cur, err := en.l.Current()
+	mustNoErr(t, err)
+
+	if cur != "new" {
+		t.Errorf("current on shutdown = %q, want new", cur)
+	}
+
+	kg, err := en.l.KnownGood()
+	mustNoErr(t, err)
+	wantLink(t, "known-good on shutdown", kg, "good")
+
+	_, err = os.Stat(filepath.Join(en.state, OutcomeFile))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shutdown wrote a failure outcome: stat error = %v", err)
 	}
 }
 

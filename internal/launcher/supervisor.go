@@ -157,6 +157,11 @@ func Run(ctx context.Context, cfg Config) error {
 		logStart(ctx, &cfg, cur, knownGood, probation)
 
 		res := superviseOnce(ctx, &cfg, cur, probation)
+		// A child exit can race with shutdown. Leave probation for the next start.
+		if canceled(ctx) {
+			return nil
+		}
+
 		switch res.kind {
 		case resCtx:
 			return nil
