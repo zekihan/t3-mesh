@@ -226,6 +226,7 @@ func (mgr *Manager) dialOne(
 		}
 	}()
 
+	deadline, _ = dctx.Deadline()
 	setDeadline(raw.SetDeadline, deadline)
 
 	tc := tls.Client(raw, mgr.clientTLS(view, peer.Machine))
@@ -240,20 +241,18 @@ func (mgr *Manager) dialOne(
 		return nil, errBadALPN
 	}
 
-	err = proto.WriteLine(tc, proto.StreamHeader{Svc: svc})
-	if err != nil {
-		return nil, fmt.Errorf("write header: %w", err)
+	stop := context.AfterFunc(dctx, func() { _ = raw.Close() })
+	err = requestStream(tc, svc)
+
+	stop()
+
+	ctxErr := dctx.Err()
+	if ctxErr != nil {
+		return nil, fmt.Errorf("request stream: %w", ctxErr)
 	}
 
-	var reply proto.StreamReply
-
-	err = proto.ReadLine(tc, &reply)
 	if err != nil {
-		return nil, fmt.Errorf("read accept: %w", err)
-	}
-
-	if !reply.OK {
-		return nil, ErrRefused
+		return nil, err
 	}
 
 	setDeadline(raw.SetDeadline, time.Time{})
@@ -304,4 +303,24 @@ func (mgr *Manager) dialOne(
 	)
 
 	return &sessionConn{Conn: tc, s: sess}, nil
+}
+
+func requestStream(conn net.Conn, svc string) error {
+	err := proto.WriteLine(conn, proto.StreamHeader{Svc: svc})
+	if err != nil {
+		return fmt.Errorf("write header: %w", err)
+	}
+
+	var reply proto.StreamReply
+
+	err = proto.ReadLine(conn, &reply)
+	if err != nil {
+		return fmt.Errorf("read accept: %w", err)
+	}
+
+	if !reply.OK {
+		return ErrRefused
+	}
+
+	return nil
 }
