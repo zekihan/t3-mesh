@@ -282,9 +282,21 @@ func IngestLauncherOutcome(stateDir string) error {
 		out.At = time.Now()
 	}
 
-	err = RecordFailure(stateDir, out.Version, out.Reason, out.Kind, out.At)
+	st, err := LoadState(stateDir)
 	if err != nil {
 		return err
+	}
+
+	// A restart after saving the state can leave the same outcome pending.
+	failure := st.Failed[out.Version]
+	if !failure.LastAttempt.Equal(out.At) || failure.Kind != out.Kind ||
+		failure.Reason != out.Reason {
+		st.RecordFailure(out.Version, out.Reason, out.Kind, out.At)
+
+		err = SaveState(stateDir, st)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = os.Remove(path)

@@ -571,6 +571,61 @@ func TestIngestLauncherOutcome(t *testing.T) {
 	}
 }
 
+func TestIngestLauncherOutcomeAfterInterruptedCleanup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, LauncherOutcomeFile)
+	at := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	outcome := LauncherOutcome{
+		Version: "v1.2.3",
+		Reason:  "no HelloAck within probation time",
+		Kind:    KindDependency,
+		At:      at,
+	}
+
+	var st State
+
+	st.RecordFailure(outcome.Version, outcome.Reason, outcome.Kind, at.Add(-DependencyRetryDelay))
+	st.RecordFailure(outcome.Version, outcome.Reason, outcome.Kind, at)
+
+	err := SaveState(dir, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, attempts := range []int{2, 3} {
+		data, err := json.Marshal(outcome)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = os.WriteFile(path, data, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = IngestLauncherOutcome(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		st, err := LoadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if f := st.Failed[outcome.Version]; f.Attempts != attempts || f.Final != (attempts == 3) {
+			t.Fatalf("failure = %+v, want %d attempts", f, attempts)
+		}
+
+		_, err = os.Stat(path)
+		if !os.IsNotExist(err) {
+			t.Fatalf("outcome file after ingestion: %v, want not exist", err)
+		}
+
+		outcome.At = outcome.At.Add(DependencyRetryDelay)
+	}
+}
+
 func checkBadOutcomes(t *testing.T, dir, path string) {
 	t.Helper()
 
