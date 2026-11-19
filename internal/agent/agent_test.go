@@ -57,6 +57,15 @@ func (conn *hubConn) lastStatus() (proto.Status, bool) {
 	return conn.statuses[len(conn.statuses)-1], true
 }
 
+func (conn *hubConn) sendControl(t *testing.T, msg proto.Message) {
+	t.Helper()
+
+	err := conn.ctrl.Send(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // openStream opens a hub -> agent data stream with the given header.
 func (conn *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
 	t.Helper()
@@ -823,6 +832,88 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	}
 }
 
+func TestHubStreamFinishesOnTunnelDrop(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
+	rig.agent.ctx = t.Context()
+	deadline := time.Now().Add(5 * time.Second)
+
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	setDeadline(listener.SetDeadline, deadline)
+	rig.cfg.Serve["t3"] = listener.Addr().String()
+
+	sess, err := rig.agent.connect(ctx, &rig.ident)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.close()
+
+	rig.agent.wg.Go(sess.serveStreams)
+
+	hub := rig.hub.waitConn(t, 1)
+	stream := hub.openStream(t, proto.StreamHeader{Svc: "t3", Viewer: "test-viewer"})
+	setDeadline(stream.SetDeadline, deadline)
+
+	backend, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+
+	setDeadline(backend.SetDeadline, deadline)
+
+	// A FIN on one stream still lets the backend send bytes in the other direction.
+	err = stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = backend.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("backend read after stream FIN = %v, want EOF", err)
+	}
+
+	const tail = "tail"
+
+	_, err = io.WriteString(backend, tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, len(tail))
+
+	_, err = io.ReadFull(stream, buf)
+	if err != nil || string(buf) != tail {
+		t.Fatalf("tail = %q, %v, want %q", buf, err, tail)
+	}
+
+	err = hub.ymx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The backend keeps its write side open, so relay shutdown cannot rely on its EOF.
+	done := make(chan struct{})
+
+	go func() {
+		rig.agent.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("local relay still blocked after the tunnel dropped")
+	}
+}
+
 func TestLinkPortThroughTunnel(t *testing.T) {
 	rig := newHarness(t, nil)
 	rig.hub.waitConn(t, 1)
@@ -978,6 +1069,84 @@ func TestUpdateApplied(t *testing.T) {
 
 		return ok && st.RulesRevision == "rules2"
 	})
+}
+
+func TestRetiringSessionCannotOverwriteHubState(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
+	lookingUp := make(chan struct{})
+	lookupDone := make(chan struct{})
+
+	finishLookup := sync.OnceFunc(func() { close(lookupDone) })
+	defer finishLookup()
+
+	rig.agent.gatewayMAC = func() (string, error) {
+		close(lookingUp)
+		<-lookupDone
+
+		return "aa:bb:cc:dd:ee:ff", nil
+	}
+	rig.start()
+	first := rig.hub.waitConn(t, 1)
+
+	waitFor(t, "first session adopted", func() bool { return rig.agent.current() != nil })
+
+	old := rig.agent.current()
+
+	// Keep the first tunnel draining after the replacement is adopted.
+	stream, err := rig.agent.dialTunnel(t.Context(), "z-arch", "t3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	home := true
+	first.sendControl(t, proto.Update{
+		Home:        &home,
+		Revocations: &proto.Revocations{Revision: "old-update"},
+	})
+
+	select {
+	case <-lookingUp:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old session did not start applying its update")
+	}
+
+	rig.hub.mu.Lock()
+	rig.hub.ack.Revocations.Revision = "new-revocations"
+	rig.hub.ack.Release.Revision = "new-release"
+	rig.hub.mu.Unlock()
+
+	if !rig.agent.replaceSession(t.Context(), "test handoff") {
+		t.Fatal("could not replace the tunnel")
+	}
+
+	first.sendControl(t, proto.Release{Version: "v1.0.0", Revision: "old-release"})
+	// The renewal channel confirms the old control loop processed both messages.
+	first.sendControl(t, proto.Renewed{})
+
+	finishLookup()
+
+	select {
+	case <-old.renewCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old session did not drain its control messages")
+	}
+
+	status := rig.agent.buildStatus()
+	if status.RevocationRevision != "new-revocations" || status.ReleaseRevision != "new-release" {
+		t.Errorf("status revisions = %q, %q, want new-revocations, new-release",
+			status.RevocationRevision, status.ReleaseRevision)
+	}
+
+	cached, err := state.Load(rig.cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cached.Home || cached.Revocations.Revision != "new-revocations" {
+		t.Errorf("persisted home = %t, revocations = %q, want false, new-revocations",
+			cached.Home, cached.Revocations.Revision)
+	}
 }
 
 func TestUpdateDeviceLeaves(t *testing.T) {

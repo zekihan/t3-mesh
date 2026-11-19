@@ -336,7 +336,7 @@ func (agent *Agent) establish(ctx context.Context) error {
 		return err
 	}
 
-	agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	agent.adopt(sess)
 
 	return nil
 }
@@ -350,6 +350,14 @@ func (agent *Agent) adopt(sess *session) *session {
 	agent.cur = sess
 	agent.live[sess] = struct{}{}
 	agent.lastHelloAck = agent.now()
+
+	if agent.upd != nil {
+		agent.upd.HelloAckReceived()
+
+		if sess.ack.Release.Version != "" {
+			agent.upd.OnRelease(sess.ack.Release)
+		}
+	}
 	agent.mu.Unlock()
 
 	agent.saveCache()
@@ -359,14 +367,6 @@ func (agent *Agent) adopt(sess *session) *session {
 		slog.String("peer", sess.peer.String()),
 		slog.String("release", sess.ack.Release.Version),
 	)
-
-	if agent.upd != nil {
-		agent.upd.HelloAckReceived()
-
-		if sess.ack.Release.Version != "" {
-			agent.upd.OnRelease(sess.ack.Release)
-		}
-	}
 
 	sess.start()
 	agent.reconcileDirect()
@@ -428,18 +428,7 @@ func (sess *session) start() {
 			agent.handleMessage(sess, msg)
 		}
 	})
-	agent.wg.Go(func() {
-		defer sess.close()
-
-		for {
-			st, err := sess.ymx.AcceptStream()
-			if err != nil {
-				return
-			}
-
-			go agent.handleHubStream(st)
-		}
-	})
+	agent.wg.Go(sess.serveStreams)
 	agent.wg.Go(func() {
 		err := sess.ctrl.RunLiveness(agent.ctx, tunnel.PingInterval, tunnel.MaxMissed)
 		if errors.Is(err, tunnel.ErrDead) {
@@ -465,6 +454,24 @@ func (sess *session) start() {
 			}
 		}
 	})
+}
+
+func (sess *session) serveStreams() {
+	defer sess.close()
+
+	agent := sess.a
+
+	ctx, cancel := context.WithCancel(agent.ctx)
+	defer cancel()
+
+	for {
+		st, err := sess.ymx.AcceptStream()
+		if err != nil {
+			return
+		}
+
+		agent.wg.Go(func() { agent.handleHubStream(ctx, st) })
+	}
 }
 
 func (agent *Agent) sessionEnded(sess *session) {
@@ -616,7 +623,7 @@ func (agent *Agent) replaceSession(ctx context.Context, reason string) bool {
 		return false
 	}
 
-	old := agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	old := agent.adopt(sess)
 	if old != nil {
 		agent.wg.Go(func() { agent.retire(old) })
 	}
@@ -627,19 +634,24 @@ func (agent *Agent) replaceSession(ctx context.Context, reason string) bool {
 func (agent *Agent) handleMessage(sess *session, msg proto.Message) {
 	switch typed := msg.(type) {
 	case proto.Update:
-		agent.applyUpdate(typed)
+		agent.applyUpdate(sess, typed)
 	case proto.Release:
 		agent.mu.Lock()
+		if agent.cur != sess {
+			agent.mu.Unlock()
+
+			return
+		}
+
 		agent.cache.Release = typed
+		if agent.upd != nil {
+			agent.upd.OnRelease(typed)
+		}
 		agent.mu.Unlock()
 
 		agent.log.Info("Release advertised", slog.String("version", typed.Version),
 			slog.String("revision", typed.Revision),
 		)
-
-		if agent.upd != nil {
-			agent.upd.OnRelease(typed)
-		}
 
 		signal(agent.statusNudge)
 	case proto.Renewed:
@@ -676,7 +688,7 @@ func deliver(ch chan proto.Message, m proto.Message) {
 	}
 }
 
-func (agent *Agent) applyUpdate(update proto.Update) {
+func (agent *Agent) applyUpdate(sess *session, update proto.Update) {
 	var mac string
 
 	if update.Home != nil && *update.Home {
@@ -684,6 +696,12 @@ func (agent *Agent) applyUpdate(update proto.Update) {
 	}
 
 	agent.mu.Lock()
+	if agent.cur != sess {
+		agent.mu.Unlock()
+
+		return
+	}
+
 	agent.cache.Apply(update)
 	agent.cache.LastHubContact = agent.now()
 

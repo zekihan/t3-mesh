@@ -193,7 +193,7 @@ func (agent *Agent) switchIdentity(ctx context.Context, next *tls.Certificate) e
 
 	agent.promote(next)
 
-	old := agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	old := agent.adopt(sess)
 
 	agent.log.InfoContext(
 		ctx,
