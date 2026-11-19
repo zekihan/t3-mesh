@@ -3,7 +3,7 @@ identity:
   name: @NAME@
   dir: /var/lib/t3-mesh/identity
 
-hub: @HUB@
+hub: '@HUB@'
 
 serve:
   t3: 127.0.0.1:3773

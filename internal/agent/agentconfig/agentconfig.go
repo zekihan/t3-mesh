@@ -58,6 +58,7 @@ var (
 	errHubIPv6Brackets     = errors.New("IPv6 literals must be bracketed")
 	errHubNoHost           = errors.New("has no host")
 	errOriginFormat        = errors.New("must be scheme://host[:port] with nothing after it")
+	errExtraDocument       = errors.New("agentconfig: expected a single YAML document")
 )
 
 // Config is a validated agent configuration.
@@ -140,7 +141,7 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Parse decodes and validates a configuration document. Unknown fields are errors.
+// Parse decodes and validates a single configuration document. Unknown fields are errors.
 func Parse(data []byte) (*Config, error) {
 	var doc file
 
@@ -149,6 +150,13 @@ func Parse(data []byte) (*Config, error) {
 
 	err := dec.Decode(&doc)
 	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("agentconfig: decode: %w", err)
+	}
+
+	switch err = dec.Decode(&yaml.Node{}); {
+	case err == nil:
+		return nil, errExtraDocument
+	case !errors.Is(err, io.EOF):
 		return nil, fmt.Errorf("agentconfig: decode: %w", err)
 	}
 

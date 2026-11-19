@@ -67,6 +67,26 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+func TestParseSingleYAMLDocument(t *testing.T) {
+	_, err := Parse([]byte("---\n" + validDoc + "...\n# trailing comment\n"))
+	if err != nil {
+		t.Fatalf("Parse rejected a single document with markers and comments: %v", err)
+	}
+
+	for name, tail := range map[string]string{
+		"second config":    "---\nhub: other.example\n",
+		"empty document":   "---\n",
+		"malformed config": "---\nhub: [\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(validDoc + tail))
+			if err == nil {
+				t.Fatal("Parse accepted content after the first document")
+			}
+		})
+	}
+}
+
 func TestParseDefaults(t *testing.T) {
 	doc := `
 identity:
@@ -166,6 +186,33 @@ func TestHubForms(t *testing.T) {
 
 			if got := cfg.HubHost(); got != tt.wantHost {
 				t.Fatalf("HubHost = %q, want %q", got, tt.wantHost)
+			}
+		})
+	}
+}
+
+func TestPackagedConfigWithIPv6Hub(t *testing.T) {
+	const host, addr = "2001:db8::1", "[2001:db8::1]:8443"
+
+	render := strings.NewReplacer("@NAME@", "agent-test", "@HUB@", addr)
+
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			path := filepath.Join("..", "..", "..", "packaging", platform, "agent.yaml.example")
+
+			template, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Parse([]byte(render.Replace(string(template))))
+			if err != nil {
+				t.Fatalf("Parse rendered installer config: %v", err)
+			}
+
+			if gotHost, gotAddr := cfg.HubHost(), cfg.HubAddr(); gotHost != host ||
+				gotAddr != addr {
+				t.Fatalf("hub = %q, %q, want %q, %q", gotHost, gotAddr, host, addr)
 			}
 		})
 	}
