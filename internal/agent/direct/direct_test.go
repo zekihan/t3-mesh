@@ -2,6 +2,7 @@ package direct
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"errors"
 	"io"
@@ -222,6 +223,32 @@ func TestDirectFlow(t *testing.T) {
 		"sessions",
 		func() bool { return testEnv.a.mgr.Sessions() == 1 && testEnv.b.mgr.Sessions() == 1 },
 	)
+}
+
+func TestDirectDialCanceledWhileWaitingForReply(t *testing.T) {
+	testEnv := setup(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	// The receiving agent has to finish opening the service before replying.
+	testEnv.b.mgr.opts.Dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		cancel()
+		<-ctx.Done()
+
+		return nil, ctx.Err()
+	}
+
+	conn, err := testEnv.a.mgr.Dial(ctx, "b", "t3")
+	if conn != nil {
+		_ = conn.Close()
+
+		t.Fatal("canceled dial returned a connection")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context.Canceled", err)
+	}
 }
 
 func TestOneWayRule(t *testing.T) {
