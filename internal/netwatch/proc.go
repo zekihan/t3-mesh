@@ -93,12 +93,10 @@ func parseRouteLine(fields []string) (procGateway, bool) {
 	return procGateway{addr: netip.AddrFrom4(b), iface: fields[0], metric: metric}, true
 }
 
-// parseProcARP finds the complete entry for ip in /proc/net/arp content. When
-// iface is non-empty an entry on another device is only used as a fallback.
+// parseProcARP finds a complete entry for ip in /proc/net/arp, restricted to
+// iface when it is set. The same IP can refer to different neighbors on different interfaces.
 func parseProcARP(r io.Reader, ip netip.Addr, iface string) (net.HardwareAddr, error) {
 	sc := bufio.NewScanner(r)
-
-	var fallback net.HardwareAddr
 
 	first := true
 	for sc.Scan() {
@@ -111,26 +109,14 @@ func parseProcARP(r io.Reader, ip netip.Addr, iface string) (net.HardwareAddr, e
 		fields := strings.Fields(sc.Text())
 
 		mac, ok := arpEntry(fields, ip)
-		if !ok {
-			continue
-		}
-
-		if iface == "" || fields[5] == iface {
+		if ok && (iface == "" || fields[5] == iface) {
 			return mac, nil
-		}
-
-		if fallback == nil {
-			fallback = mac
 		}
 	}
 
 	err := sc.Err()
 	if err != nil {
 		return nil, fmt.Errorf("read arp table: %w", err)
-	}
-
-	if fallback != nil {
-		return fallback, nil
 	}
 
 	return nil, ErrNoMAC
