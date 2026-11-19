@@ -94,9 +94,10 @@ type Conn struct {
 	remote   net.Addr
 	parseErr error
 
-	readDeadline time.Time
-	src          netip.AddrPort
-	timeout      time.Duration
+	readDeadline   time.Time
+	headerDeadline time.Time
+	src            netip.AddrPort
+	timeout        time.Duration
 
 	parseOnce sync.Once
 	mu        sync.Mutex
@@ -162,8 +163,13 @@ func (conn *Conn) SetDeadline(deadline time.Time) error {
 
 	conn.readDeadline = deadline
 
-	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
-	return conn.inner.SetDeadline(deadline)
+	read := conn.effectiveReadDeadline()
+	if read.Equal(deadline) {
+		//nolint:wrapcheck // transparent net.Conn wrapper; callers compare net errors by identity
+		return conn.inner.SetDeadline(deadline)
+	}
+
+	return errors.Join(conn.inner.SetReadDeadline(read), conn.inner.SetWriteDeadline(deadline))
 }
 
 func (conn *Conn) SetReadDeadline(deadline time.Time) error {
@@ -173,12 +179,25 @@ func (conn *Conn) SetReadDeadline(deadline time.Time) error {
 	conn.readDeadline = deadline
 
 	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
-	return conn.inner.SetReadDeadline(deadline)
+	return conn.inner.SetReadDeadline(conn.effectiveReadDeadline())
 }
 
 func (conn *Conn) SetWriteDeadline(t time.Time) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
 	//nolint:wrapcheck // transparent net.Conn wrapper; callers compare io.EOF and net errors by identity
 	return conn.inner.SetWriteDeadline(t)
+}
+
+// effectiveReadDeadline returns the active read limit. The caller holds mu.
+func (conn *Conn) effectiveReadDeadline() time.Time {
+	if !conn.headerDeadline.IsZero() &&
+		(conn.readDeadline.IsZero() || conn.headerDeadline.Before(conn.readDeadline)) {
+		return conn.headerDeadline
+	}
+
+	return conn.readDeadline
 }
 
 func (conn *Conn) parse() error {
@@ -191,19 +210,18 @@ func (conn *Conn) parse() error {
 
 func (conn *Conn) readHeader() error {
 	conn.mu.Lock()
+	conn.headerDeadline = time.Now().Add(conn.timeout)
 
-	headerDeadline := time.Now().Add(conn.timeout)
-	if !conn.readDeadline.IsZero() && conn.readDeadline.Before(headerDeadline) {
-		headerDeadline = conn.readDeadline
-	}
+	err := conn.inner.SetReadDeadline(conn.effectiveReadDeadline())
 	conn.mu.Unlock()
 
-	err := conn.inner.SetReadDeadline(headerDeadline)
 	if err == nil {
 		err = conn.parseHeader()
 	}
 
 	conn.mu.Lock()
+	conn.headerDeadline = time.Time{}
+
 	restoreErr := conn.inner.SetReadDeadline(conn.readDeadline)
 	conn.mu.Unlock()
 
