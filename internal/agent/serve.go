@@ -22,14 +22,14 @@ const (
 // agent-to-agent stream. The agent trusts the hub's authorization. Relayed
 // streams get a StreamReply once the local dial settles; viewer streams carry
 // raw HTTP straight away and get none.
-func (agent *Agent) handleHubStream(st *yamux.Stream) {
+func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
 	setDeadline(st.SetReadDeadline, time.Now().Add(hubHeaderTimeout))
 
 	var hdr proto.StreamHeader
 
 	err := proto.ReadLine(st, &hdr)
 	if err != nil {
-		agent.log.Debug("Hub stream header unreadable", slog.Any("err", err))
+		agent.log.DebugContext(ctx, "Hub stream header unreadable", slog.Any("err", err))
 
 		_ = st.Close()
 
@@ -41,7 +41,10 @@ func (agent *Agent) handleHubStream(st *yamux.Stream) {
 	relayed := hdr.From != ""
 
 	if !relayed && hdr.Viewer == "" {
-		agent.log.Warn("Hub stream refused", slog.String("reason", "no viewer or source"),
+		agent.log.WarnContext(
+			ctx,
+			"Hub stream refused",
+			slog.String("reason", "no viewer or source"),
 			slog.String("svc", hdr.Svc),
 		)
 
@@ -52,7 +55,10 @@ func (agent *Agent) handleHubStream(st *yamux.Stream) {
 
 	target, ok := agent.cfg.Serve[hdr.Svc]
 	if !ok {
-		agent.log.Warn("Hub stream refused", slog.String("reason", "service not served"),
+		agent.log.WarnContext(
+			ctx,
+			"Hub stream refused",
+			slog.String("reason", "service not served"),
 			slog.String("svc", hdr.Svc),
 			slog.String("viewer", hdr.Viewer),
 			slog.String("from", hdr.From),
@@ -63,14 +69,15 @@ func (agent *Agent) handleHubStream(st *yamux.Stream) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(agent.ctx, localDialTimeout)
-	defer cancel()
-
+	dialCtx, cancel := context.WithTimeout(ctx, localDialTimeout)
 	d := net.Dialer{}
 
-	conn, err := d.DialContext(ctx, "tcp", target)
+	conn, err := d.DialContext(dialCtx, "tcp", target)
+
+	cancel()
+
 	if err != nil {
-		agent.log.Warn("Local dial failed", slog.String("svc", hdr.Svc),
+		agent.log.WarnContext(ctx, "Local dial failed", slog.String("svc", hdr.Svc),
 			slog.String("target", target),
 			slog.Any("err", err),
 		)
@@ -79,6 +86,10 @@ func (agent *Agent) handleHubStream(st *yamux.Stream) {
 
 		return
 	}
+
+	// A dropped tunnel must also unblock the copy that reads from the backend.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	if relayed {
 		err = proto.WriteLine(st, proto.StreamReply{OK: true})

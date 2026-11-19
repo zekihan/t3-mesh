@@ -336,7 +336,7 @@ func (agent *Agent) establish(ctx context.Context) error {
 		return err
 	}
 
-	agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	agent.adopt(sess)
 
 	return nil
 }
@@ -428,18 +428,7 @@ func (sess *session) start() {
 			agent.handleMessage(sess, msg)
 		}
 	})
-	agent.wg.Go(func() {
-		defer sess.close()
-
-		for {
-			st, err := sess.ymx.AcceptStream()
-			if err != nil {
-				return
-			}
-
-			go agent.handleHubStream(st)
-		}
-	})
+	agent.wg.Go(sess.serveStreams)
 	agent.wg.Go(func() {
 		err := sess.ctrl.RunLiveness(agent.ctx, tunnel.PingInterval, tunnel.MaxMissed)
 		if errors.Is(err, tunnel.ErrDead) {
@@ -465,6 +454,24 @@ func (sess *session) start() {
 			}
 		}
 	})
+}
+
+func (sess *session) serveStreams() {
+	defer sess.close()
+
+	agent := sess.a
+
+	ctx, cancel := context.WithCancel(agent.ctx)
+	defer cancel()
+
+	for {
+		st, err := sess.ymx.AcceptStream()
+		if err != nil {
+			return
+		}
+
+		agent.wg.Go(func() { agent.handleHubStream(ctx, st) })
+	}
 }
 
 func (agent *Agent) sessionEnded(sess *session) {
@@ -616,7 +623,7 @@ func (agent *Agent) replaceSession(ctx context.Context, reason string) bool {
 		return false
 	}
 
-	old := agent.adopt(sess) //nolint:contextcheck // sessions outlive the connect ctx
+	old := agent.adopt(sess)
 	if old != nil {
 		agent.wg.Go(func() { agent.retire(old) })
 	}

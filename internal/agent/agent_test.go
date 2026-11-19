@@ -832,6 +832,88 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	}
 }
 
+func TestHubStreamFinishesOnTunnelDrop(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.noStart = true })
+	rig.agent.ctx = t.Context()
+	deadline := time.Now().Add(5 * time.Second)
+
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	setDeadline(listener.SetDeadline, deadline)
+	rig.cfg.Serve["t3"] = listener.Addr().String()
+
+	sess, err := rig.agent.connect(ctx, &rig.ident)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.close()
+
+	rig.agent.wg.Go(sess.serveStreams)
+
+	hub := rig.hub.waitConn(t, 1)
+	stream := hub.openStream(t, proto.StreamHeader{Svc: "t3", Viewer: "test-viewer"})
+	setDeadline(stream.SetDeadline, deadline)
+
+	backend, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+
+	setDeadline(backend.SetDeadline, deadline)
+
+	// A FIN on one stream still lets the backend send bytes in the other direction.
+	err = stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = backend.Read(make([]byte, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("backend read after stream FIN = %v, want EOF", err)
+	}
+
+	const tail = "tail"
+
+	_, err = io.WriteString(backend, tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, len(tail))
+
+	_, err = io.ReadFull(stream, buf)
+	if err != nil || string(buf) != tail {
+		t.Fatalf("tail = %q, %v, want %q", buf, err, tail)
+	}
+
+	err = hub.ymx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The backend keeps its write side open, so relay shutdown cannot rely on its EOF.
+	done := make(chan struct{})
+
+	go func() {
+		rig.agent.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("local relay still blocked after the tunnel dropped")
+	}
+}
+
 func TestLinkPortThroughTunnel(t *testing.T) {
 	rig := newHarness(t, nil)
 	rig.hub.waitConn(t, 1)
