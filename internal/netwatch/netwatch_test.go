@@ -51,8 +51,8 @@ func TestParseProcARP(t *testing.T) {
 		netip.MustParseAddr("192.168.0.1"),
 		"eth0",
 	)
-	if err != nil || mac.String() != "aa:bb:cc:dd:ee:01" {
-		t.Fatalf("fallback mac=%v err=%v", mac, err)
+	if mac != nil || !errors.Is(err, ErrNoMAC) {
+		t.Fatalf("entry on wlan0 matched gateway on eth0: mac=%v err=%v", mac, err)
 	}
 
 	_, err = parseProcARP(
