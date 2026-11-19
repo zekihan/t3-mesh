@@ -217,6 +217,55 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestCheckTrustedOriginWithDefaultPort(t *testing.T) {
+	tests := []struct {
+		want   error
+		name   string
+		origin string
+		allow  string
+	}{
+		{name: "http", origin: "http://ui.example.test", allow: "http://ui.example.test:80"},
+		{name: "https", origin: "https://ui.example.test", allow: "https://ui.example.test:443"},
+		{name: "https IPv6", origin: "https://[::1]", allow: "https://[::1]:443"},
+		{
+			name:   "padded port",
+			origin: "https://ui.example.test",
+			allow:  "https://ui.example.test:0443",
+		},
+		{
+			name:   "different port",
+			origin: "https://ui.example.test",
+			allow:  "https://ui.example.test:8443",
+			want:   ErrForbidden,
+		},
+		{
+			name:   "different scheme",
+			origin: "http://ui.example.test",
+			allow:  "https://ui.example.test:443",
+			want:   ErrForbidden,
+		},
+		{
+			name:   "different host",
+			origin: "https://other.example.test",
+			allow:  "https://ui.example.test:443",
+			want:   ErrForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRequest(t, "127.0.0.1:27301", map[string]string{
+				"Origin": tt.origin, "Sec-Fetch-Site": "cross-site",
+			})
+
+			err := Check(r, port, []string{tt.allow})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Check = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckWebSocketUpgrade(t *testing.T) {
 	upgrade := func(host, origin string) *http.Request {
 		r := newRequest(t, host, map[string]string{

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ const DesktopOrigin = "t3code://app"
 // Origin passes only if that origin is http://127.0.0.1:<port>,
 // http://localhost:<port> or one of trusted; one with Sec-Fetch-Site passes only
 // if it is same-origin or none, or the request carries a trusted Origin.
+// Trusted HTTP(S) origins with an explicit default port also match the browser's
+// Origin without the port.
 // Requests with neither header (native clients) pass when Host is valid.
 // WebSocket upgrades are checked the same way.
 func Check(r *http.Request, port int, trusted []string) error {
@@ -36,7 +39,7 @@ func Check(r *http.Request, port int, trusted []string) error {
 	trustedOrigin := len(origins) > 0
 
 	for _, origin := range origins {
-		if matchesAny(origin, trusted...) {
+		if matchesTrustedOrigin(origin, trusted) {
 			continue
 		}
 
@@ -58,6 +61,35 @@ func Check(r *http.Request, port int, trusted []string) error {
 	}
 
 	return nil
+}
+
+func matchesTrustedOrigin(origin string, trusted []string) bool {
+	for _, allowed := range trusted {
+		if strings.EqualFold(origin, allowed) {
+			return true
+		}
+
+		scheme, authority, _ := strings.Cut(allowed, "://")
+
+		var defaultPort string
+
+		switch strings.ToLower(scheme) {
+		case "http":
+			defaultPort = "80"
+		case "https":
+			defaultPort = "443"
+		default:
+			continue
+		}
+
+		host, port, err := net.SplitHostPort(authority)
+		if err == nil && host != "" && strings.TrimLeft(port, "0") == defaultPort &&
+			strings.EqualFold(origin, strings.TrimSuffix(allowed, ":"+port)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Middleware wraps h, answering 403 without calling h when Check fails for port,
