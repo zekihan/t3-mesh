@@ -31,8 +31,9 @@ const (
 )
 
 var (
-	errAdminRefused   = errors.New("enroll: hub refused")
-	errMalformedReply = errors.New("enroll: malformed reply")
+	errAdminPathNotSocket = errors.New("enroll: admin socket path is not a socket")
+	errAdminRefused       = errors.New("enroll: hub refused")
+	errMalformedReply     = errors.New("enroll: malformed reply")
 )
 
 type adminRequest struct {
@@ -65,9 +66,9 @@ type Admin struct {
 
 // Serve listens on Path (mode 0600, replacing a stale socket) until ctx ends.
 func (admin *Admin) Serve(ctx context.Context) error {
-	err := os.Remove(admin.Path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("enroll: remove stale admin socket: %w", err)
+	err := removeStaleAdminSocket(admin.Path)
+	if err != nil {
+		return err
 	}
 
 	var lc net.ListenConfig
@@ -109,6 +110,28 @@ func (admin *Admin) Serve(ctx context.Context) error {
 			admin.handle(conn)
 		})
 	}
+}
+
+func removeStaleAdminSocket(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("enroll: inspect admin socket: %w", err)
+	}
+
+	if info.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("%w: %q", errAdminPathNotSocket, path)
+	}
+
+	err = os.Remove(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enroll: remove stale admin socket: %w", err)
+	}
+
+	return nil
 }
 
 func (admin *Admin) log() *slog.Logger {
