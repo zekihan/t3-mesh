@@ -46,6 +46,7 @@ type cfgOpts struct {
 	api          []string
 	devices      []string
 	noCIDRs      bool
+	rollback     bool
 }
 
 //nolint:gocritic // test options are passed by value so call sites stay literals
@@ -90,7 +91,7 @@ machines:
   z-arch: {identity: agent-z-arch, services: {t3: {kind: http}}}
 homeCIDRs: %s
 viewerDomain: %s
-release: {version: %s}
+release: {version: %s, rollbackAllowed: %t}
 api: {identities: %s}
 devices: %s
 policy:
@@ -99,7 +100,7 @@ policy:
     mesh-t3-z-arch: {identities: [z-phone, device-z-phone-mesh]}
   disabledIdentities: %s
   blockedFingerprints: %s
-`, cidrs, domain, rel, apiIDs, devices, dis, blk)
+`, cidrs, domain, rel, opts.rollback, apiIDs, devices, dis, blk)
 }
 
 // swapHandler is a slog handler whose destination a test can replace while the
@@ -1607,6 +1608,22 @@ func TestVersionLagAlert(t *testing.T) {
 
 	if got := status(t, harness, "agent-devbox-update-failed"); got != 503 {
 		t.Fatalf("lagging agent = %d", got)
+	}
+
+	harness.setConfig(cfgOpts{release: "v0.5.0", rollback: true})
+
+	if !harness.watcher.Current().Release.RollbackAllowed {
+		t.Fatal("rollback setting was not reloaded")
+	}
+
+	if got := status(t, harness, "agent-devbox-update-failed"); got != 503 {
+		t.Fatalf("lagging agent after a rollback setting change = %d, want 503", got)
+	}
+
+	harness.setConfig(cfgOpts{release: "v0.6.0", rollback: true})
+
+	if got := status(t, harness, "agent-devbox-update-failed"); got != 200 {
+		t.Fatalf("lagging agent after a desired version change = %d, want 200", got)
 	}
 }
 

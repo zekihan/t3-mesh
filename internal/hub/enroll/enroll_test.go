@@ -327,14 +327,27 @@ func TestTokensReplace(t *testing.T) {
 	}
 }
 
-func TestAdminRoundTrip(t *testing.T) {
-	tk := NewTokens(time.Now)
-	path := filepath.Join(t.TempDir(), "admin.sock")
-	// Stale file must be replaced.
-	err := os.WriteFile(path, nil, 0o600)
+func leaveStaleAdminSocket(t *testing.T, path string) {
+	t.Helper()
+
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	stale.SetUnlinkOnClose(false)
+
+	err = stale.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdminRoundTrip(t *testing.T) {
+	tk := NewTokens(time.Now)
+	path := filepath.Join(t.TempDir(), "admin.sock")
+
+	leaveStaleAdminSocket(t, path)
 
 	admin := &Admin{Path: path, Tokens: tk, Allowed: func(_, id string) error {
 		if id == "bad" {
@@ -349,6 +362,7 @@ func TestAdminRoundTrip(t *testing.T) {
 	go func() { errc <- admin.Serve(ctx) }()
 
 	var (
+		err     error
 		token   string
 		expires time.Time
 	)
@@ -394,6 +408,32 @@ func TestAdminRoundTrip(t *testing.T) {
 	err = <-errc
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdminPreservesNonSocket(t *testing.T) {
+	const content = "config contents\n"
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	err := os.WriteFile(path, []byte(content), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	admin := &Admin{Path: path, Tokens: NewTokens(time.Now)}
+	serveErr := admin.Serve(ctx)
+
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != content {
+		t.Fatalf("file at admin socket path = %q, %v; want %q", got, err, content)
+	}
+
+	if serveErr == nil {
+		t.Fatal("Serve accepted a regular file as an admin socket")
 	}
 }
 

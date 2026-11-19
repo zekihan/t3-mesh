@@ -79,7 +79,7 @@ type Server struct {
 	tokens       *enroll.Tokens
 	renewals     *renewLimiter
 	machines     map[string]*machineState
-	releaseRev   string
+	wantVersion  string
 	wg           sync.WaitGroup
 	sweepInt     time.Duration
 	deviceRetry  time.Duration
@@ -130,7 +130,7 @@ func New(opts Options) (*Server, error) {
 	server.deviceKnown = map[string]bool{}
 	server.started = server.now()
 	server.releaseSince = server.started
-	server.releaseRev = opts.Config.Current().Release.Revision
+	server.wantVersion = opts.Config.Current().Release.Version
 
 	server.enrollH = &enroll.Handler{
 		Tokens:  server.tokens,
@@ -246,8 +246,8 @@ func (server *Server) ServeTunnels(ctx context.Context, ln net.Listener) error {
 // and pushes updates to every session. Pass it to Watcher.Run.
 func (server *Server) OnConfigChange(_, next *hubconfig.Snapshot) {
 	server.mu.Lock()
-	if next.Release.Revision != server.releaseRev {
-		server.releaseRev = next.Release.Revision
+	if next.Release.Version != server.wantVersion {
+		server.wantVersion = next.Release.Version
 		server.releaseSince = server.now()
 	}
 	server.mu.Unlock()
