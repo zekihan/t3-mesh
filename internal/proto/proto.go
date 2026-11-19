@@ -286,6 +286,8 @@ var ErrTooLarge = errors.New("proto: message too large")
 // ErrUnknownType is returned for a message with an unknown type.
 var ErrUnknownType = errors.New("proto: unknown message type")
 
+var errTrailingLineData = errors.New("proto: trailing data after JSON value")
+
 type envelope struct {
 	Type string          `json:"type"`
 	Body json.RawMessage `json:"body"`
@@ -495,6 +497,10 @@ func ReadLine(r io.Reader, dst any) error {
 	err := dec.Decode(dst)
 	if err != nil {
 		return fmt.Errorf("proto: decode line: %w", err)
+	}
+
+	if len(bytes.Trim(line[dec.InputOffset():], " \t\r\n")) != 0 {
+		return errTrailingLineData
 	}
 
 	return nil
