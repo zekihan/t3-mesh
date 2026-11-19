@@ -28,13 +28,14 @@ func pumpSocket(ctx context.Context, fd int, name string) (<-chan struct{}, erro
 	file := os.NewFile(uintptr(fd), name) // registers with the poller, so Close unblocks Read
 	out := make(chan struct{}, 1)
 
-	go func() {
-		<-ctx.Done()
-
+	stop := context.AfterFunc(ctx, func() {
 		_ = file.Close()
-	}()
+	})
+
 	go func() {
 		defer close(out)
+		defer file.Close()
+		defer stop()
 
 		buf := make([]byte, readBufferSize)
 		for {
