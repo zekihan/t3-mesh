@@ -459,6 +459,14 @@ func (server *Server) checkNewest(
 		return false, false, fmt.Errorf("hub: newest leaf lookup: %w", err)
 	}
 
+	server.nmu.Lock()
+	defer server.nmu.Unlock()
+
+	// An issuance recorded during the lookup takes precedence over its result.
+	if current := server.newest[identity]; current != cached {
+		return current == fp, false, nil
+	}
+
 	if got == "" {
 		if cached != "" {
 			return false, false, nil
@@ -467,7 +475,7 @@ func (server *Server) checkNewest(
 		return true, true, nil
 	}
 
-	server.setNewest(identity, got)
+	server.newest[identity] = got
 
 	return got == fp, false, nil
 }

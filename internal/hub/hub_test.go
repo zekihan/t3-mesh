@@ -1273,6 +1273,43 @@ func TestLeafNotNewestRejected(t *testing.T) {
 	}
 }
 
+type newestLookupIssuer struct {
+	issuer.Issuer
+
+	lookup func() string
+}
+
+func (stub *newestLookupIssuer) Newest(context.Context, string) (string, error) {
+	return stub.lookup(), nil
+}
+
+func TestNewestLookupKeepsConcurrentIssuance(t *testing.T) {
+	const (
+		previous = "previous-leaf"
+		issued   = "issued-leaf"
+	)
+
+	for name, result := range map[string]string{"old record": previous, "no record": ""} {
+		t.Run(name, func(t *testing.T) {
+			server := &Server{newest: map[string]string{}}
+			server.issuer = &newestLookupIssuer{lookup: func() string {
+				server.setNewest(devPhone, issued)
+
+				return result
+			}}
+
+			ok, noRecord, err := server.checkNewest(t.Context(), devPhone, previous)
+			if ok || noRecord || err != nil {
+				t.Errorf("superseded leaf: ok=%v, noRecord=%v, err=%v", ok, noRecord, err)
+			}
+
+			if got := server.newest[devPhone]; got != issued {
+				t.Errorf("cached leaf = %q, want %q", got, issued)
+			}
+		})
+	}
+}
+
 func TestNoIssuanceRecordAdmitted(t *testing.T) {
 	e := newEnv(t)
 
