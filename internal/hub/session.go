@@ -26,8 +26,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
 
-// rejectGrace is how long a rejected session may drain before it is forced
-// closed. The hub half-closes the TLS connection at once after Reject.
+// rejectGrace is how long a rejected session may drain before it is forced closed.
 const rejectGrace = 2 * time.Second
 
 // Bounds on what an agent may announce in Hello and Status.
@@ -332,8 +331,7 @@ func (server *Server) serveSession(
 			slog.String("error", err.Error()),
 		)
 
-		//nolint:errcheck // best-effort notice; the peer may already be gone
-		_ = ctrl.Send(
+		rejectHello(ctx, conn, ymx, ctrl,
 			proto.Reject{Reason: proto.RejectOther, Detail: "certificate check unavailable"},
 		)
 
@@ -349,8 +347,7 @@ func (server *Server) serveSession(
 			"tunnel refused: leaf "+adm.fingerprint+" is not the newest issued",
 		)
 
-		//nolint:errcheck // best-effort notice; the peer may already be gone
-		_ = ctrl.Send(
+		rejectHello(ctx, conn, ymx, ctrl,
 			proto.Reject{
 				Reason: proto.RejectLeafNotNewest,
 				Detail: "a newer certificate was issued for this identity",
@@ -432,6 +429,31 @@ func (server *Server) serveSession(
 		slog.String("duration", server.now().Sub(sess.accepted).String()),
 		slog.Any("reason", sess.closeErr),
 	)
+}
+
+func rejectHello(
+	ctx context.Context,
+	conn *tls.Conn,
+	ymx *yamux.Session,
+	ctrl *tunnel.Control,
+	rej proto.Reject,
+) {
+	err := ctrl.Send(rej)
+	if err != nil {
+		return
+	}
+
+	// Closing yamux now could fail the client's in-flight Hello write before
+	// the client checks for Reject. Give the peer time to read it and disconnect.
+	err = conn.SetReadDeadline(time.Now().Add(rejectGrace))
+	if err != nil {
+		return
+	}
+
+	select {
+	case <-ymx.CloseChan():
+	case <-ctx.Done():
+	}
 }
 
 func readHello(ctx context.Context, ctrl *tunnel.Control) (proto.Hello, error) {
