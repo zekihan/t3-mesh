@@ -195,6 +195,74 @@ func TestIssuePollsToReady(t *testing.T) {
 	assertPostedRequest(t, posted, csr)
 }
 
+func TestIssueRetriesTransientPollErrors(t *testing.T) {
+	const name = "t3-mesh-agent-a-test"
+
+	certPEM, _ := testCert(t, "leaf")
+	chainPEM, _ := testCert(t, "ca")
+
+	var (
+		mu          sync.Mutex
+		posts, gets int
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == crPath:
+			posts++
+
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"` + name + `"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == crPath+"/"+name:
+			gets++
+
+			switch gets {
+			case 1:
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			case 2:
+				http.Error(w, "busy", http.StatusTooManyRequests)
+			default:
+				_ = json.NewEncoder(w).Encode(&certificateRequest{
+					Metadata: objectMeta{Name: name},
+					Status: crStatus{
+						Certificate: certPEM,
+						CA:          chainPEM,
+						Conditions:  []condition{{Type: condReady, Status: condTrue}},
+					},
+				})
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	k := newIssuer(t, srv, tokenFile(t, "tok"), nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	cert, chain, err := k.Issue(ctx, "agent-a", testCSR(t, "agent-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(cert, certPEM) || !bytes.Equal(chain, chainPEM) {
+		t.Error("cert/chain mismatch")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if posts != 1 || gets != 3 {
+		t.Errorf("made %d POSTs and %d GETs, want 1 POST and 3 GETs", posts, gets)
+	}
+}
+
 func asMap(t *testing.T, v any) map[string]any {
 	t.Helper()
 

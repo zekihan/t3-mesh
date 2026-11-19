@@ -339,26 +339,9 @@ func (k8s *K8s) Issue(ctx context.Context, identity string, csrPEM []byte) ([]by
 			return cert, chain, nil
 		}
 
-		t := time.NewTimer(k8s.cfg.PollInterval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-
-			return nil, nil, fmt.Errorf("waiting for certificate request %s: %w", name, ctx.Err())
-		case <-t.C:
-		}
-
-		cur = certificateRequest{}
-
-		err = k8s.do(
-			ctx,
-			http.MethodGet,
-			k8s.collectionURL()+"/"+url.PathEscape(name),
-			nil,
-			&cur,
-		)
+		cur, err = k8s.pollRequest(ctx, name)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get certificate request %s: %w", name, err)
+			return nil, nil, err
 		}
 	}
 }
@@ -563,6 +546,53 @@ func (k8s *K8s) listOwn(ctx context.Context, identity string) ([]certificateRequ
 	}
 
 	return list.Items, nil
+}
+
+// pollRequest reads an existing request. A temporary API failure must not
+// abandon a request that cert-manager can still issue.
+func (k8s *K8s) pollRequest(ctx context.Context, name string) (certificateRequest, error) {
+	requestURL := k8s.collectionURL() + "/" + url.PathEscape(name)
+
+	for {
+		timer := time.NewTimer(k8s.cfg.PollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return certificateRequest{}, fmt.Errorf(
+				"waiting for certificate request %s: %w",
+				name,
+				ctx.Err(),
+			)
+		case <-timer.C:
+		}
+
+		var cur certificateRequest
+
+		err := k8s.do(ctx, http.MethodGet, requestURL, nil, &cur)
+		if err == nil {
+			return cur, nil
+		}
+
+		if !retryablePollError(err) {
+			return certificateRequest{}, fmt.Errorf("get certificate request %s: %w", name, err)
+		}
+	}
+}
+
+func retryablePollError(err error) bool {
+	status, ok := errors.AsType[*statusError](err)
+	if !ok {
+		return false
+	}
+
+	switch status.code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func (k8s *K8s) evaluate(
