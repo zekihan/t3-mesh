@@ -388,10 +388,18 @@ func parseEnrollToken(args []string) (enrollTokenArgs, error) {
 		return enrollTokenArgs{}, fmt.Errorf("enroll-token: %w", err)
 	}
 
+	var deviceSet bool
+
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "device" {
+			deviceSet = true
+		}
+	})
+
 	switch {
 	case device != "" && fs.NArg() == 0:
 		parsed.kind, parsed.identity = enroll.KindDevice, device
-	case device == "" && fs.NArg() == 1:
+	case !deviceSet && fs.NArg() == 1:
 		parsed.kind, parsed.identity = enroll.KindAgent, fs.Arg(0)
 	default:
 		return enrollTokenArgs{}, errUsage
