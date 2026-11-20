@@ -1009,6 +1009,31 @@ func TestLinkPortForeignOrigin(t *testing.T) {
 	}
 }
 
+func TestLinkPortSignedAssetImage(t *testing.T) {
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
+
+	const asset = "/api/assets/cGF5bG9hZA.c2lnbmF0dXJl/dashboard.png"
+
+	req, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		rig.linkURL(asset),
+		http.NoBody,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Sec-Fetch-Mode", "no-cors")
+	req.Header.Set("Sec-Fetch-Dest", "image")
+
+	if code, body := httpGet(t, req); code != http.StatusOK || body != "remote:"+asset {
+		t.Fatalf("signed asset request got %d %q", code, body)
+	}
+}
+
 func TestLinkPortWithoutHub(t *testing.T) {
 	h := newHarness(t, func(o *hopts) { o.noHub = true })
 

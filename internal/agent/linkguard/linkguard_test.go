@@ -322,7 +322,7 @@ func TestMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	})
 
-	handler := Middleware(port, trusted, slog.New(slog.DiscardHandler), next)
+	handler := Middleware(port, trusted, "t3", slog.New(slog.DiscardHandler), next)
 
 	tests := []struct {
 		headers    map[string]string
@@ -375,6 +375,101 @@ func TestMiddleware(t *testing.T) {
 
 			if !tt.wantCalled && rec.Body.String() != "forbidden\n" {
 				t.Fatalf("body = %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestMiddlewareSignedAssetImage(t *testing.T) {
+	const asset = "/api/assets/cGF5bG9hZA.c2lnbmF0dXJl/dashboard.png"
+
+	tests := []struct {
+		change  func(*http.Request)
+		name    string
+		service string
+		allow   bool
+	}{
+		{name: "signed asset image", allow: true},
+		{name: "other service", service: "other"},
+		{name: "foreign host", change: func(r *http.Request) { r.Host = "example.com" }},
+		{
+			name:   "foreign origin",
+			change: func(r *http.Request) { r.Header.Set("Origin", "https://example.com") },
+		},
+		{name: "null origin", change: func(r *http.Request) { r.Header.Set("Origin", "null") }},
+		{
+			name:   "duplicate fetch site",
+			change: func(r *http.Request) { r.Header.Add("Sec-Fetch-Site", "same-site") },
+		},
+		{name: "cors", change: func(r *http.Request) { r.Header.Set("Sec-Fetch-Mode", "cors") }},
+		{
+			name:   "iframe",
+			change: func(r *http.Request) { r.Header.Set("Sec-Fetch-Dest", "iframe") },
+		},
+		{name: "post", change: func(r *http.Request) { r.Method = http.MethodPost }},
+		{name: "upgrade", change: func(r *http.Request) { r.Header.Set("Upgrade", "websocket") }},
+		{name: "other endpoint", change: func(r *http.Request) { r.URL.Path = "/api/other" }},
+		{
+			name:   "missing signature",
+			change: func(r *http.Request) { r.URL.Path = "/api/assets/cGF5bG9hZA/dashboard.png" },
+		},
+		{
+			name:   "path separator",
+			change: func(r *http.Request) { r.URL.Path = asset + "/nested.png" },
+		},
+		{
+			name:   "dot segment",
+			change: func(r *http.Request) { r.URL.Path = "/api/assets/cGF5bG9hZA.c2lnbmF0dXJl/.." },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(
+				t.Context(),
+				http.MethodGet,
+				"http://127.0.0.1:27301"+asset,
+				http.NoBody,
+			)
+			r.Header.Set("Sec-Fetch-Site", "cross-site")
+			r.Header.Set("Sec-Fetch-Mode", "no-cors")
+			r.Header.Set("Sec-Fetch-Dest", "image")
+			r.Header.Set("Cookie", "session=ambient")
+			r.Header.Set("Authorization", "Bearer ambient")
+
+			service := tt.service
+			if service == "" {
+				service = "t3"
+			}
+
+			want := http.StatusForbidden
+			if tt.allow {
+				want = http.StatusNoContent
+			}
+
+			if tt.change != nil {
+				tt.change(r)
+			}
+
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != asset || r.Header.Get("Cookie") != "" ||
+					r.Header.Get("Authorization") != "" {
+					t.Fatal("proxy received changed asset path or ambient credentials")
+				}
+
+				w.WriteHeader(http.StatusNoContent)
+			})
+			rec := httptest.NewRecorder()
+			Middleware(
+				port,
+				trusted,
+				service,
+				slog.New(slog.DiscardHandler),
+				next,
+			).ServeHTTP(rec, r)
+
+			if rec.Code != want {
+				t.Fatalf("status = %d, want %d", rec.Code, want)
 			}
 		})
 	}
