@@ -59,6 +59,7 @@ var (
 	errRequired   = errors.New("is required")
 	errSelfTest   = errors.New("--self-test takes no --config")
 	errNotSetUp   = errors.New("install dir is not set up, run the installer first")
+	errHeartbeat  = errors.New("--heartbeat needs a non-empty path")
 	errMaxAgeFlag = errors.New("--heartbeat-max-age needs --heartbeat")
 	errMaxAge     = errors.New("--heartbeat-max-age must be positive")
 	errFault      = errors.New("injected fault")
@@ -364,13 +365,9 @@ func fallbackCmd(args []string) error {
 		return fmt.Errorf("fallback: %w", err)
 	}
 
-	var maxAgeSet bool
+	flagsSet := make(map[string]bool)
 
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "heartbeat-max-age" {
-			maxAgeSet = true
-		}
-	})
+	fs.Visit(func(f *flag.Flag) { flagsSet[f.Name] = true })
 
 	layout := launcher.Layout{Dir: *installDir}
 	log := newLogger(slog.LevelInfo)
@@ -380,7 +377,10 @@ func fallbackCmd(args []string) error {
 	}
 
 	if *heartbeat == "" {
-		if maxAgeSet {
+		switch {
+		case flagsSet["heartbeat"]:
+			return fmt.Errorf("fallback: %w", errHeartbeat)
+		case flagsSet["heartbeat-max-age"]:
 			return fmt.Errorf("fallback: %w", errMaxAgeFlag)
 		}
 
