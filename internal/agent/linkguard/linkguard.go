@@ -8,12 +8,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 // ErrForbidden is returned by Check when a request must not pass a link port.
 var ErrForbidden = errors.New("linkguard: forbidden")
+
+var assetTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 
 // DesktopOrigin is the origin of the T3 Code desktop app's renderer. The app
 // registers the t3code scheme itself, so no web page can send this origin, and
@@ -30,6 +34,10 @@ const DesktopOrigin = "t3code://app"
 // Requests with neither header (native clients) pass when Host is valid.
 // WebSocket upgrades are checked the same way.
 func Check(r *http.Request, port int, trusted []string) error {
+	return check(r, port, trusted, false)
+}
+
+func check(r *http.Request, port int, trusted []string, signedImage bool) error {
 	portStr := strconv.Itoa(port)
 	if !matchesAny(r.Host, "127.0.0.1:"+portStr, "localhost:"+portStr) {
 		return fmt.Errorf("%w: host %q", ErrForbidden, r.Host)
@@ -50,7 +58,7 @@ func Check(r *http.Request, port int, trusted []string) error {
 		}
 	}
 
-	if trustedOrigin {
+	if trustedOrigin || signedImage {
 		return nil
 	}
 
@@ -61,6 +69,29 @@ func Check(r *http.Request, port int, trusted []string) error {
 	}
 
 	return nil
+}
+
+// T3's desktop renderer loads images with plain img elements, which omit Origin.
+// T3 still verifies the signed asset URL before serving the bytes.
+func isT3AssetImageRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet || len(r.Header.Values("Origin")) != 0 ||
+		r.Header.Get("Upgrade") != "" ||
+		!slices.Equal(r.Header.Values("Sec-Fetch-Site"), []string{"cross-site"}) ||
+		!slices.Equal(r.Header.Values("Sec-Fetch-Mode"), []string{"no-cors"}) ||
+		!slices.Equal(r.Header.Values("Sec-Fetch-Dest"), []string{"image"}) {
+		return false
+	}
+
+	asset, ok := strings.CutPrefix(r.URL.Path, "/api/assets/")
+	if !ok {
+		return false
+	}
+
+	token, filename, ok := strings.Cut(asset, "/")
+
+	return ok && assetTokenPattern.MatchString(token) && filename != "" && filename != "." &&
+		filename != ".." &&
+		!strings.ContainsAny(filename, "/\\")
 }
 
 func matchesTrustedOrigin(origin string, trusted []string) bool {
@@ -94,9 +125,17 @@ func matchesTrustedOrigin(origin string, trusted []string) bool {
 
 // Middleware wraps h, answering 403 without calling h when Check fails for port,
 // and logging why.
-func Middleware(port int, trusted []string, log *slog.Logger, handler http.Handler) http.Handler {
+func Middleware(
+	port int,
+	trusted []string,
+	service string,
+	log *slog.Logger,
+	handler http.Handler,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		err := Check(r, port, trusted)
+		signedImage := service == "t3" && isT3AssetImageRequest(r)
+
+		err := check(r, port, trusted, signedImage)
 		if err != nil {
 			log.InfoContext(
 				r.Context(),
@@ -108,6 +147,12 @@ func Middleware(port int, trusted []string, log *slog.Logger, handler http.Handl
 			http.Error(w, "forbidden", http.StatusForbidden)
 
 			return
+		}
+
+		if signedImage {
+			r = r.Clone(r.Context())
+			r.Header.Del("Cookie")
+			r.Header.Del("Authorization")
 		}
 
 		handler.ServeHTTP(w, r)

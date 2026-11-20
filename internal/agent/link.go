@@ -81,6 +81,7 @@ func (agent *Agent) bindLinks(ctx context.Context) ([]*linkServer, error) {
 			Handler: linkguard.Middleware(
 				port,
 				agent.cfg.LinkOrigins,
+				svc,
 				agent.log,
 				srv.proxy(),
 			),

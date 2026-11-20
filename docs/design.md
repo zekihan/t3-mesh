@@ -698,7 +698,11 @@ GETs that carry no `Origin`). Native T3 clients send neither header and pass. Th
 desktop app's window fetches environments cross-site from its own `t3code://app`
 origin, which the app registers and no web page can send; requests from that origin,
 and from any origin listed in the agent's optional `linkOrigins`, pass whatever their
-`Sec-Fetch-Site`. Refused requests are logged with the reason.
+`Sec-Fetch-Site`. A T3 link also accepts an originless, cross-site `no-cors` image
+GET for a signed `/api/assets/<token>/<filename>` URL. The desktop renderer uses
+this request shape for inline images. The link strips cookies and authorization
+headers from these requests, and T3 validates the asset token upstream. Refused
+requests are logged with the reason.
 
 ### Tunnel management
 
