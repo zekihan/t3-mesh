@@ -104,6 +104,8 @@ func TestParseEnrollToken(t *testing.T) {
 func TestParseEnrollTokenUsage(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
+		{"--device=", "agent-test"},
+		{"--device", "", "agent-test"},
 		{"--device", "device-z-phone-mesh", "agent-z-mac"},
 		{"--device", "device-z-phone-mesh", "extra"},
 		{"agent-z-mac", "agent-z-arch"},

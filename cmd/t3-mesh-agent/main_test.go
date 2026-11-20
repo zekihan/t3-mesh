@@ -197,6 +197,25 @@ func TestFallbackWithoutPreviousGood(t *testing.T) {
 	}
 }
 
+func TestFallbackRejectsEmptyHeartbeat(t *testing.T) {
+	layout := newInstall(t)
+
+	err := run([]string{"fallback", "--install-dir", layout.Dir, "--heartbeat="})
+	if err == nil || !strings.Contains(err.Error(), "--heartbeat") {
+		t.Errorf("fallback with empty heartbeat = %v, want heartbeat argument error", err)
+	}
+
+	kg, err := layout.KnownGood()
+	if err != nil || kg != "v2" {
+		t.Errorf("known-good = %q, %v; want unchanged v2", kg, err)
+	}
+
+	cur, err := layout.Current()
+	if err != nil || cur != "v2" {
+		t.Errorf("current = %q, %v; want unchanged v2", cur, err)
+	}
+}
+
 func TestFallbackHeartbeatNoChange(t *testing.T) {
 	layout := newInstall(t)
 	heartbeat := filepath.Join(t.TempDir(), launcher.HeartbeatFile)
