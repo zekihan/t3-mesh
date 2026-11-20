@@ -131,7 +131,8 @@ func (srv *linkServer) proxy() http.Handler {
 	}
 
 	return &httputil.ReverseProxy{
-		Transport: tr,
+		Transport:      tr,
+		ModifyResponse: linkguard.GuardAssetResponse,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
 			pr.Out.URL.Host = srv.key

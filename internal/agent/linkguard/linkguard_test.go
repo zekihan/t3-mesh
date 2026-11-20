@@ -1,10 +1,12 @@
 package linkguard
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -23,6 +25,76 @@ func newRequest(t *testing.T, host string, headers map[string]string) *http.Requ
 	}
 
 	return r
+}
+
+func TestMiddlewareSignedHTMLFrame(t *testing.T) {
+	const claims = `{"version":1,"kind":"attachment","fileName":"Guest traffic.html","mimeType":"text/html"}`
+
+	tests := []struct {
+		change func(*http.Request)
+		name   string
+		claims string
+		allow  bool
+	}{
+		{name: "inline HTML", claims: claims, allow: true},
+		{name: "invalid claims", claims: "["},
+		{name: "file download", claims: strings.Replace(claims, "{", `{"download":true,`, 1)},
+		{
+			name:   "workspace file",
+			claims: strings.ReplaceAll(claims, `"attachment"`, `"workspace-file"`),
+		},
+		{name: "image claim", claims: strings.ReplaceAll(claims, "text/html", "image/png")},
+		{name: "different filename", claims: strings.ReplaceAll(claims, "Guest traffic", "Other")},
+		{
+			name: "top-level navigation", claims: claims,
+			change: func(r *http.Request) { r.Header.Set("Sec-Fetch-Dest", "document") },
+		},
+		{
+			name: "foreign origin", claims: claims,
+			change: func(r *http.Request) { r.Header.Set("Origin", "https://example.com") },
+		},
+		{
+			name: "untrusted host", claims: claims,
+			change: func(r *http.Request) { r.Host = "example.com" },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := "/api/assets/" + base64.RawURLEncoding.EncodeToString([]byte(tt.claims)) +
+				".signature/Guest%20traffic.html"
+			r := httptest.NewRequestWithContext(
+				t.Context(), http.MethodGet, "http://127.0.0.1:27301"+path, http.NoBody,
+			)
+			r.Header.Set("Sec-Fetch-Site", "cross-site")
+			r.Header.Set("Sec-Fetch-Mode", "navigate")
+			r.Header.Set("Sec-Fetch-Dest", "iframe")
+
+			if tt.change != nil {
+				tt.change(r)
+			}
+
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.EscapedPath() != path {
+					t.Fatalf("forwarded path = %q, want %q", r.URL.EscapedPath(), path)
+				}
+
+				w.WriteHeader(http.StatusOK)
+			})
+
+			want := http.StatusForbidden
+			if tt.allow {
+				want = http.StatusOK
+			}
+
+			rec := httptest.NewRecorder()
+			Middleware(port, trusted, "t3", slog.New(slog.DiscardHandler), next).ServeHTTP(rec, r)
+
+			if rec.Code != want {
+				t.Fatalf("iframe request status = %d, want %d", rec.Code, want)
+			}
+		})
+	}
 }
 
 func TestCheck(t *testing.T) {
