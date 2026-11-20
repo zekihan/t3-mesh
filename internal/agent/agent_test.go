@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -1031,6 +1032,130 @@ func TestLinkPortSignedAssetImage(t *testing.T) {
 
 	if code, body := httpGet(t, req); code != http.StatusOK || body != "remote:"+asset {
 		t.Fatalf("signed asset request got %d %q", code, body)
+	}
+}
+
+func TestLinkPortSignedHTMLFrame(t *testing.T) {
+	const (
+		claims         = `{"version":1,"kind":"attachment","fileName":"chart.html","mimeType":"text/html"}`
+		chart          = "<html><body>Guest traffic baseline</body></html>"
+		upstreamPolicy = "default-src 'none'"
+	)
+
+	asset := "/api/assets/" + base64.RawURLEncoding.EncodeToString(
+		[]byte(claims),
+	) + ".signature/chart.html"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != asset {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
+			http.Error(w, "ambient credentials", http.StatusUnauthorized)
+
+			return
+		}
+
+		w.Header().Set("Content-Security-Policy", upstreamPolicy)
+		w.Header().Set("Refresh", "0; url=/api/other")
+		http.SetCookie(
+			w,
+			&http.Cookie{
+				Name:     "ignored",
+				Value:    "frame",
+				Secure:   true,
+				HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			},
+		)
+
+		switch r.URL.Query().Get("fixture") {
+		case "redirect":
+			http.Redirect(w, r, "/api/other", http.StatusFound)
+		case "non-HTML":
+			http.Error(w, "wrong type", http.StatusOK)
+		default:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, chart)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	rig := newHarness(t, nil)
+	rig.hub.waitConn(t, 1)
+	rig.hub.mu.Lock()
+	rig.hub.linkTargets["t3.z-arch"] = upstream.Listener.Addr().String()
+	rig.hub.mu.Unlock()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for fixture, want := range map[string]int{
+		"chart": http.StatusOK, "redirect": http.StatusBadGateway, "non-HTML": http.StatusBadGateway,
+	} {
+		t.Run(fixture, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(
+				t.Context(),
+				http.MethodGet,
+				rig.linkURL(asset+"?fixture="+fixture),
+				http.NoBody,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req.Header.Set("Sec-Fetch-Site", "cross-site")
+			req.Header.Set("Sec-Fetch-Mode", "navigate")
+			req.Header.Set("Sec-Fetch-Dest", "iframe")
+			req.Header.Set("Cookie", "session=ambient")
+			req.Header.Set("Authorization", "Bearer ambient")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != want || resp.Header.Get("Location") != "" {
+				t.Fatalf(
+					"frame response = %d, location %q, want %d without redirect",
+					resp.StatusCode,
+					resp.Header.Get("Location"),
+					want,
+				)
+			}
+
+			if want != http.StatusOK {
+				return
+			}
+
+			assertHTMLFrameResponse(t, resp, upstreamPolicy, chart)
+		})
+	}
+}
+
+func assertHTMLFrameResponse(t *testing.T, resp *http.Response, upstreamPolicy, chart string) {
+	t.Helper()
+
+	const framePolicy = "sandbox allow-scripts allow-forms"
+
+	policies := resp.Header.Values("Content-Security-Policy")
+	if len(policies) != 2 || policies[0] != upstreamPolicy || policies[1] != framePolicy {
+		t.Fatalf("frame CSP = %q", policies)
+	}
+
+	if len(resp.Cookies()) != 0 || resp.Header.Get("Refresh") != "" ||
+		resp.Header.Get(
+			"Cache-Control",
+		) != "no-store" || resp.Header.Get("X-Content-Type-Options") != "nosniff" ||
+		resp.Header.Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("unexpected frame headers: %v", resp.Header)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != chart {
+		t.Fatalf("frame HTML = %q, error = %v", body, err)
 	}
 }
 

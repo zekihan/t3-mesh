@@ -701,8 +701,11 @@ and from any origin listed in the agent's optional `linkOrigins`, pass whatever 
 `Sec-Fetch-Site`. A T3 link also accepts an originless, cross-site `no-cors` image
 GET for a signed `/api/assets/<token>/<filename>` URL. The desktop renderer uses
 this request shape for inline images. The link strips cookies and authorization
-headers from these requests, and T3 validates the asset token upstream. Refused
-requests are logged with the reason.
+headers from these requests, and T3 validates the asset token upstream. For
+embedded HTML charts, an originless cross-site iframe navigation can load an
+inline HTML attachment on that same signed route. The link strips credentials,
+rejects redirects, and applies an opaque-origin sandbox to the frame response.
+Refused requests are logged with the reason.
 
 ### Tunnel management
 
