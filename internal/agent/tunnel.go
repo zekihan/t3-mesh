@@ -490,7 +490,7 @@ func (sess *session) serveStreams() {
 			return
 		}
 
-		agent.wg.Go(func() { agent.handleHubStream(ctx, st) })
+		agent.wg.Go(func() { agent.handleHubStream(ctx, st, sess.tcpLinks) })
 	}
 }
 

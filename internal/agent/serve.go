@@ -5,10 +5,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/yamux"
 
+	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
@@ -22,7 +24,7 @@ const (
 // agent-to-agent stream. The agent trusts the hub's authorization. Relayed
 // streams get a StreamReply once the local dial settles; viewer streams carry
 // raw HTTP straight away and get none.
-func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
+func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream, tcpLinks bool) {
 	setDeadline(st.SetReadDeadline, time.Now().Add(hubHeaderTimeout))
 
 	var hdr proto.StreamHeader
@@ -39,12 +41,6 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
 	setDeadline(st.SetReadDeadline, time.Time{})
 
 	relayed := hdr.From != ""
-	if hdr.ServiceKind() != proto.KindHTTP {
-		agent.replyIf(relayed, st, proto.StreamReply{Error: "service kind unavailable"})
-		_ = st.Close()
-
-		return
-	}
 
 	if !relayed && hdr.Viewer == "" {
 		agent.log.WarnContext(
@@ -54,6 +50,14 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
 			slog.String("svc", hdr.Svc),
 		)
 
+		_ = st.Close()
+
+		return
+	}
+
+	kind := hdr.ServiceKind()
+	if !agent.acceptHubKind(&hdr, kind, tcpLinks) {
+		agent.replyIf(relayed, st, proto.StreamReply{Error: "service kind unavailable"})
 		_ = st.Close()
 
 		return
@@ -107,7 +111,24 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
 		}
 	}
 
+	if kind == proto.KindTCP {
+		tunnel.JoinTCP(conn, st)
+
+		return
+	}
+
 	tunnel.Join(st, conn)
+}
+
+func (agent *Agent) acceptHubKind(hdr *proto.StreamHeader, kind string, tcpLinks bool) bool {
+	if !proto.ValidServiceKind(kind) ||
+		(kind == proto.KindTCP && (!tcpLinks || hdr.From == "" || hdr.Viewer != "")) {
+		return false
+	}
+
+	machine := strings.TrimPrefix(agent.cfg.Identity.Name, policy.AgentPrefix)
+
+	return agent.linkKind(policy.Target(hdr.Svc, machine)) == kind
 }
 
 func (agent *Agent) replyIf(cond bool, st *yamux.Stream, r proto.StreamReply) {

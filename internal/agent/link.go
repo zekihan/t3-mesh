@@ -15,6 +15,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/agent/linkguard"
 	"github.com/zekihan/t3-mesh/internal/proto"
+	"github.com/zekihan/t3-mesh/internal/tunnel"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 var (
 	errNoTunnel = errors.New("hub not connected")
 	errRefused  = errors.New("refused by hub")
+	errLinkKind = errors.New("link kind changed or unavailable")
 )
 
 // linkServer is one loopback link port.
@@ -110,7 +112,7 @@ func (agent *Agent) closeLinks(ls []*linkServer) {
 func (srv *linkServer) serve() {
 	defer srv.bound.Store(false)
 
-	err := srv.srv.Serve(srv.ln)
+	err := srv.srv.Serve(linkListener{Listener: srv.ln, srv: srv})
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		srv.a.log.Error("Link server stopped", slog.String("link", srv.key),
 			slog.Any("err", err),
@@ -124,6 +126,59 @@ func (srv *linkServer) close() {
 	_ = srv.ln.Close()
 }
 
+// linkListener sends only known HTTP connections to net/http. The same socket
+// stays bound when a hub update changes the service kind.
+type linkListener struct {
+	net.Listener
+
+	srv *linkServer
+}
+
+func (ln linkListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := ln.Listener.Accept()
+		if err != nil {
+			return nil, fmt.Errorf("accept link: %w", err)
+		}
+
+		srv := ln.srv
+		switch srv.a.linkKind(srv.key) {
+		case proto.KindHTTP:
+			return conn, nil
+		case proto.KindTCP:
+			srv.a.wg.Go(func() { srv.serveTCP(conn) })
+		default:
+			_ = conn.Close()
+		}
+	}
+}
+
+func (agent *Agent) linkKind(key string) string {
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	return agent.cache.Rules.ServiceKinds[key]
+}
+
+func (srv *linkServer) serveTCP(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	peer, err := srv.a.dialLink(srv.a.ctx, srv.machine, srv.svc, proto.KindTCP)
+	if err != nil {
+		srv.a.log.Debug("TCP link failed",
+			slog.String("link", srv.key),
+			slog.Any("err", err),
+		)
+
+		return
+	}
+
+	stop := context.AfterFunc(srv.a.ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	tunnel.JoinTCP(conn, peer)
+}
+
 // proxy returns the reverse proxy for the link. Keep-alives are off, so every
 // request dials afresh and takes the current path (direct or tunnel); nothing
 // pooled can outlive a path switch. Host, Origin and paths pass unchanged;
@@ -132,7 +187,7 @@ func (srv *linkServer) proxy() http.Handler {
 	tr := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return srv.a.dialLink(ctx, srv.machine, srv.svc)
+			return srv.a.dialLink(ctx, srv.machine, srv.svc, proto.KindHTTP)
 		},
 	}
 
@@ -158,8 +213,12 @@ func (srv *linkServer) proxy() http.Handler {
 
 // dialLink opens a byte stream to svc on machine: direct when the manager can,
 // otherwise through the hub tunnel.
-func (agent *Agent) dialLink(ctx context.Context, machine, svc string) (net.Conn, error) {
-	if agent.direct != nil {
+func (agent *Agent) dialLink(ctx context.Context, machine, svc, kind string) (net.Conn, error) {
+	if agent.linkKind(svc+"."+machine) != kind {
+		return nil, errLinkKind
+	}
+
+	if kind == proto.KindHTTP && agent.direct != nil {
 		c, err := agent.direct.Dial(ctx, machine, svc)
 		if err == nil {
 			return c, nil
@@ -173,13 +232,17 @@ func (agent *Agent) dialLink(ctx context.Context, machine, svc string) (net.Conn
 		)
 	}
 
-	return agent.dialTunnel(ctx, machine, svc)
+	return agent.dialTunnel(ctx, machine, svc, kind)
 }
 
-func (agent *Agent) dialTunnel(ctx context.Context, machine, svc string) (net.Conn, error) {
+func (agent *Agent) dialTunnel(ctx context.Context, machine, svc, kind string) (net.Conn, error) {
 	sess := agent.current()
 	if sess == nil {
 		return nil, errNoTunnel
+	}
+
+	if kind == proto.KindTCP && !sess.tcpLinks {
+		return nil, errLinkKind
 	}
 
 	err := ctx.Err()
@@ -199,7 +262,12 @@ func (agent *Agent) dialTunnel(ctx context.Context, machine, svc string) (net.Co
 
 	setDeadline(st.SetDeadline, time.Now().Add(streamReplyWait))
 
-	err = proto.WriteLine(st, proto.StreamHeader{To: svc + "." + machine})
+	hdr := proto.StreamHeader{To: svc + "." + machine}
+	if kind == proto.KindTCP {
+		hdr.Kind = kind
+	}
+
+	err = proto.WriteLine(st, hdr)
 	if err != nil {
 		_ = st.Close()
 
