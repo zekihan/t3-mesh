@@ -829,3 +829,41 @@ func TestRenewalKeepsNewerEnrollment(t *testing.T) {
 		t.Errorf("cached rejected renewal of %s", oldFP)
 	}
 }
+
+func TestRenewalReplyCachedAfterConcurrentNewestLookup(t *testing.T) {
+	csr := newDeviceCSR(t, devPhone)
+	harness, stub, oldFP, result := startPausedRenewal(t, csr)
+
+	release := sync.OnceFunc(func() { close(stub.release) })
+	defer release()
+
+	var issued string
+
+	select {
+	case issued = <-stub.issued:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal did not reach the issuer")
+	}
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		issued,
+		"/api/v1/machines",
+	); code != http.StatusOK {
+		t.Fatalf("issued leaf got %d before renewal finished", code)
+	}
+
+	release()
+
+	first := <-result
+	if first.status != http.StatusOK {
+		t.Fatalf("renewal got %d: %s", first.status, first.body)
+	}
+
+	replay := harness.renewAs(&renewCall{viewer: devPhone, fp: oldFP, body: csr})
+	if replay.status != http.StatusOK || replay.body != first.body {
+		t.Errorf("replay did not recover renewal reply: %d %s", replay.status, replay.body)
+	}
+
+	noIssuance(t, harness, devPhone, issued)
+}

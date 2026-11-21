@@ -83,12 +83,15 @@ func (server *Server) recordRenewal(identity string, cached *renewalReplyCache) 
 	server.nmu.Lock()
 	defer server.nmu.Unlock()
 
-	if current := server.newest[identity]; current != "" && current != cached.previous {
+	// A concurrent lookup may have already observed this issuance at the issuer.
+	fp := pki.Fingerprint(cached.leaf)
+	if current := server.newest[identity]; current != "" && current != cached.previous &&
+		current != fp {
 		return false
 	}
 
 	server.renewalReplies[identity] = *cached
-	server.newest[identity] = pki.Fingerprint(cached.leaf)
+	server.newest[identity] = fp
 
 	return true
 }
