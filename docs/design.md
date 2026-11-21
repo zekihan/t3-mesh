@@ -223,7 +223,9 @@ the test missed.
    `--device` takes an identity listed under `devices`; each refuses the other kind and
    every unknown or disabled identity, so a token is never minted for the wrong kind.
    (The admin request carries `kind` as `agent` or `device`; one without it is an
-   agent request, as sent by earlier releases.)
+   agent request, as sent by earlier releases.) Add `--qr` to print a terminal
+   QR code alongside the plain token. The code contains only the token text, so
+   the phone can scan it and paste it into enrollment.
 2. On the machine: `t3-mesh-agent enroll --token <token>`. The agent generates an
    ECDSA P-256 key locally in a `0600` file, connects to
    `mesh.noqer.com` without a client certificate and sends the CSR with the token.
@@ -231,6 +233,12 @@ the test missed.
    the certificate and chain. The agent stores them and reconnects with the new
    identity. Which CAs it trusts for peers comes from the trust bundle below, not
    from this chain.
+
+`t3-mesh-hub tokens` lists outstanding tokens on the same socket, with a public
+ID prefix, identity, kind and expiry. The ID is generated independently of the
+token. `tokens revoke <id-prefix>` removes a matching token and refuses a prefix
+that matches more than one. Listing and revoking tokens never reveals the token
+or its hash.
 
 Enrollment uses its own ALPN, `t3-mesh-enroll/1`, without yamux: one `Enroll`
 message of at most 4 KiB, one reply, then close, all within 30 s. The hub accepts a
@@ -1081,6 +1089,10 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
   steps that wait for "every agent acknowledged" read it. The `serviceHealth`
   map has the same contents as `services` in `/api/v1/fleet`.
+- **`t3-mesh-hub status`** uses the admin socket to show each machine's online
+  state, path, running and desired versions, certificate expiry, service health,
+  active alerts and last-seen time. **`t3-mesh-hub disconnect <machine>`** closes
+  that machine's current tunnel sessions so the agent can reconnect.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),

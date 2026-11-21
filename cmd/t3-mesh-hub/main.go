@@ -40,7 +40,7 @@ const (
 
 var (
 	errUsage = errors.New(
-		"usage: t3-mesh-hub enroll-token [--admin-socket path] (<agent-identity> | --device <device-identity>)",
+		"usage: t3-mesh-hub enroll-token [--admin-socket path] [--qr] (<agent-identity> | --device <device-identity>)",
 	)
 	errValidateUsage = errors.New("usage: t3-mesh-hub validate --config <path> [--trust <path>]")
 	errStopped       = errors.New("stopped unexpectedly")
@@ -68,6 +68,8 @@ func run(args []string) error {
 		return validate(args[1:])
 	case "enroll-token":
 		return enrollToken(args[1:])
+	case "status", "tokens", "disconnect":
+		return runAdmin(args[0], args[1:])
 	case "version":
 		if len(args) > 1 {
 			return fmt.Errorf("version: %w", errArguments)
@@ -78,7 +80,7 @@ func run(args []string) error {
 		return nil
 	default:
 		return fmt.Errorf(
-			"%w %q (want serve, validate, enroll-token or version)",
+			"%w %q (want serve, validate, enroll-token, status, tokens, disconnect or version)",
 			errSubcommand,
 			args[0],
 		)
@@ -138,7 +140,7 @@ func parseServe(args []string) (serveOptions, error) {
 		&opts.adminSocket,
 		"admin-socket",
 		enroll.DefaultAdminSocket,
-		"unix socket for enroll-token",
+		"unix socket for local admin commands",
 	)
 	fs.BoolVar(
 		&opts.proxyProtocol,
@@ -255,10 +257,12 @@ func serve(args []string) error {
 		ReadHeaderTimeout: httpHeaderTimeout,
 	}
 	admin := &enroll.Admin{
-		Path:    opts.adminSocket,
-		Tokens:  tokens,
-		Allowed: srv.EnrollTokenAllowed,
-		Log:     log,
+		Path:       opts.adminSocket,
+		Tokens:     tokens,
+		Allowed:    srv.EnrollTokenAllowed,
+		Status:     srv.AdminStatus,
+		Disconnect: srv.Disconnect,
+		Log:        log,
 	}
 
 	onChange := func(old, next *hubconfig.Snapshot) {
@@ -420,6 +424,7 @@ type enrollTokenArgs struct {
 	socket   string
 	kind     string
 	identity string
+	qr       bool
 }
 
 func parseEnrollToken(args []string) (enrollTokenArgs, error) {
@@ -440,6 +445,8 @@ func parseEnrollToken(args []string) (enrollTokenArgs, error) {
 		"",
 		"enrolled-device identity to mint a token for (instead of an agent identity argument)",
 	)
+
+	fs.BoolVar(&parsed.qr, "qr", false, "also print the token as a terminal QR code")
 
 	err := fs.Parse(args)
 	if err != nil {
@@ -486,6 +493,10 @@ func enrollToken(args []string) error {
 
 	fmt.Fprintln(os.Stdout, token)
 	fmt.Fprintf(os.Stdout, "expires %s\n", expires.UTC().Format(time.RFC3339))
+
+	if parsed.qr {
+		return printTokenQR(os.Stdout, token)
+	}
 
 	return nil
 }

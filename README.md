@@ -102,8 +102,11 @@ The Android app enrolls an enrolled-device identity (`device-<name>-mesh`, liste
 15 minutes, and type it into the app:
 
 ```sh
-kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub enroll-token --device device-z-phone-mesh
+kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub enroll-token --qr --device device-z-phone-mesh
 ```
+
+Scan the QR code with the phone's camera and paste the token into the app. The
+command also prints the plain token.
 
 The command refuses agent identities and every name not listed under `devices`, and an
 agent token cannot enroll a device. The app speaks the enrollment protocol and renews
@@ -119,6 +122,12 @@ with a new token.
 filesystem; mount an `emptyDir` on `/run/t3-mesh` (admin socket) and set
 `fsGroup: 65532`. Ports: 8443 (agents), 8080 (viewers), 9090 (probes). The homelab pins
 `edge@sha256:...`.
+
+Run `t3-mesh-hub status`, `tokens`, `tokens revoke <id-prefix>` or
+`disconnect <machine>` inside the hub pod using the same `kubectl exec` command
+as for enrollment. The token list shows outstanding tokens by ID prefix,
+identity, kind and expiry. Disconnect closes the machine's current tunnels so
+its agent can reconnect.
 
 Set `serve --config-map t3-mesh-hub-config` to watch the hub config and
 `clients-ca-bundle` in the pod's namespace. The optional `--trust-config-map`
