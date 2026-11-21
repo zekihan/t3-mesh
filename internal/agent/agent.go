@@ -28,6 +28,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/launcher"
 	"github.com/zekihan/t3-mesh/internal/netwatch"
 	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/release"
 )
 
@@ -78,57 +79,62 @@ type Options struct {
 	// LookupHost replaces the hub DNS lookup. Production leaves it nil.
 	LookupHost func(ctx context.Context, host string) ([]string, error)
 	// AddrPresent replaces the local-address check. Production leaves it nil.
-	AddrPresent func(netip.Addr) bool
-	Version     string
+	AddrPresent  func(netip.Addr) bool
+	Version      string
+	StatusSocket string
 	// DNSRecheckInterval replaces the 30 s DNS backstop when positive.
 	DNSRecheckInterval time.Duration
 }
 
 // Agent is the running agent.
 type Agent struct {
-	ident        tls.Certificate
-	renewAfter   time.Time
-	lastHelloAck time.Time
-	lastSave     time.Time
-	health       updater.HealthSink
-	ctx          context.Context //nolint:containedctx // root context of the background goroutines
-	localAddrs   func() ([]netip.Addr, error)
-	now          func() time.Time
-	addrPresent  func(netip.Addr) bool
-	gatewayMAC   func() (string, error)
-	cfg          *agentconfig.Config
-	renewKick    chan struct{}
-	statusNudge  chan struct{}
-	curChanged   chan struct{}
-	kick         chan struct{}
-	log          *slog.Logger
-	baseLog      *slog.Logger
-	lookupHost   func(ctx context.Context, host string) ([]netip.Addr, error)
-	netEvents    <-chan netwatch.Event
-	hubTLS       *tls.Config
-	live         map[*session]struct{}
-	direct       *direct.Manager
-	upd          *updater.Updater
-	cur          *session
-	roots        *x509.CertPool
-	cache        *state.Cache
-	version      string
-	rootsPEM     string
-	store        pki.Store
-	prefixes     []netip.Prefix
-	warnings     []string
-	wg           sync.WaitGroup
-	dnsEvery     time.Duration
-	renewWindow  time.Duration
-	renewRetry   time.Duration
-	renewEvery   time.Duration
-	statusEvery  time.Duration
-	backoffMax   time.Duration
-	backoffBase  time.Duration
-	mu           sync.Mutex
-	saveMu       sync.Mutex
-	dialMu       sync.Mutex
-	renewing     atomic.Bool
+	ident            tls.Certificate
+	renewAfter       time.Time
+	lastHelloAck     time.Time
+	lastSave         time.Time
+	health           updater.HealthSink
+	ctx              context.Context //nolint:containedctx // root context of the background goroutines
+	localAddrs       func() ([]netip.Addr, error)
+	now              func() time.Time
+	addrPresent      func(netip.Addr) bool
+	gatewayMAC       func() (string, error)
+	cfg              *agentconfig.Config
+	renewKick        chan struct{}
+	statusNudge      chan struct{}
+	exposureNudge    chan struct{}
+	curChanged       chan struct{}
+	kick             chan struct{}
+	log              *slog.Logger
+	baseLog          *slog.Logger
+	lookupHost       func(ctx context.Context, host string) ([]netip.Addr, error)
+	netEvents        <-chan netwatch.Event
+	hubTLS           *tls.Config
+	live             map[*session]struct{}
+	direct           *direct.Manager
+	upd              *updater.Updater
+	cur              *session
+	roots            *x509.CertPool
+	cache            *state.Cache
+	version          string
+	statusSocket     string
+	rootsPEM         string
+	store            pki.Store
+	prefixes         []netip.Prefix
+	warnings         []string
+	services         []proto.ServiceHealth
+	exposureWarnings []string
+	wg               sync.WaitGroup
+	dnsEvery         time.Duration
+	renewWindow      time.Duration
+	renewRetry       time.Duration
+	renewEvery       time.Duration
+	statusEvery      time.Duration
+	backoffMax       time.Duration
+	backoffBase      time.Duration
+	mu               sync.Mutex
+	saveMu           sync.Mutex
+	dialMu           sync.Mutex
+	renewing         atomic.Bool
 }
 
 // New validates opts and returns an Agent. Identity and state are loaded by Run.
@@ -148,30 +154,32 @@ func New(
 	}
 
 	agent := &Agent{
-		cfg:         opts.Config,
-		log:         opts.Log.With(slog.String("component", "agent")),
-		baseLog:     opts.Log,
-		now:         opts.Now,
-		version:     opts.Version,
-		store:       pki.Store{Dir: opts.Config.Identity.Dir},
-		hubTLS:      opts.HubTLS,
-		health:      opts.Health,
-		gatewayMAC:  defaultGatewayMAC,
-		localAddrs:  netwatch.LocalAddrs,
-		addrPresent: defaultAddrPresent,
-		netEvents:   opts.NetEvents,
-		dnsEvery:    dnsRecheckInterval,
-		backoffBase: defaultBackoffBase,
-		backoffMax:  defaultBackoffMax,
-		statusEvery: defaultStatusEvery,
-		renewEvery:  defaultRenewEvery,
-		renewWindow: defaultRenewWindow,
-		renewRetry:  defaultRenewRetry,
-		live:        make(map[*session]struct{}),
-		kick:        make(chan struct{}, 1),
-		curChanged:  make(chan struct{}, 1),
-		statusNudge: make(chan struct{}, 1),
-		renewKick:   make(chan struct{}, 1),
+		cfg:           opts.Config,
+		log:           opts.Log.With(slog.String("component", "agent")),
+		baseLog:       opts.Log,
+		now:           opts.Now,
+		version:       opts.Version,
+		statusSocket:  opts.StatusSocket,
+		store:         pki.Store{Dir: opts.Config.Identity.Dir},
+		hubTLS:        opts.HubTLS,
+		health:        opts.Health,
+		gatewayMAC:    defaultGatewayMAC,
+		localAddrs:    netwatch.LocalAddrs,
+		addrPresent:   defaultAddrPresent,
+		netEvents:     opts.NetEvents,
+		dnsEvery:      dnsRecheckInterval,
+		backoffBase:   defaultBackoffBase,
+		backoffMax:    defaultBackoffMax,
+		statusEvery:   defaultStatusEvery,
+		renewEvery:    defaultRenewEvery,
+		renewWindow:   defaultRenewWindow,
+		renewRetry:    defaultRenewRetry,
+		live:          make(map[*session]struct{}),
+		kick:          make(chan struct{}, 1),
+		curChanged:    make(chan struct{}, 1),
+		statusNudge:   make(chan struct{}, 1),
+		exposureNudge: make(chan struct{}, 1),
+		renewKick:     make(chan struct{}, 1),
 	}
 	agent.lookupHost = agent.defaultLookup
 
@@ -288,6 +296,10 @@ func (agent *Agent) Run(ctx context.Context) error {
 	agent.setupUpdater()
 	agent.startupOK()
 
+	if agent.statusSocket != "" {
+		agent.wg.Go(func() { agent.localStatusLoop(ctx, links) })
+	}
+
 	for _, l := range links {
 		agent.wg.Go(l.serve)
 	}
@@ -295,6 +307,8 @@ func (agent *Agent) Run(ctx context.Context) error {
 	agent.wg.Go(func() { agent.tunnelLoop(ctx) })
 	agent.wg.Go(func() { agent.netLoop(ctx) })
 	agent.wg.Go(func() { agent.statusLoop(ctx) })
+	agent.wg.Go(func() { agent.serviceLoop(ctx) })
+	agent.wg.Go(func() { agent.exposureLoop(ctx) })
 	agent.wg.Go(func() { agent.renewLoop(ctx) })
 
 	if agent.upd != nil {

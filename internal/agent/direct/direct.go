@@ -255,6 +255,20 @@ func sameMAC(left, right string) bool {
 	return strings.EqualFold(left, right)
 }
 
+// DiagnosticGate reports the direct gate and how the local gateway compares
+// with the cached home gateway.
+func (mgr *Manager) DiagnosticGate() (bool, string, string) {
+	view := mgr.view()
+	active, reason := mgr.active(view, false)
+	verdict, gatewayReason := mgr.gatewayVerdict(view.HomeGatewayMAC)
+
+	if active && !view.HubConnected && gatewayReason != "" {
+		return false, gatewayReason, verdict
+	}
+
+	return active, reason, verdict
+}
+
 // Sessions returns the number of live direct sessions in both directions.
 func (mgr *Manager) Sessions() int {
 	mgr.mu.Lock()
@@ -471,16 +485,26 @@ func (mgr *Manager) active(view *View, checkGateway bool) (bool, string) {
 		return true, ""
 	}
 
+	_, reason := mgr.gatewayVerdict(view.HomeGatewayMAC)
+
+	return reason == "", reason
+}
+
+func (mgr *Manager) gatewayVerdict(home string) (string, string) {
+	if home == "" {
+		return "no cached home gateway", "hub unreachable and no cached home gateway"
+	}
+
 	mac, err := mgr.opts.GatewayMAC()
 	if err != nil {
-		return false, fmt.Sprintf("hub unreachable and gateway unknown: %v", err)
+		return "gateway unknown", fmt.Sprintf("hub unreachable and gateway unknown: %v", err)
 	}
 
-	if !sameMAC(mac, view.HomeGatewayMAC) {
-		return false, "hub unreachable and gateway differs from home"
+	if !sameMAC(mac, home) {
+		return "differs from home", "hub unreachable and gateway differs from home"
 	}
 
-	return true, ""
+	return "matches home", ""
 }
 
 // listenAddrs returns the local addresses inside the home prefixes that a

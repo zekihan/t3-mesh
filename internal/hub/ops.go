@@ -67,24 +67,25 @@ type machineStatus struct {
 	DeviceListener *proto.DeviceListener `json:"deviceListener,omitempty"`
 	// The live session's tunnel source address, for the API.
 	source         netip.Addr
-	CertNotAfter   *time.Time           `json:"certNotAfter,omitempty"`
-	Alerts         map[string]bool      `json:"alerts"`
-	ConnectedSince *time.Time           `json:"connectedSince,omitempty"`
-	LastSeen       *time.Time           `json:"lastSeen,omitempty"`
-	Acked          ackedStatus          `json:"acked"`
-	Version        string               `json:"version,omitempty"`
-	Identity       string               `json:"identity"`
-	Path           string               `json:"path,omitempty"`
-	Services       servicesStatus       `json:"services"`
-	Warnings       []string             `json:"warnings"`
-	AgentWarnings  []string             `json:"agentWarnings,omitempty"`
-	FailedUpdates  []proto.FailedUpdate `json:"failedUpdates"`
-	LinkStreams    int64                `json:"linkStreams"`
-	DirectSessions int                  `json:"directSessions"`
-	DeviceSessions int                  `json:"deviceSessions"`
-	OpenStreams    int64                `json:"openStreams"`
-	Sessions       int                  `json:"sessions"`
-	Connected      bool                 `json:"connected"`
+	CertNotAfter   *time.Time               `json:"certNotAfter,omitempty"`
+	Alerts         map[string]bool          `json:"alerts"`
+	ConnectedSince *time.Time               `json:"connectedSince,omitempty"`
+	LastSeen       *time.Time               `json:"lastSeen,omitempty"`
+	Acked          ackedStatus              `json:"acked"`
+	Version        string                   `json:"version,omitempty"`
+	Identity       string                   `json:"identity"`
+	Path           string                   `json:"path,omitempty"`
+	Services       servicesStatus           `json:"services"`
+	ServiceHealth  map[string]serviceHealth `json:"serviceHealth"`
+	Warnings       []string                 `json:"warnings"`
+	AgentWarnings  []string                 `json:"agentWarnings,omitempty"`
+	FailedUpdates  []proto.FailedUpdate     `json:"failedUpdates"`
+	LinkStreams    int64                    `json:"linkStreams"`
+	DirectSessions int                      `json:"directSessions"`
+	DeviceSessions int                      `json:"deviceSessions"`
+	OpenStreams    int64                    `json:"openStreams"`
+	Sessions       int                      `json:"sessions"`
+	Connected      bool                     `json:"connected"`
 }
 
 type statusDoc struct {
@@ -195,6 +196,7 @@ func (server *Server) machineStatusLocked(
 	}
 
 	configured := snap.Services(name)
+	out.ServiceHealth = serviceHealthOf(configured, live)
 	missing, unexpected := serviceDiff(ms.announced, configured)
 	out.Services = servicesStatus{
 		Configured: configured, Announced: nonNil(ms.announced),
@@ -209,11 +211,16 @@ func (server *Server) machineStatusLocked(
 			Revocations: st.RevocationRevision, TrustBundle: st.TrustBundleRevision,
 			DeviceLeaves: st.DeviceLeavesRevision,
 		}
-		out.AgentWarnings = st.Warnings
+		out.AgentWarnings = slices.DeleteFunc(slices.Clone(st.Warnings), isExposureWarning)
 		out.FailedUpdates = nonNilFU(st.FailedUpdates)
 	}
 
+	if live != nil {
+		out.AgentWarnings = append(out.AgentWarnings, live.exposureWarnings...)
+	}
+
 	out.Alerts = map[string]bool{
+		"exposed":      live != nil && len(live.exposureWarnings) > 0,
 		"disconnected": server.disconnectedLocked(mc, ms, now),
 		"cert-expiry":  certExpiring(ms, now),
 		"update-failed": func() bool {
@@ -224,6 +231,10 @@ func (server *Server) machineStatusLocked(
 	}
 
 	return out
+}
+
+func isExposureWarning(warning string) bool {
+	return strings.HasPrefix(warning, proto.ExposureWarningPrefix)
 }
 
 func nonNil(in []string) []string {
@@ -338,6 +349,13 @@ func (server *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 				known = true
 				firing = server.disconnectedLocked(mc, ms, now)
 				reason = "agent not connected"
+			case "agent-" + mname + "-exposed":
+				known = true
+
+				if live := ms.newestLive(); live != nil {
+					firing = len(live.exposureWarnings) > 0
+					reason = strings.Join(live.exposureWarnings, ", ")
+				}
 			case "agent-" + mname + "-cert-expiry":
 				known = true
 				firing = certExpiring(ms, now)

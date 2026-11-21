@@ -47,15 +47,16 @@ type apiTunnel struct {
 }
 
 // apiFleetMachine is the /machines entry plus the /status state of the machine.
-type apiFleetMachine struct {
+type apiFleetMachine struct { //nolint:govet // keep the existing fields first in JSON
 	apiMachine
 
 	DesiredVersion string `json:"desiredVersion,omitempty"`
 
-	AgentVersion *string   `json:"agentVersion"`
-	CertNotAfter *string   `json:"certNotAfter"`
-	Tunnel       apiTunnel `json:"tunnel"`
-	Alerts       []string  `json:"alerts"`
+	AgentVersion *string                  `json:"agentVersion"`
+	CertNotAfter *string                  `json:"certNotAfter"`
+	Tunnel       apiTunnel                `json:"tunnel"`
+	Alerts       []string                 `json:"alerts"`
+	Services     map[string]serviceHealth `json:"services"`
 }
 
 // apiTrust is the body of /api/v1/trust: the clients CA bundle with its revision
@@ -301,6 +302,7 @@ func (server *Server) serveFleet(
 			CertNotAfter:   formatTime(st.CertNotAfter),
 			Tunnel:         apiTunnel{ConnectedSince: formatTime(st.ConnectedSince)},
 			Alerts:         firingAlerts(st.Alerts),
+			Services:       st.ServiceHealth,
 		}
 
 		if st.Version != "" {

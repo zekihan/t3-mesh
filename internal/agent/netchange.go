@@ -31,6 +31,8 @@ func (agent *Agent) netLoop(ctx context.Context) {
 				continue
 			}
 
+			signal(agent.exposureNudge)
+
 			agent.log.DebugContext(ctx, "Network event", slog.String("kind", ev.Kind.String()))
 			agent.pathCheck(ctx, ev.Kind.String())
 		case <-tick.C:

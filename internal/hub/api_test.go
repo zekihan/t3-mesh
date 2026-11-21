@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -800,4 +801,80 @@ func jsonHasNull(t *testing.T, body, machine, key string) bool {
 	t.Fatalf("no machine %q in %s", machine, body)
 
 	return false
+}
+
+func TestAPIFleetServiceHealth(t *testing.T) {
+	harness := newEnv(t)
+	harness.setConfig(cfgOpts{api: []string{"z-phone"}})
+	fake := harness.connect("agent-devbox", "devbox-body")
+
+	const (
+		unknown = `"services":{"t3":{"since":null,"state":"unknown"}}`
+		known   = `"services":{"t3":{"since":"2026-11-18T08:00:00Z","state":"unreachable"}}`
+	)
+
+	body := harness.fleet("z-phone", "").body
+	if strings.Count(body, unknown) != 2 {
+		t.Fatalf("old agent and offline machine: %s", body)
+	}
+
+	err := fake.ctrl.Send(proto.Status{Services: []proto.ServiceHealth{
+		{Name: "t3", State: proto.ServiceUnreachable, Since: "2026-11-18T08:00:00Z"},
+		{Name: "unconfigured", State: proto.ServiceReachable, Since: "2026-11-18T08:00:00Z"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, func() bool {
+		body = harness.fleet("z-phone", "").body
+
+		return strings.Contains(body, known)
+	})
+
+	if devbox := decodeFleet(t, body).Machines[0]; !devbox.Online || len(devbox.Services) != 1 {
+		t.Fatalf("unreachable service on connected agent: %+v", devbox)
+	}
+
+	var ops statusDoc
+	getJSON(t, harness.ops.URL+"/status", &ops)
+
+	if got := ops.Machines["devbox"].ServiceHealth["t3"]; got.State != proto.ServiceUnreachable {
+		t.Fatalf("ops service health: %+v", got)
+	}
+
+	fake.close()
+	eventually(t, func() bool {
+		body := harness.fleet("z-phone", "").body
+
+		return strings.Count(body, unknown) == 2
+	})
+}
+
+func TestExposureAlertClears(t *testing.T) {
+	harness := newEnv(t)
+	fake := harness.connect("agent-devbox", "devbox-body")
+	target := harness.ops.URL + "/alerts/agent-devbox-exposed"
+
+	for _, want := range []int{http.StatusServiceUnavailable, http.StatusOK} {
+		report := proto.Status{}
+		if want == http.StatusServiceUnavailable {
+			report.Warnings = []string{
+				proto.ExposureWarningPrefix + "t3 port 3773 accepts TCP on 192.0.2.1",
+			}
+		}
+
+		err := fake.ctrl.Send(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		eventually(t, func() bool {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody)
+			rec := httptest.NewRecorder()
+			harness.srv.OpsHandler().ServeHTTP(rec, req)
+
+			return rec.Code == want
+		})
+	}
 }

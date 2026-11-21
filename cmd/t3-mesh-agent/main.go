@@ -49,6 +49,8 @@ const usage = `usage: t3-mesh-agent <subcommand> [flags]
   enroll --config <path> --token <token>    obtain an identity from the hub
   fallback --install-dir <dir> [--heartbeat <path> [--heartbeat-max-age <dur>]]
                                             repoint known-good at previous-good
+  status [--json] [--socket <path>]         show the running agent state
+  doctor [--json] [--config <path>]         check this machine
   version                                   print the version
 `
 
@@ -87,6 +89,10 @@ func run(args []string) error {
 		return enrollCmd(args[1:])
 	case "fallback":
 		return fallbackCmd(args[1:])
+	case "status":
+		return statusCmd(args[1:])
+	case "doctor":
+		return doctorCmd(args[1:])
 	case launcher.SelfTestChildArg:
 		err := launcher.SelfTestChild(args[1:])
 		if err != nil {
@@ -107,7 +113,7 @@ func run(args []string) error {
 
 		return nil
 	default:
-		return fmt.Errorf("%w %q (want run, launcher, enroll, fallback or version)",
+		return fmt.Errorf("%w %q (want run, launcher, enroll, fallback, status, doctor or version)",
 			errSubcommand, args[0])
 	}
 }
@@ -154,7 +160,9 @@ func runAgent(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	agt, err := agent.New(agent.Options{Config: cfg, Version: version, Log: log})
+	agt, err := agent.New(agent.Options{
+		Config: cfg, Version: version, Log: log, StatusSocket: agent.DefaultStatusSocket(),
+	})
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}

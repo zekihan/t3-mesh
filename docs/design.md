@@ -456,7 +456,9 @@ relay path, which bypasses the viewer controls.
 
 The hub accepts the current and the previous tunnel protocol version (`t3-mesh/N`
 and `t3-mesh/N-1` in ALPN), so agents on the previous release keep working while a
-fleet update is in progress or rolled back.
+fleet update is in progress or rolled back. The service health field in `Status`
+is optional, so adding it leaves the protocol version unchanged. Older hubs ignore
+it and newer hubs accept reports that omit it.
 
 ### Routing
 
@@ -536,15 +538,22 @@ away, or whose listener is closed has none.
 `/status` reports for each, read through the same code:
 
 ```json
-{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"alerts":["cert-expiry"]}]}
+{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"services":{"t3":{"state":"reachable","since":"2026-11-18T06:00:04Z"}},"alerts":["cert-expiry"]}]}
 ```
 
 Each entry is the `/machines` object (so `agentIdentity` and `direct` too) plus `agentVersion` (as the agent reported it,
 `null` if unknown), `certNotAfter` (best known leaf expiry, `null` if unknown),
 `tunnel` (`path` is `LAN` or `OCI` and `connectedSince` the live session's accept
-time, both `null` while not connected) and `alerts`, the sorted names of the
+time, both `null` while not connected), `services` and `alerts`. The service map
+has one entry per service configured for that machine at the hub. Each value has
+a `state` of `reachable`, `unreachable` or `unknown` and a UTC RFC 3339
+`since` time: when the agent first saw that state. The agent probes every 30 s
+but reports only changes, so `since` is not the time of the last probe. The state
+is `unknown` with `since: null` while offline or until the current session reports
+a result. `online` still reflects the tunnel.
+`alerts` holds the sorted names of the
 `/status` alerts that are currently true (`cert-expiry`, `disconnected`,
-`update-failed`), `[]` when none. `caller.path` is the path of the API request
+`exposed`, `update-failed`), `[]` when none. `caller.path` is the path of the API request
 itself: `LAN` if the `X-Real-IP` header, which Traefik's `traefik-real-ip`
 middleware sets at the entrypoint, is inside `homeCIDRs`, `OCI` if it is outside,
 `null` if the header is missing or not a bare IP address. The TCP peer is a Traefik
@@ -1022,6 +1031,23 @@ Data streams start with one header line of JSON, then raw bytes:
 
 ## Observability
 
+The agent checks each local `serve` target at startup and every 30 s. For
+`t3` it sends an HTTP GET to the configured address with a 2 s timeout. Any
+HTTP response counts, including redirects and errors. After a failed GET a
+TCP connection attempt distinguishes a failed connect from an accepting port
+that did not answer HTTP. Both outcomes are unreachable. Other services use a
+TCP connection only. The agent sends an extra `Status` when a probe first
+reports or its state changes. The periodic status report includes the latest
+check times.
+
+At startup, every five minutes and on network changes, the agent checks for
+TCP listeners on the ports of its loopback `serve` targets. It tries the
+machine's non-loopback, non-link-local IPv4 and IPv6 addresses with a one-second
+timeout per connection. A connection adds a warning with the service, port and
+address. The agent sends a report when these warnings change. The hub uses the
+live session's warnings to raise `agent-<machine>-exposed`. A clean report clears
+the warning and alert. The check leaves listeners and traffic alone.
+
 The cluster has no metrics scraper or vmalert, so the hub evaluates its own alert
 conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
@@ -1030,11 +1056,13 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   reports (`deviceListener`: port and bound addresses, absent while not bound), stream
   counts, version, certificate expiry, last seen, and the last acknowledged
   `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
-  steps that wait for "every agent acknowledged" read it.
+  steps that wait for "every agent acknowledged" read it. The `serviceHealth`
+  map has the same contents as `services` in `/api/v1/fleet`.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
-  `agent-<machine>-cert-expiry` (under 14 days), `agent-<machine>-update-failed`, and
+  `agent-<machine>-cert-expiry` (under 14 days), `agent-<machine>-exposed`,
+  `agent-<machine>-update-failed`, and
   `stale-config`.
 - The hub logs agent events (connect, disconnect, path change, renewal, issued
   fingerprint, update, rollback, reject, rejected peer) to stdout, so they reach
@@ -1053,6 +1081,37 @@ admitted connection as `Device session open` and every WebSocket upgrade as
   TLS check on `mesh.noqer.com` confirms the hub serves its certificate. A Gatus
   probe cannot speak the tunnel protocol, so rejection of unauthenticated or
   non-agent tunnel connections is covered by the integration test and by M1.
+
+### Local agent diagnostics
+
+Each installed agent serves local status over a Unix socket. Systemd creates
+`/run/t3-mesh` on Linux. On macOS a boot-time LaunchDaemon creates
+`/var/run/t3-mesh` and the agent creates `agent.sock` inside it. The directory
+is mode `0750` and the socket is mode `0660`, owned by the service account
+and group (`t3mesh` or `_t3mesh`). The installers add the invoking
+`SUDO_USER` to that group. The new group takes effect after a new login.
+An existing installation needs the updated packaging to create the runtime
+directory. Failure to open the socket is logged and retried while the agent
+continues serving its regular traffic.
+
+The socket takes one JSON line, `{"op":"status"}`, sends one JSON line with
+`status` or `error`, then closes the connection. The only operation reads the
+running agent's local state. `t3-mesh-agent status` prints the version, tunnel
+state, LAN or WAN path and connection time, the direct gate and its reason,
+gateway MAC verdict, bound link and device ports, cached revisions and the
+remaining direct cache window, identity certificate expiry, update probation
+and failures, local service health and warnings. This works when the hub is
+down. Use `--json` for the snapshot as JSON and `--socket` to select a path.
+
+`t3-mesh-agent doctor` checks that the local config parses, the socket
+answers, the serve targets respond and the configured link, direct and device
+ports are available or reported bound by the agent. Port checks on unbound
+ports attempt a TCP bind and immediately close it without listening. Doctor
+also checks certificate expiry, the installed current and known-good versions
+and hub DNS resolution. It warns under 14 days and fails for an expired
+certificate. If a check needs more privileges it reports `skipped (needs root)`.
+A failed check produces a nonzero exit. `--config` selects a config other
+than the installed one and `--json` prints the check results as JSON.
 
 ## Security
 

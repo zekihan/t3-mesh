@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/agent/linkguard"
@@ -36,6 +37,7 @@ type linkServer struct {
 	machine     string
 	hostRewrite string
 	port        int
+	bound       atomic.Bool
 }
 
 // bindLinks binds every configured link port. A failure is a startup failure,
@@ -77,6 +79,7 @@ func (agent *Agent) bindLinks(ctx context.Context) ([]*linkServer, error) {
 		}
 
 		srv := &linkServer{a: agent, key: key, svc: svc, machine: machine, port: port, ln: ln}
+		srv.bound.Store(true)
 		srv.srv = &http.Server{
 			Handler: linkguard.Middleware(
 				port,
@@ -105,6 +108,8 @@ func (agent *Agent) closeLinks(ls []*linkServer) {
 }
 
 func (srv *linkServer) serve() {
+	defer srv.bound.Store(false)
+
 	err := srv.srv.Serve(srv.ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		srv.a.log.Error("Link server stopped", slog.String("link", srv.key),
@@ -114,6 +119,7 @@ func (srv *linkServer) serve() {
 }
 
 func (srv *linkServer) close() {
+	srv.bound.Store(false)
 	_ = srv.srv.Close()
 	_ = srv.ln.Close()
 }
