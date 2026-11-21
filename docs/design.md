@@ -423,8 +423,19 @@ The list of machines and services is fixed. An agent announces what it serves; t
 hub accepts only listed services and reports any difference in `/status` and as a
 log event. The same list generates DNS records, certificates and Traefik routes.
 
-The hub watches its mounted ConfigMap and applies changes live (rules, revocations,
-desired version). The pod template carries no ConfigMap checksum, so a release bump
+The hub applies rules, revocations and desired versions live. With
+`--config-map t3-mesh-hub-config`, it lists and watches that ConfigMap and
+`clients-ca-bundle` (override with `--trust-config-map`) in its pod namespace,
+using a separate exact `metadata.name` selector for each. API events run through
+the same validation as mounted inputs and usually reach the hub within a second.
+The hub loads the mounts at startup and always reads the serving certificate
+from its mount.
+
+Each connected watch takes precedence over its mount. On an API error the hub
+warns once per watch outage and retries with backoff. It falls back to the mount
+once it matches the last applied API data. Until then it retains that data so a
+lagging projection cannot undo a revocation. If the hub has applied no API data
+for a ConfigMap, it uses the mount immediately. The pod template carries no ConfigMap checksum, so a release bump
 does not restart the hub or drop tunnels.
 
 Kubernetes updates mounted ConfigMaps and Secrets by swapping a `..data` symlink, so
@@ -433,7 +444,7 @@ event, plus every 60 s as a backstop. `/readyz` means only "can serve": listener
 up and configuration loaded once. Staleness never fails readiness, since pulling the
 only replica from the Service would turn a late reload into an outage. Instead
 `/alerts/stale-config` turns red when the loaded policy revision has differed from
-the mounted one for more than 10 minutes, or the loaded serving certificate is
+the selected source for more than 10 minutes, or the loaded serving certificate is
 within 14 days of expiry while a newer one is mounted.
 
 `t3-mesh-hub validate --config config.yaml` runs the same parser offline, so CI can
@@ -660,7 +671,10 @@ with its own design.
   restrict `delete` by label, so this widens the hub's power to deleting other
   CertificateRequests in `mtls-pki`; cert-manager recreates them for live
   Certificates.
-- Read its own ConfigMaps (configuration and `clients-ca-bundle`). Nothing else.
+- In its own namespace, `get`, `list`, and `watch` core `configmaps`, with
+  `resourceNames` limited to the config map named by `--config-map` (`t3-mesh-hub-config`
+  in the chart) and `clients-ca-bundle`. The name selectors allow the restricted
+  list and watch requests.
 
 ## Agent
 
@@ -1387,7 +1401,7 @@ Traefik middleware lists a kind `agent` identity.
 | PROXY trust | Traefik `trustedIPs` = pod CIDR, limited to frpc by NetworkPolicy; forged-header and non-frpc-pod tests in M1 |
 | Tunnel admission | certificate URI must be exactly one configured agent identity |
 | Hub namespace network | default-deny baseline plus explicit ingress and egress |
-| Config reload | watch mount directories, periodic re-read, `/alerts/stale-config` on stale state |
+| Config reload | optional ConfigMap API watches with mount fallback, periodic re-read, `/alerts/stale-config` on stale state |
 | Downgrades | hub flag allows any signed release at or above `minStateVersion` (accepted risk); download URL fixed in the binary |
 | M2 cutover gate | real T3 linking, pairing, reconnect, sleep/wake and viewer access |
 | Hub certificate | Let's Encrypt |

@@ -119,6 +119,12 @@ filesystem; mount an `emptyDir` on `/run/t3-mesh` (admin socket) and set
 `fsGroup: 65532`. Ports: 8443 (agents), 8080 (viewers), 9090 (probes). The homelab pins
 `edge@sha256:...`.
 
+Set `serve --config-map t3-mesh-hub-config` to watch the hub config and
+`clients-ca-bundle` in the pod's namespace. The optional `--trust-config-map`
+flag overrides the trust ConfigMap name. Give the hub ServiceAccount
+`get`, `list` and `watch` on core ConfigMaps restricted to those two names.
+Keep the existing mounts for startup and fallback.
+
 ## Release process
 
 1. Bump `VERSION` (`0.2.0`, no `v`) and, if the on-disk state format changed in a

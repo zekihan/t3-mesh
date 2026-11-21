@@ -20,6 +20,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/hub/enroll"
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/hub/issuer"
+	"github.com/zekihan/t3-mesh/internal/hub/kube"
 	"github.com/zekihan/t3-mesh/internal/hub/proxyproto"
 )
 
@@ -85,15 +86,17 @@ func run(args []string) error {
 }
 
 type serveOptions struct {
-	configDir     string
-	trustDir      string
-	certDir       string
-	tunnelAddr    string
-	viewerAddr    string
-	opsAddr       string
-	adminSocket   string
-	proxyProtocol bool
-	logLevel      slog.Level
+	configDir      string
+	configMap      string
+	trustConfigMap string
+	trustDir       string
+	certDir        string
+	tunnelAddr     string
+	viewerAddr     string
+	opsAddr        string
+	adminSocket    string
+	proxyProtocol  bool
+	logLevel       slog.Level
 }
 
 func parseServe(args []string) (serveOptions, error) {
@@ -142,6 +145,18 @@ func parseServe(args []string) (serveOptions, error) {
 		"proxy-protocol",
 		true,
 		"expect a PROXY v2 header on the tunnel listener",
+	)
+	fs.StringVar(
+		&opts.configMap,
+		"config-map",
+		"",
+		"watch this hub config ConfigMap in the pod namespace",
+	)
+	fs.StringVar(
+		&opts.trustConfigMap,
+		"trust-config-map",
+		"clients-ca-bundle",
+		"clients CA ConfigMap to watch with --config-map",
 	)
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
 
@@ -263,21 +278,57 @@ func serve(args []string) error {
 		slog.String("adminSocket", opts.adminSocket),
 	)
 
-	return runAll(ctx, log,
-		component{name: "config watcher", run: func(ctx context.Context) error {
+	components := []component{
+		{name: "config watcher", run: func(ctx context.Context) error {
 			return watcher.Run(ctx, onChange)
 		}},
-		component{name: "tunnel listener", run: func(ctx context.Context) error {
+		{name: "tunnel listener", run: func(ctx context.Context) error {
 			return srv.ServeTunnels(ctx, tunnelLn)
 		}},
-		component{name: "admin socket", run: admin.Serve},
-		component{name: "viewer http", run: func(ctx context.Context) error {
+		{name: "admin socket", run: admin.Serve},
+		{name: "viewer http", run: func(ctx context.Context) error {
 			return serveHTTP(ctx, log, viewer)
 		}},
-		component{name: "ops http", run: func(ctx context.Context) error {
+		{name: "ops http", run: func(ctx context.Context) error {
 			return serveHTTP(ctx, log, ops)
 		}},
-	)
+	}
+
+	if opts.configMap != "" {
+		comp, err := configMapWatcher(&opts, watcher, onChange)
+		if err != nil {
+			log.Warn("ConfigMap watches unavailable; using mounts", slog.Any("error", err))
+		} else {
+			components = append(components, comp)
+		}
+	}
+
+	return runAll(ctx, log, components...)
+}
+
+func configMapWatcher(opts *serveOptions, watcher *hubconfig.Watcher,
+	onChange func(old, next *hubconfig.Snapshot),
+) (component, error) {
+	namespace, err := kube.Namespace()
+	if err != nil {
+		return component{}, fmt.Errorf("initialize ConfigMap watch: %w", err)
+	}
+
+	client, err := kube.New("", "", "", nil)
+	if err != nil {
+		return component{}, fmt.Errorf("initialize ConfigMap watch: %w", err)
+	}
+
+	return component{name: "ConfigMap watches", run: func(ctx context.Context) error {
+		return watcher.WatchConfigMaps(
+			ctx,
+			client,
+			namespace,
+			opts.configMap,
+			opts.trustConfigMap,
+			onChange,
+		)
+	}}, nil
 }
 
 type component struct {
