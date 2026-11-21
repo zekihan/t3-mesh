@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +44,20 @@ func (agent *Agent) checkExposure(ctx context.Context) {
 		return
 	}
 
-	warnings := exposureWarnings(ctx, agent.cfg.Serve, addrs)
+	var owned []netip.AddrPort
+	if agent.direct != nil {
+		owned = agent.direct.Listening()
+
+		port, deviceAddrs := agent.direct.DeviceListener()
+		for _, raw := range deviceAddrs {
+			addr, parseErr := netip.ParseAddr(raw)
+			if parseErr == nil && port > 0 && port <= 65535 {
+				owned = append(owned, netip.AddrPortFrom(addr.Unmap(), uint16(port)))
+			}
+		}
+	}
+
+	warnings := exposureWarnings(ctx, agent.cfg.Serve, addrs, owned)
 	if ctx.Err() != nil {
 		return
 	}
@@ -62,6 +76,7 @@ func exposureWarnings(
 	ctx context.Context,
 	services map[string]string,
 	addrs []netip.Addr,
+	owned []netip.AddrPort,
 ) []string {
 	var warnings []string
 
@@ -76,10 +91,16 @@ func exposureWarnings(
 			continue
 		}
 
+		portNum, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			continue
+		}
+
 		for _, ip := range addrs {
 			ip = ip.Unmap()
 
-			if !ip.IsGlobalUnicast() || ip.IsLoopback() {
+			if !ip.IsGlobalUnicast() || ip.IsLoopback() ||
+				slices.Contains(owned, netip.AddrPortFrom(ip, uint16(portNum))) {
 				continue
 			}
 

@@ -57,6 +57,23 @@ func testExposureListener(t *testing.T, ln net.Listener, addr netip.Addr) {
 		t.Fatal(err)
 	}
 
+	endpoint, err := netip.ParseAddrPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owned := []netip.AddrPort{endpoint}
+	if warnings := exposureWarnings(
+		t.Context(),
+		agt.cfg.Serve,
+		[]netip.Addr{addr},
+		owned,
+	); len(
+		warnings,
+	) != 0 {
+		t.Fatalf("own listener reported as exposed: %v", warnings)
+	}
+
 	agt.checkExposure(t.Context())
 
 	warnings := agt.exposureWarnings
