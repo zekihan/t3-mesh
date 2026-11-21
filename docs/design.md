@@ -437,6 +437,7 @@ The hub applies rules, revocations and desired versions live. With
 `clients-ca-bundle` (override with `--trust-config-map`) in its pod namespace,
 using a separate exact `metadata.name` selector for each. API events run through
 the same validation as mounted inputs and usually reach the hub within a second.
+An event larger than 4 MiB closes the watch so it can reconnect with backoff.
 The hub loads the mounts at startup and always reads the serving certificate
 from its mount.
 

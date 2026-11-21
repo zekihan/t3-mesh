@@ -1,6 +1,8 @@
 package kube
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,15 +90,20 @@ func (client *Client) WatchConfigMap(
 }
 
 func readConfigMapEvents(body io.Reader, name string, update func(map[string]string)) error {
-	dec := json.NewDecoder(body)
+	// Kubernetes sends newline-delimited JSON events. Bound each frame before decoding.
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(nil, maxConfigMapReply+1) // Include space for the newline.
 
-	for {
+	for scanner.Scan() {
+		frame := scanner.Bytes()
+		if len(bytes.TrimSpace(frame)) == 0 {
+			continue
+		}
+
 		var event configMapEvent
 
-		err := dec.Decode(&event)
+		err := json.Unmarshal(frame, &event)
 		switch {
-		case errors.Is(err, io.EOF):
-			return nil
 		case err != nil:
 			return fmt.Errorf("decode ConfigMap watch: %w", err)
 		case event.Type == "ERROR" || event.Type == "DELETED":
@@ -106,6 +113,13 @@ func readConfigMapEvents(body io.Reader, name string, update func(map[string]str
 			update(event.Object.Data)
 		}
 	}
+
+	err := scanner.Err()
+	if err != nil {
+		return fmt.Errorf("read ConfigMap watch: %w", err)
+	}
+
+	return nil
 }
 
 // ConfigMapRequest performs a bounded, non-streaming ConfigMap API request.
