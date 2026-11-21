@@ -101,8 +101,7 @@ See [Homelab changes](docs/design.md#homelab-changes).
 
 ## Check an agent locally
 
-Use the binary under `/var/lib/t3-mesh/install/current` on Linux or
-`/Library/Application Support/t3-mesh/install/current` on macOS.
+The installer makes `t3-mesh-agent` available at `/usr/local/bin/t3-mesh-agent`.
 
 Run `t3-mesh-agent status` for the live tunnel, direct path, listeners,
 certificate, update state and service checks, even while the hub is unreachable.

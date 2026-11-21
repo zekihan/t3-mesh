@@ -117,6 +117,9 @@ else
   chown -h "$user:$user" "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
 fi
 
+install -d -m 0755 /usr/local/bin
+ln -sfn "$install_dir/current/t3-mesh-agent" /usr/local/bin/t3-mesh-agent
+
 for label in "$main_label" "$fallback_label" "$runtime_label"; do
   install -m 0644 -o root -g wheel "$here/$label.plist" "$daemons/$label.plist"
   launchctl bootout "system/$label" >/dev/null 2>&1 || true

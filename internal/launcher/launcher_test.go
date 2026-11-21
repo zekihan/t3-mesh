@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -546,5 +547,71 @@ func TestSelfTest(t *testing.T) {
 
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("self test took %s", d)
+	}
+}
+
+func TestVersionDirectoryModes(t *testing.T) {
+	if os.Getenv("T3_TEST_UMASK") == "1" {
+		syscall.Umask(0o077)
+
+		lay := newLayout(t, "one", "two")
+		parent, parentErr := os.Stat(filepath.Join(lay.Dir, versionsDir))
+		mustNoErr(t, parentErr)
+
+		if parent.Mode().Perm() != 0o755 {
+			t.Fatalf("versions mode = %o", parent.Mode().Perm())
+		}
+
+		for _, version := range []string{"one", "two"} {
+			dir := filepath.Dir(lay.Binary(version))
+			info, err := os.Stat(dir)
+			mustNoErr(t, err)
+
+			if info.Mode().Perm() != 0o755 {
+				t.Fatalf("%s mode = %o", dir, info.Mode().Perm())
+			}
+
+			mustNoErr(
+				t,
+				os.Chmod(dir, 0o700), //nolint:gosec // test migration of private directories
+			)
+		}
+
+		outside := t.TempDir()
+		mustNoErr(t, os.Chmod(outside, 0o700)) //nolint:gosec // verify symlink target stays private
+		mustNoErr(t, os.Symlink(outside, filepath.Join(lay.Dir, versionsDir, "link")))
+		mustNoErr(t, lay.FixVersionModes())
+
+		for _, version := range []string{"one", "two"} {
+			info, err := os.Stat(filepath.Dir(lay.Binary(version)))
+			mustNoErr(t, err)
+
+			if info.Mode().Perm() != 0o755 {
+				t.Fatalf("fixed mode = %o", info.Mode().Perm())
+			}
+		}
+
+		info, err := os.Stat(outside)
+		mustNoErr(t, err)
+
+		if info.Mode().Perm() != 0o700 {
+			t.Fatalf("symlink target mode = %o", info.Mode().Perm())
+		}
+
+		return
+	}
+
+	//nolint:gosec // rerun this test in a separate process
+	cmd := exec.CommandContext(
+		t.Context(),
+		os.Args[0],
+		"-test.run=^TestVersionDirectoryModes$",
+	)
+
+	cmd.Env = append(os.Environ(), "T3_TEST_UMASK=1")
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess: %v\n%s", err, out)
 	}
 }

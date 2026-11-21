@@ -68,6 +68,9 @@ else
   chown -h t3mesh:t3mesh "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
 fi
 
+install -d -m 0755 /usr/local/bin
+ln -sfn "$install_dir/current/t3-mesh-agent" /usr/local/bin/t3-mesh-agent
+
 systemctl daemon-reload
 systemctl enable t3-mesh-agent.service
 if [[ -n $(ls -A "$base/identity") ]]; then
