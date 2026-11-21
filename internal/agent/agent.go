@@ -258,7 +258,12 @@ func (agent *Agent) Run(ctx context.Context) error {
 
 	agent.ctx = ctx
 
-	err := agent.loadLocal()
+	err := (launcher.Layout{Dir: agent.cfg.InstallDir}).FixVersionModes()
+	if err != nil {
+		agent.log.WarnContext(ctx, "Fix version directory permissions", slog.Any("err", err))
+	}
+
+	err = agent.loadLocal()
 	if err != nil {
 		return err
 	}

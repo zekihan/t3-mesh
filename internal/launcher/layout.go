@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -76,6 +77,13 @@ func (lay Layout) Stage(version, binaryPath string) error {
 	err = os.MkdirAll(dir, dirMode)
 	if err != nil {
 		return fmt.Errorf("launcher: create version dir: %w", err)
+	}
+
+	for _, path := range []string{filepath.Dir(dir), dir} {
+		err = os.Chmod(path, dirMode)
+		if err != nil {
+			return fmt.Errorf("launcher: chmod version dir: %w", err)
+		}
 	}
 
 	dst := lay.Binary(version)
@@ -143,6 +151,47 @@ func copyFile(src, dst string) (err error) {
 	}
 
 	return nil
+}
+
+// FixVersionModes makes existing owned version directories accessible to local users.
+func (lay Layout) FixVersionModes() error {
+	dir := filepath.Join(lay.Dir, versionsDir)
+
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("launcher: list versions: %w", err)
+	}
+
+	var errs []error
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Uid) != os.Geteuid() {
+			continue
+		}
+
+		err = os.Chmod(filepath.Join(dir, entry.Name()), dirMode)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // SetCurrent atomically points current at a staged version.
