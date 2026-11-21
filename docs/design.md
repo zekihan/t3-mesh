@@ -693,8 +693,10 @@ creates this ConfigMap empty. The JSON value maps machine names to RFC 3339
 timestamps. The hub writes changed state at most once a minute and flushes it
 again on graceful shutdown, after closing tunnels. An update uses the
 ConfigMap's resourceVersion and reads it again on conflict, keeping the later
-timestamp for each machine. Load and write failures are logged and leave the
-hub serving with its in-memory state.
+timestamp for each machine and preserving other data keys. On load, the hub
+warns once if it skips malformed timestamps or treats an unreadable last-seen
+value as empty. The next flush repairs that value. API failures are logged and
+leave the hub serving with its in-memory state.
 
 ### Kubernetes permissions
 

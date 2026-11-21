@@ -3,9 +3,9 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -18,23 +18,7 @@ import (
 func TestLastSeenRestoresAndRetriesConflict(t *testing.T) {
 	harness := newEnv(t)
 	api := &stateAPI{t: t, previous: time.Now().UTC().Add(-time.Hour).Truncate(time.Second)}
-
-	fake := httptest.NewServer(http.HandlerFunc(api.serve))
-	defer fake.Close()
-
-	tokenPath := filepath.Join(t.TempDir(), "token")
-
-	err := os.WriteFile(tokenPath, []byte("fake"), 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	client, err := kube.New(fake.URL, "", tokenPath, fake.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	store := NewLastSeenStore(harness.srv, client, "mesh")
+	store := testLastSeenStore(t, harness, api)
 	store.Load(t.Context())
 
 	resp := httptest.NewRecorder()
@@ -49,7 +33,7 @@ func TestLastSeenRestoresAndRetriesConflict(t *testing.T) {
 
 	devbox := harness.connect("agent-devbox", "devbox-body")
 
-	err = harness.srv.Disconnect("devbox")
+	err := harness.srv.Disconnect("devbox")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,9 +48,79 @@ func TestLastSeenRestoresAndRetriesConflict(t *testing.T) {
 	}
 }
 
+func TestLastSeenRepairsCorruptData(t *testing.T) {
+	previous := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	for _, scenario := range []struct {
+		want  time.Time
+		name  string
+		value string
+	}{
+		{
+			name: "malformed entries", want: previous,
+			value: fmt.Sprintf(`{"devbox":%q,"z-arch":"bad","other":null}`, previous.Format(time.RFC3339)),
+		},
+		{name: "unreadable value", value: `{"devbox":`},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			harness := newEnv(t)
+			api := &stateAPI{t: t, previous: previous, raw: scenario.value}
+			store := testLastSeenStore(t, harness, api)
+
+			var logs lockedBuffer
+			harness.logs.set(
+				slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}),
+			)
+			store.Load(t.Context())
+
+			restored := store.snapshot()
+			if !restored["devbox"].Equal(scenario.want) || !restored["z-arch"].IsZero() {
+				t.Errorf(
+					"restored state = %v, want only valid timestamp %v",
+					restored,
+					scenario.want,
+				)
+			}
+
+			if got := logs.String(); strings.Count(got, "level=WARN") != 1 ||
+				!strings.Contains(got, "Invalid saved last seen") {
+				t.Errorf("expected one corruption warning, got %q", got)
+			}
+
+			harness.srv.mu.Lock()
+			harness.srv.machineLocked("devbox").lastSeen = previous.Add(time.Minute)
+			harness.srv.mu.Unlock()
+
+			store.Flush(t.Context())
+			store.Flush(t.Context())
+
+			if puts := api.updates.Load(); puts != 2 {
+				t.Errorf("got %d updates, want conflict followed by successful repair", puts)
+			}
+		})
+	}
+}
+
+func testLastSeenStore(t *testing.T, harness *env, api *stateAPI) *LastSeenStore {
+	t.Helper()
+
+	fake := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(fake.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	writeFile(t, tokenPath, "fake")
+
+	client, err := kube.New(fake.URL, "", tokenPath, fake.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return NewLastSeenStore(harness.srv, client, "mesh")
+}
+
 type stateAPI struct {
 	previous time.Time
 	t        *testing.T
+	raw      string
 	reads    atomic.Int32
 	updates  atomic.Int32
 }
@@ -84,7 +138,12 @@ func (api *stateAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		api.reads.Add(1)
 		revision := api.updates.Load() + 1
-		seen := fmt.Sprintf(`{"devbox":%q}`, api.previous.Format(time.RFC3339))
+
+		seen := api.raw
+		if seen == "" {
+			seen = fmt.Sprintf(`{"devbox":%q}`, api.previous.Format(time.RFC3339))
+		}
+
 		fmt.Fprintf(
 			w,
 			`{"metadata":{"resourceVersion":"%d","labels":{"keep":"yes"}},`+
@@ -129,7 +188,7 @@ func (api *stateAPI) checkUpdate(r *http.Request) {
 	var seen map[string]time.Time
 
 	err = json.Unmarshal([]byte(body.Data[lastSeenKey]), &seen)
-	if err != nil || !seen["devbox"].After(api.previous) {
+	if err != nil || len(seen) != 1 || !seen["devbox"].After(api.previous) {
 		api.t.Errorf("updated last seen: %v, err = %v", seen, err)
 	}
 }

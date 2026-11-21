@@ -21,7 +21,10 @@ const (
 	lastSeenWriteAttempts = 2
 )
 
-var errStateVersion = errors.New("hub: state ConfigMap has no resourceVersion")
+var (
+	errStateVersion = errors.New("hub: state ConfigMap has no resourceVersion")
+	errLastSeenData = errors.New("hub: invalid last-seen data")
+)
 
 // LastSeenStore persists the hub's last-seen timestamps. Its methods are run
 // serially by the caller, outside the hub's request and session paths.
@@ -30,6 +33,7 @@ type LastSeenStore struct {
 	client *kube.Client
 	saved  map[string]time.Time
 	path   string
+	dirty  bool
 }
 
 func NewLastSeenStore(server *Server, client *kube.Client, namespace string) *LastSeenStore {
@@ -50,6 +54,16 @@ func (store *LastSeenStore) Load(ctx context.Context) {
 	}
 
 	store.saved = state.seen
+
+	store.dirty = state.decodeErr != nil
+	if store.dirty {
+		store.server.log.WarnContext(
+			ctx,
+			"Invalid saved last seen",
+			slog.Any("error", state.decodeErr),
+		)
+	}
+
 	store.server.mu.Lock()
 	defer store.server.mu.Unlock()
 
@@ -82,7 +96,7 @@ func (store *LastSeenStore) Run(ctx context.Context) error {
 
 func (store *LastSeenStore) Flush(ctx context.Context) {
 	snapshot := store.snapshot()
-	if maps.EqualFunc(store.saved, snapshot, time.Time.Equal) {
+	if !store.dirty && maps.EqualFunc(store.saved, snapshot, time.Time.Equal) {
 		return
 	}
 
@@ -94,6 +108,7 @@ func (store *LastSeenStore) Flush(ctx context.Context) {
 	}
 
 	store.saved = snapshot
+	store.dirty = false
 }
 
 func (store *LastSeenStore) snapshot() map[string]time.Time {
@@ -122,9 +137,10 @@ func (store *LastSeenStore) snapshot() map[string]time.Time {
 }
 
 type lastSeenState struct {
-	object map[string]json.RawMessage
-	data   map[string]string
-	seen   map[string]time.Time
+	decodeErr error
+	object    map[string]json.RawMessage
+	data      map[string]string
+	seen      map[string]time.Time
 }
 
 func (store *LastSeenStore) read(ctx context.Context) (lastSeenState, error) {
@@ -154,14 +170,46 @@ func (store *LastSeenStore) read(ctx context.Context) (lastSeenState, error) {
 		}
 	}
 
-	if raw := state.data[lastSeenKey]; raw != "" {
-		err := json.Unmarshal([]byte(raw), &state.seen)
-		if err != nil {
-			return lastSeenState{}, fmt.Errorf("decode last seen: %w", err)
-		}
+	if raw, ok := state.data[lastSeenKey]; ok {
+		state.seen, state.decodeErr = decodeLastSeen(raw)
 	}
 
 	return state, nil
+}
+
+func decodeLastSeen(raw string) (map[string]time.Time, error) {
+	var entries map[string]json.RawMessage
+
+	err := json.Unmarshal([]byte(raw), &entries)
+	if err != nil {
+		return nil, fmt.Errorf("decode last seen: %w", err)
+	}
+
+	if entries == nil {
+		return nil, fmt.Errorf("%w: expected a JSON object", errLastSeenData)
+	}
+
+	seen := make(map[string]time.Time, len(entries))
+	skipped := 0
+
+	for name, value := range entries {
+		var last *time.Time
+
+		decodeErr := json.Unmarshal(value, &last)
+		if decodeErr != nil || last == nil {
+			skipped++
+
+			continue
+		}
+
+		seen[name] = *last
+	}
+
+	if skipped > 0 {
+		return seen, fmt.Errorf("%w: skipped %d malformed timestamps", errLastSeenData, skipped)
+	}
+
+	return seen, nil
 }
 
 func (store *LastSeenStore) save(ctx context.Context, snapshot map[string]time.Time) error {
@@ -197,7 +245,7 @@ func (store *LastSeenStore) saveAttempt(
 		}
 	}
 
-	if maps.EqualFunc(state.seen, seen, time.Time.Equal) {
+	if state.decodeErr == nil && maps.EqualFunc(state.seen, seen, time.Time.Equal) {
 		return 0, nil
 	}
 
