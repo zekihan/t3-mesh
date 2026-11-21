@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/zekihan/t3-mesh/internal/agent/agentconfig"
+	"github.com/zekihan/t3-mesh/internal/agent/state"
 	"github.com/zekihan/t3-mesh/internal/netwatch"
+	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
 func TestExposureWarningClears(t *testing.T) {
@@ -66,6 +68,7 @@ func testExposureListener(t *testing.T, ln net.Listener, addr netip.Addr) {
 	if warnings := exposureWarnings(
 		t.Context(),
 		agt.cfg.Serve,
+		"", nil,
 		[]netip.Addr{addr},
 		owned,
 	); len(
@@ -74,7 +77,26 @@ func testExposureListener(t *testing.T, ln net.Listener, addr netip.Addr) {
 		t.Fatalf("own listener reported as exposed: %v", warnings)
 	}
 
-	agt.checkExposure(t.Context())
+	agt.cache = &state.Cache{Machine: "test-machine"}
+
+	for _, tc := range []struct {
+		name string
+		kind string
+		want int
+	}{
+		{name: "tcp", kind: proto.KindTCP, want: 0},
+		{name: "http", kind: proto.KindHTTP, want: 1},
+		{name: "unknown", want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agt.cache.Rules.ServiceKinds = map[string]string{"t3.test-machine": tc.kind}
+			agt.checkExposure(t.Context())
+
+			if len(agt.exposureWarnings) != tc.want {
+				t.Fatalf("exposure warnings: %v; want %d", agt.exposureWarnings, tc.want)
+			}
+		})
+	}
 
 	warnings := agt.exposureWarnings
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "t3 port "+port) ||

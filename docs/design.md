@@ -1155,8 +1155,9 @@ TCP connection only. The agent sends an extra `Status` when a probe first
 reports or its state changes. The periodic status report includes the latest
 check times.
 
-At startup, every five minutes and on network changes, the agent checks for
-TCP listeners on the ports of its loopback `serve` targets. It tries the
+At startup, every five minutes, and on network or rules changes, the agent checks for
+TCP listeners on the ports of its loopback HTTP `serve` targets. TCP services are
+excluded; targets with an unknown kind are checked until the hub supplies their kind. It tries the
 machine's non-loopback, non-link-local IPv4 and IPv6 addresses with a one-second
 timeout per connection. A connection adds a warning with the service, port and
 address. The agent sends a report when these warnings change. The hub uses the
