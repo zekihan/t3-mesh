@@ -147,3 +147,10 @@ pin. A downgrade requires `rollbackAllowed: true` on that machine’s pin.
 
 Validate a hub configuration offline with `t3-mesh-hub validate --config config.yaml`;
 add `--trust ca.crt` to validate the clients CA bundle too.
+
+## Service health
+
+The hub's `/status` shows each machine's local service checks in `serviceHealth`.
+The fleet API exposes the same information under `services`. A connected agent
+can report an unreachable service, and service health is unknown while the
+agent is offline or has yet to report.

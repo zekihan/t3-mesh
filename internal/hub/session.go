@@ -81,6 +81,7 @@ type session struct {
 	// What the agent last reported about its listener for enrolled devices,
 	// sanitized; nil while it is not bound. Guarded by server.mu.
 	device      *proto.DeviceListener
+	services    []proto.ServiceHealth // last report from this session, guarded by server.mu
 	notAfter    time.Time
 	accepted    time.Time
 	source      netip.Addr
@@ -911,12 +912,13 @@ func (server *Server) recordStatus(sess *session, st *proto.Status) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 
-	m := server.machineLocked(sess.machine)
+	machine := server.machineLocked(sess.machine)
 	cp := *st
-	m.status = &cp
+	machine.status = &cp
 	sess.device = sanitizeDeviceListener(st.DeviceListener)
+	sess.services = st.Services
 
 	if st.Version != "" {
-		m.version = truncate(st.Version, maxVersionLen)
+		machine.version = truncate(st.Version, maxVersionLen)
 	}
 }

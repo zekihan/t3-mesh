@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/proto"
@@ -40,7 +41,8 @@ func (agent *Agent) buildStatus() proto.Status {
 	agent.mu.Lock()
 	st := proto.Status{
 		Version:             agent.version,
-		Warnings:            append([]string(nil), agent.warnings...),
+		Warnings:            slices.Clone(agent.warnings),
+		Services:            slices.Clone(agent.services),
 		ReleaseRevision:     agent.cache.Release.Revision,
 		RulesRevision:       agent.cache.Rules.Revision,
 		RevocationRevision:  agent.cache.Revocations.Revision,

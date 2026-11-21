@@ -228,6 +228,18 @@ type DeviceListener struct {
 	Port  int      `json:"port"`
 }
 
+const (
+	ServiceReachable   = "reachable"
+	ServiceUnreachable = "unreachable"
+)
+
+// ServiceHealth records the result of an agent's local service probe.
+type ServiceHealth struct {
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	CheckedAt string `json:"checkedAt"`
+}
+
 // Status is the agent's periodic report.
 type Status struct { //nolint:govet // JSON field order is the wire format
 	Version             string   `json:"version"`
@@ -246,7 +258,8 @@ type Status struct { //nolint:govet // JSON field order is the wire format
 	FailedUpdates  []FailedUpdate  `json:"failedUpdates,omitempty"`
 	CertNotAfter   string          `json:"certNotAfter,omitempty"`
 	// DeviceSessions is the number of open connections from enrolled devices.
-	DeviceSessions int `json:"deviceSessions,omitempty"`
+	DeviceSessions int             `json:"deviceSessions,omitempty"`
+	Services       []ServiceHealth `json:"services,omitempty"`
 }
 
 // Enroll requests a first certificate with a single-use token.

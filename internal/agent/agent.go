@@ -28,6 +28,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/launcher"
 	"github.com/zekihan/t3-mesh/internal/netwatch"
 	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/release"
 )
 
@@ -117,6 +118,7 @@ type Agent struct {
 	store        pki.Store
 	prefixes     []netip.Prefix
 	warnings     []string
+	services     []proto.ServiceHealth
 	wg           sync.WaitGroup
 	dnsEvery     time.Duration
 	renewWindow  time.Duration
@@ -295,6 +297,7 @@ func (agent *Agent) Run(ctx context.Context) error {
 	agent.wg.Go(func() { agent.tunnelLoop(ctx) })
 	agent.wg.Go(func() { agent.netLoop(ctx) })
 	agent.wg.Go(func() { agent.statusLoop(ctx) })
+	agent.wg.Go(func() { agent.serviceLoop(ctx) })
 	agent.wg.Go(func() { agent.renewLoop(ctx) })
 
 	if agent.upd != nil {

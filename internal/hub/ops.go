@@ -67,24 +67,25 @@ type machineStatus struct {
 	DeviceListener *proto.DeviceListener `json:"deviceListener,omitempty"`
 	// The live session's tunnel source address, for the API.
 	source         netip.Addr
-	CertNotAfter   *time.Time           `json:"certNotAfter,omitempty"`
-	Alerts         map[string]bool      `json:"alerts"`
-	ConnectedSince *time.Time           `json:"connectedSince,omitempty"`
-	LastSeen       *time.Time           `json:"lastSeen,omitempty"`
-	Acked          ackedStatus          `json:"acked"`
-	Version        string               `json:"version,omitempty"`
-	Identity       string               `json:"identity"`
-	Path           string               `json:"path,omitempty"`
-	Services       servicesStatus       `json:"services"`
-	Warnings       []string             `json:"warnings"`
-	AgentWarnings  []string             `json:"agentWarnings,omitempty"`
-	FailedUpdates  []proto.FailedUpdate `json:"failedUpdates"`
-	LinkStreams    int64                `json:"linkStreams"`
-	DirectSessions int                  `json:"directSessions"`
-	DeviceSessions int                  `json:"deviceSessions"`
-	OpenStreams    int64                `json:"openStreams"`
-	Sessions       int                  `json:"sessions"`
-	Connected      bool                 `json:"connected"`
+	CertNotAfter   *time.Time               `json:"certNotAfter,omitempty"`
+	Alerts         map[string]bool          `json:"alerts"`
+	ConnectedSince *time.Time               `json:"connectedSince,omitempty"`
+	LastSeen       *time.Time               `json:"lastSeen,omitempty"`
+	Acked          ackedStatus              `json:"acked"`
+	Version        string                   `json:"version,omitempty"`
+	Identity       string                   `json:"identity"`
+	Path           string                   `json:"path,omitempty"`
+	Services       servicesStatus           `json:"services"`
+	ServiceHealth  map[string]serviceHealth `json:"serviceHealth"`
+	Warnings       []string                 `json:"warnings"`
+	AgentWarnings  []string                 `json:"agentWarnings,omitempty"`
+	FailedUpdates  []proto.FailedUpdate     `json:"failedUpdates"`
+	LinkStreams    int64                    `json:"linkStreams"`
+	DirectSessions int                      `json:"directSessions"`
+	DeviceSessions int                      `json:"deviceSessions"`
+	OpenStreams    int64                    `json:"openStreams"`
+	Sessions       int                      `json:"sessions"`
+	Connected      bool                     `json:"connected"`
 }
 
 type statusDoc struct {
@@ -195,6 +196,7 @@ func (server *Server) machineStatusLocked(
 	}
 
 	configured := snap.Services(name)
+	out.ServiceHealth = serviceHealthOf(configured, live)
 	missing, unexpected := serviceDiff(ms.announced, configured)
 	out.Services = servicesStatus{
 		Configured: configured, Announced: nonNil(ms.announced),

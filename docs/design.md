@@ -456,7 +456,9 @@ relay path, which bypasses the viewer controls.
 
 The hub accepts the current and the previous tunnel protocol version (`t3-mesh/N`
 and `t3-mesh/N-1` in ALPN), so agents on the previous release keep working while a
-fleet update is in progress or rolled back.
+fleet update is in progress or rolled back. The service health field in `Status`
+is optional, so adding it leaves the protocol version unchanged. Older hubs ignore
+it and newer hubs accept reports that omit it.
 
 ### Routing
 
@@ -536,13 +538,18 @@ away, or whose listener is closed has none.
 `/status` reports for each, read through the same code:
 
 ```json
-{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"alerts":["cert-expiry"]}]}
+{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"services":{"t3":{"state":"reachable","checkedAt":"2026-11-18T07:59:56Z"}},"alerts":["cert-expiry"]}]}
 ```
 
 Each entry is the `/machines` object (so `agentIdentity` and `direct` too) plus `agentVersion` (as the agent reported it,
 `null` if unknown), `certNotAfter` (best known leaf expiry, `null` if unknown),
 `tunnel` (`path` is `LAN` or `OCI` and `connectedSince` the live session's accept
-time, both `null` while not connected) and `alerts`, the sorted names of the
+time, both `null` while not connected), `services` and `alerts`. The service map
+has one entry per service configured for that machine at the hub. Each value has
+a `state` of `reachable`, `unreachable` or `unknown` and a UTC RFC 3339
+`checkedAt` time. The state is `unknown` with `checkedAt: null` while offline
+or until the current session reports a result. `online` still reflects the tunnel.
+`alerts` holds the sorted names of the
 `/status` alerts that are currently true (`cert-expiry`, `disconnected`,
 `update-failed`), `[]` when none. `caller.path` is the path of the API request
 itself: `LAN` if the `X-Real-IP` header, which Traefik's `traefik-real-ip`
@@ -1022,6 +1029,15 @@ Data streams start with one header line of JSON, then raw bytes:
 
 ## Observability
 
+The agent checks each local `serve` target at startup and every 30 s. For
+`t3` it sends an HTTP GET to the configured address with a 2 s timeout. Any
+HTTP response counts, including redirects and errors. After a failed GET a
+TCP connection attempt distinguishes a failed connect from an accepting port
+that did not answer HTTP. Both outcomes are unreachable. Other services use a
+TCP connection only. The agent sends an extra `Status` when a probe first
+reports or its state changes. The periodic status report includes the latest
+check times.
+
 The cluster has no metrics scraper or vmalert, so the hub evaluates its own alert
 conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
@@ -1030,7 +1046,8 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   reports (`deviceListener`: port and bound addresses, absent while not bound), stream
   counts, version, certificate expiry, last seen, and the last acknowledged
   `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
-  steps that wait for "every agent acknowledged" read it.
+  steps that wait for "every agent acknowledged" read it. The `serviceHealth`
+  map has the same contents as `services` in `/api/v1/fleet`.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
