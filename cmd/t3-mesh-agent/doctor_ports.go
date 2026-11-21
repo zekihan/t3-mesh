@@ -31,29 +31,51 @@ func checkPorts(cfg *agentconfig.Config, status *agent.LocalStatus) []doctorChec
 		return append(checks, checkResult("direct/device ports", "", err))
 	}
 
-	ips := []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback}
+	var ips []net.IP
 
 	for _, addr := range addrs {
-		if addr.IsGlobalUnicast() {
-			ips = append(ips, addr.AsSlice())
+		if addr.IsGlobalUnicast() && !addr.IsLoopback() {
+			ips = append(ips, addr.Unmap().AsSlice())
 		}
 	}
 
-	directPort := cfg.Direct.Port
-	directOwned := status != nil &&
-		slices.ContainsFunc(status.DirectListeners, func(addr netip.AddrPort) bool {
-			return int(addr.Port()) == directPort
-		})
-	checks = append(checks, portResult("direct", directPort, directOwned, ips))
+	var directOwned []netip.AddrPort
+	if status != nil {
+		directOwned = status.DirectListeners
+	}
+
+	checks = append(checks, listenerPortResult("direct", cfg.Direct.Port, directOwned, ips))
 
 	if cfg.Direct.Devices.Enabled {
-		devicePort := cfg.Direct.Devices.Port
-		deviceOwned := status != nil && status.Report.DeviceListener != nil &&
-			status.Report.DeviceListener.Port == devicePort
-		checks = append(checks, portResult("device", devicePort, deviceOwned, ips))
+		checks = append(
+			checks,
+			listenerPortResult("device", cfg.Direct.Devices.Port, deviceEndpoints(status), ips),
+		)
 	}
 
 	return checks
+}
+
+func deviceEndpoints(status *agent.LocalStatus) []netip.AddrPort {
+	if status == nil || status.Report.DeviceListener == nil {
+		return nil
+	}
+
+	listener := status.Report.DeviceListener
+	if listener.Port <= 0 || listener.Port > 65535 {
+		return nil
+	}
+
+	var endpoints []netip.AddrPort
+
+	for _, raw := range listener.Addrs {
+		addr, err := netip.ParseAddr(raw)
+		if err == nil {
+			endpoints = append(endpoints, netip.AddrPortFrom(addr.Unmap(), uint16(listener.Port)))
+		}
+	}
+
+	return endpoints
 }
 
 func checkLinkPort(name, target string, status *agent.LocalStatus) doctorCheck {
@@ -87,6 +109,24 @@ func portResult(name string, port int, owned bool, addrs []net.IP) doctorCheck {
 	}
 
 	return checkResult(name, fmt.Sprintf("port %d available", port), nil)
+}
+
+func listenerPortResult(name string, port int, owned []netip.AddrPort, addrs []net.IP) doctorCheck {
+	for _, ip := range addrs {
+		addr, ok := netip.AddrFromSlice(ip)
+		if ok && slices.ContainsFunc(owned, func(endpoint netip.AddrPort) bool {
+			return endpoint.Addr().Unmap() == addr.Unmap() && int(endpoint.Port()) == port
+		}) {
+			continue
+		}
+
+		err := testPort(ip, port)
+		if err != nil {
+			return checkResult(name, "", fmt.Errorf("port %d on %s: %w", port, ip, err))
+		}
+	}
+
+	return checkResult(name, fmt.Sprintf("port %d available or bound by the agent", port), nil)
 }
 
 func testPort(addr net.IP, port int) error {
