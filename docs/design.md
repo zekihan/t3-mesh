@@ -496,8 +496,9 @@ it and newer hubs accept reports that omit it.
   before forwarding. The hub maps `Host` to `(machine, svc)`, opens a
   stream on that machine's newest tunnel session, and reverse-proxies the request over it,
   preserving `Host`, `Origin`, headers, paths, methods and WebSocket upgrades. No
-  tunnel means `502` with a short page that names the machine and its last-seen time
-  (since the last hub restart; the hub keeps no persistent state).
+  tunnel means `502` with a short page that names the machine and gives its
+  last-seen time when known. The page refreshes every 15 seconds with an HTML
+  meta refresh, so it opens T3 once the tunnel returns.
 - **Agent-to-agent stream:** the hub checks the rule for the source agent, opens a
   stream on the target's tunnel and splices bytes. The hub does not parse the
   contents.
@@ -535,8 +536,9 @@ machines goes through it, so `/api/v1/fleet` reuses it; `/api/v1/trust` lists no
 ```
 
 `online` means a live tunnel session. `lastSeen` is RFC 3339 UTC, the current time
-while online and the last disconnect otherwise (as in `/status`), or `null` if the hub
-has not seen the machine since it started. `viewerUrl` is
+while online and the last time the hub saw the machine otherwise (as in `/status`).
+With persistence enabled the timestamp can come from a previous hub run. An unknown
+time is `null`. `viewerUrl` is
 `https://t3.<machine>.<viewerDomain>`. `agentIdentity` is the machine's configured agent
 identity, `agent-<machine>`: the one URI an app expects in the certificate of the agent
 it connects to directly.
@@ -678,6 +680,15 @@ The hub is single-replica by design. Running two replicas would need shared sess
 ownership, ordering and distribution of rules and revocations, and is future work
 with its own design.
 
+With `--persist-last-seen`, the hub loads last-seen times from the
+`lastSeen.json` data key of `t3-mesh-hub-state` in its own namespace. The chart
+creates this ConfigMap empty. The JSON value maps machine names to RFC 3339
+timestamps. The hub writes changed state at most once a minute and flushes it
+again on graceful shutdown, after closing tunnels. An update uses the
+ConfigMap's resourceVersion and reads it again on conflict, keeping the later
+timestamp for each machine. Load and write failures are logged and leave the
+hub serving with its in-memory state.
+
 ### Kubernetes permissions
 
 - `create`, `get`, `list`, `watch` CertificateRequests in `mtls-pki`, bound to the
@@ -692,6 +703,9 @@ with its own design.
   `resourceNames` limited to the config map named by `--config-map` (`t3-mesh-hub-config`
   in the chart) and `clients-ca-bundle`. The name selectors allow the restricted
   list and watch requests.
+- With last-seen persistence enabled, `get` and `update` core `configmaps` in
+  the hub namespace, with `resourceNames` limited to `t3-mesh-hub-state`.
+  The chart owns creation of the ConfigMap.
 
 ## Agent
 
@@ -1085,7 +1099,8 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 - **`/status`** (JSON) lists, per agent: connected, path (LAN or OCI), open and
   direct sessions, open device sessions, the device listener the live session
   reports (`deviceListener`: port and bound addresses, absent while not bound), stream
-  counts, version, certificate expiry, last seen, and the last acknowledged
+  counts, version, certificate expiry, last seen (restored across restarts when
+  persistence is enabled), and the last acknowledged
   `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
   steps that wait for "every agent acknowledged" read it. The `serviceHealth`
   map has the same contents as `services` in `/api/v1/fleet`.
@@ -1444,7 +1459,7 @@ Traefik middleware lists a kind `agent` identity.
 | Device listener origin | `Host` must be `t3.<machine>.<viewerDomain>` (domain sent by the hub), else `421`; same rewrite code as the hub's viewer proxy plus dropping every client forwarding header |
 | Device listener probe | `GET /.well-known/t3-mesh/direct`, answered by the agent, `{"machine","identity"}` with `no-store` |
 | Direct route in the machine list | `direct` (address and port) and `agentIdentity`; non-null only while the hub marks the machine home and the agent reports the listener bound; IPv4 inside `homeCIDRs` preferred, then the tunnel's source address |
-| Hub state | none persistent; tokens and last-seen lost on restart |
+| Hub state | optional ConfigMap for last-seen times; tokens stay in memory |
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
 | Testing | unit tests plus one in-process hub + two agents test |

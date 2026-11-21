@@ -88,17 +88,18 @@ func run(args []string) error {
 }
 
 type serveOptions struct {
-	configDir      string
-	configMap      string
-	trustConfigMap string
-	trustDir       string
-	certDir        string
-	tunnelAddr     string
-	viewerAddr     string
-	opsAddr        string
-	adminSocket    string
-	proxyProtocol  bool
-	logLevel       slog.Level
+	configDir       string
+	configMap       string
+	trustConfigMap  string
+	trustDir        string
+	certDir         string
+	tunnelAddr      string
+	viewerAddr      string
+	opsAddr         string
+	adminSocket     string
+	proxyProtocol   bool
+	persistLastSeen bool
+	logLevel        slog.Level
 }
 
 func parseServe(args []string) (serveOptions, error) {
@@ -160,6 +161,8 @@ func parseServe(args []string) (serveOptions, error) {
 		"clients-ca-bundle",
 		"clients CA ConfigMap to watch with --config-map",
 	)
+	fs.BoolVar(&opts.persistLastSeen, "persist-last-seen", false,
+		"persist last-seen times in the t3-mesh-hub-state ConfigMap")
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
 
 	err := fs.Parse(args)
@@ -298,41 +301,72 @@ func serve(args []string) error {
 		}},
 	}
 
-	if opts.configMap != "" {
-		comp, err := configMapWatcher(&opts, watcher, onChange)
-		if err != nil {
-			log.Warn("ConfigMap watches unavailable; using mounts", slog.Any("error", err))
-		} else {
-			components = append(components, comp)
-		}
+	components, state := withKubeFeatures(ctx, &opts, srv, watcher, onChange, log, components)
+
+	err = runAll(ctx, log, components...)
+	if err == nil && state != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+
+		state.Flush(shutdownCtx)
 	}
 
-	return runAll(ctx, log, components...)
+	return err
 }
 
-func configMapWatcher(opts *serveOptions, watcher *hubconfig.Watcher,
-	onChange func(old, next *hubconfig.Snapshot),
-) (component, error) {
+func withKubeFeatures(ctx context.Context, opts *serveOptions, srv *hub.Server,
+	watcher *hubconfig.Watcher, onChange func(old, next *hubconfig.Snapshot),
+	log *slog.Logger, components []component,
+) ([]component, *hub.LastSeenStore) {
+	if opts.configMap == "" && !opts.persistLastSeen {
+		return components, nil
+	}
+
+	namespace, client, err := configMapClient()
+	if err != nil {
+		log.WarnContext(ctx, "ConfigMap features unavailable", slog.Any("error", err))
+
+		return components, nil
+	}
+
+	if opts.configMap != "" {
+		components = append(
+			components,
+			component{name: "ConfigMap watches", run: func(ctx context.Context) error {
+				return watcher.WatchConfigMaps(
+					ctx,
+					client,
+					namespace,
+					opts.configMap,
+					opts.trustConfigMap,
+					onChange,
+				)
+			}},
+		)
+	}
+
+	var state *hub.LastSeenStore
+	if opts.persistLastSeen {
+		state = hub.NewLastSeenStore(srv, client, namespace)
+		state.Load(ctx)
+		components = append(components, component{name: "last seen persistence", run: state.Run})
+	}
+
+	return components, state
+}
+
+func configMapClient() (string, *kube.Client, error) {
 	namespace, err := kube.Namespace()
 	if err != nil {
-		return component{}, fmt.Errorf("initialize ConfigMap watch: %w", err)
+		return "", nil, fmt.Errorf("initialize ConfigMap access: %w", err)
 	}
 
 	client, err := kube.New("", "", "", nil)
 	if err != nil {
-		return component{}, fmt.Errorf("initialize ConfigMap watch: %w", err)
+		return "", nil, fmt.Errorf("initialize ConfigMap access: %w", err)
 	}
 
-	return component{name: "ConfigMap watches", run: func(ctx context.Context) error {
-		return watcher.WatchConfigMaps(
-			ctx,
-			client,
-			namespace,
-			opts.configMap,
-			opts.trustConfigMap,
-			onChange,
-		)
-	}}, nil
+	return namespace, client, nil
 }
 
 type component struct {

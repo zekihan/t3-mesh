@@ -135,6 +135,12 @@ flag overrides the trust ConfigMap name. Give the hub ServiceAccount
 `get`, `list` and `watch` on core ConfigMaps restricted to those two names.
 Keep the existing mounts for startup and fallback.
 
+Set `--persist-last-seen` to keep last-seen times across hub restarts. Create
+an empty `t3-mesh-hub-state` ConfigMap in the hub namespace and give the hub
+ServiceAccount `get` and `update` on that name. The hub writes only
+`data["lastSeen.json"]`. Viewer pages for offline machines refresh every
+15 seconds.
+
 ## Release process
 
 1. Bump `VERSION` (`0.2.0`, no `v`) and, if the on-disk state format changed in a
