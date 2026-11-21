@@ -79,36 +79,33 @@ func (server *Server) expireRenewalReplies() {
 	}
 }
 
-func (server *Server) recordRenewal(identity string, cached *renewalReplyCache) {
+func (server *Server) recordRenewal(identity string, cached *renewalReplyCache) bool {
 	server.nmu.Lock()
 	defer server.nmu.Unlock()
 
-	if current := server.newest[identity]; current == "" || current == cached.previous {
-		server.renewalReplies[identity] = *cached
-	} else {
-		delete(server.renewalReplies, identity)
+	if current := server.newest[identity]; current != "" && current != cached.previous {
+		return false
 	}
 
+	server.renewalReplies[identity] = *cached
 	server.newest[identity] = pki.Fingerprint(cached.leaf)
+
+	return true
 }
 
-// renewLimiter allows one renewal at a time per identity and renewalMax
-// attempts per renewalWindow. Identities are enrolled devices only, so the
-// table is as small as the configuration.
+// renewLimiter allows renewalMax attempts per renewalWindow per enrolled device.
 type renewLimiter struct {
 	now  func() time.Time
 	hits map[string][]time.Time
-	busy map[string]bool
 	mu   sync.Mutex
 }
 
 func newRenewLimiter(now func() time.Time) *renewLimiter {
-	return &renewLimiter{now: now, hits: map[string][]time.Time{}, busy: map[string]bool{}}
+	return &renewLimiter{now: now, hits: map[string][]time.Time{}}
 }
 
-// begin records an attempt by identity. When it is allowed it returns the
-// function that ends the attempt; otherwise it returns how long to wait.
-func (limiter *renewLimiter) begin(identity string) (func(), time.Duration, bool) {
+// allow records an attempt by identity or returns how long to wait.
+func (limiter *renewLimiter) allow(identity string) (time.Duration, bool) {
 	now := limiter.now()
 	cutoff := now.Add(-renewalWindow)
 
@@ -125,22 +122,13 @@ func (limiter *renewLimiter) begin(identity string) (func(), time.Duration, bool
 
 	limiter.hits[identity] = live
 
-	if limiter.busy[identity] {
-		return nil, time.Second, false
-	}
-
 	if len(live) >= renewalMax {
-		return nil, live[0].Add(renewalWindow).Sub(now), false
+		return live[0].Add(renewalWindow).Sub(now), false
 	}
 
 	limiter.hits[identity] = append(live, now)
-	limiter.busy[identity] = true
 
-	return func() {
-		limiter.mu.Lock()
-		delete(limiter.busy, identity)
-		limiter.mu.Unlock()
-	}, 0, true
+	return 0, true
 }
 
 // serveRenew serves POST /api/v1/renew. By the time it runs, serveAPI has
@@ -176,20 +164,33 @@ func (server *Server) serveRenew(
 		return
 	}
 
-	end, wait, ok := server.renewals.begin(caller)
-	if !ok {
-		server.rejectAPI(r, caller, errRenewalBusy.Error())
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-		http.Error(w, "too many renewals", http.StatusTooManyRequests)
+	unlock, _ := server.issuance.begin(caller)
+	if unlock == nil {
+		server.rejectRenewalLimit(w, r, caller, time.Second)
 
 		return
 	}
-	defer end()
+	defer unlock()
+
+	wait, ok := server.renewals.allow(caller)
+	if !ok {
+		server.rejectRenewalLimit(w, r, caller, wait)
+
+		return
+	}
 
 	body, ok := readRenewBody(w, r)
 	if ok {
 		server.renewDevice(w, r, session, body)
 	}
+}
+
+func (server *Server) rejectRenewalLimit(w http.ResponseWriter, r *http.Request,
+	caller string, wait time.Duration,
+) {
+	server.rejectAPI(r, caller, errRenewalBusy.Error())
+	w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+	http.Error(w, "too many renewals", http.StatusTooManyRequests)
 }
 
 func readRenewBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -360,7 +361,12 @@ func (server *Server) issueRenewal(w http.ResponseWriter, r *http.Request,
 		leaf:    leaf, previous: session.Fingerprint,
 		certificate: string(certPEM), chain: string(chainPEM),
 	}
-	server.recordRenewal(caller, &cached)
+	if !server.recordRenewal(caller, &cached) {
+		server.rejectAPI(r, caller, errDeviceSuperseded.Error())
+		http.Error(w, "renewal superseded", http.StatusConflict)
+
+		return
+	}
 	//nolint:contextcheck // pruning runs detached from the request on purpose
 	server.afterIssuance(caller)
 

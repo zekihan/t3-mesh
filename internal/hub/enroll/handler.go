@@ -31,10 +31,11 @@ var (
 
 // Handler serves enrollment connections (ALPN t3-mesh-enroll/1).
 type Handler struct {
-	Tokens   *Tokens
-	Issuer   issuer.Issuer
-	Allowed  func(identity string) error
-	OnIssued func(identity, fingerprint string)
+	Tokens       *Tokens
+	Issuer       issuer.Issuer
+	LockIssuance func(context.Context, string) (func(), error)
+	Allowed      func(identity string) error
+	OnIssued     func(identity, fingerprint string)
 	// Trust returns the clients CA bundle sent with every certificate.
 	Trust   func() proto.TrustBundle
 	Limiter *Limiter
@@ -188,6 +189,14 @@ func (handler *Handler) exchange(
 	}
 
 	identity := csrIdentity
+
+	if handler.LockIssuance != nil {
+		unlock, lockErr := handler.LockIssuance(ctx, identity)
+		if lockErr != nil {
+			return identity, "", proto.Enrolled{}, reject("issuance failed", lockErr)
+		}
+		defer unlock()
+	}
 
 	if handler.Allowed != nil {
 		err = handler.Allowed(identity)

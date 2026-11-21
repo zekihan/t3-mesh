@@ -67,20 +67,21 @@ type Options struct {
 // Server is the hub.
 type Server struct {
 	started        time.Time
-	releaseSince   map[string]time.Time
 	issuer         issuer.Issuer
-	now            func() time.Time
+	renewals       *renewLimiter
+	deviceKnown    map[string]bool
 	cfg            *hubconfig.Watcher
 	tracked        map[*tracked]struct{}
 	enrollH        *enroll.Handler
 	log            *slog.Logger
 	newest         map[string]string
-	renewalReplies map[string]renewalReplyCache
-	deviceKnown    map[string]bool
-	tokens         *enroll.Tokens
-	renewals       *renewLimiter
 	machines       map[string]*machineState
 	wantVersion    map[string]string
+	tokens         *enroll.Tokens
+	now            func() time.Time
+	releaseSince   map[string]time.Time
+	renewalReplies map[string]renewalReplyCache
+	issuance       issuanceLocks
 	wg             sync.WaitGroup
 	sweepInt       time.Duration
 	deviceRetry    time.Duration
@@ -140,9 +141,10 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server.enrollH = &enroll.Handler{
-		Tokens:  server.tokens,
-		Issuer:  server.issuer,
-		Allowed: server.EnrollAllowed,
+		Tokens:       server.tokens,
+		Issuer:       server.issuer,
+		LockIssuance: server.issuance.wait,
+		Allowed:      server.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
 			server.noteIssued(identity, fp)
 			server.log.Info(

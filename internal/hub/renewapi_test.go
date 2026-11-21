@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +25,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/zekihan/t3-mesh/internal/hub/issuer"
 	"github.com/zekihan/t3-mesh/internal/hub/issuer/issuertest"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/policy"
@@ -686,5 +689,116 @@ func TestRenewOneAtATime(t *testing.T) {
 
 	if got := <-first; got.status != http.StatusOK {
 		t.Errorf("first renewal got %d: %s", got.status, got.body)
+	}
+}
+
+type pausedRenewalIssuer struct {
+	issuer.Issuer
+
+	issued  chan string
+	release chan struct{}
+	csr     []byte
+}
+
+func (stub *pausedRenewalIssuer) Issue(ctx context.Context, identity string,
+	csr []byte,
+) ([]byte, []byte, error) {
+	cert, chain, err := stub.Issuer.Issue(ctx, identity, csr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("test issuance: %w", err)
+	}
+
+	if !bytes.Equal(csr, stub.csr) {
+		return cert, chain, nil
+	}
+
+	leaves, err := pki.ParseCertsPEM(cert)
+	if err != nil {
+		return nil, nil, fmt.Errorf("test issued leaf: %w", err)
+	}
+
+	stub.issued <- pki.Fingerprint(leaves[0])
+
+	<-stub.release
+
+	return cert, chain, nil
+}
+
+func startPausedRenewal(
+	t *testing.T,
+	csr []byte,
+) (*env, *pausedRenewalIssuer, string, <-chan apiResponse) {
+	t.Helper()
+
+	stub := &pausedRenewalIssuer{
+		csr:     csr,
+		issued:  make(chan string, 1),
+		release: make(chan struct{}),
+	}
+	harness := newEnvIssuer(t, func(h *env) issuer.Issuer {
+		stub.Issuer = h.fake
+
+		return stub
+	})
+	harness.setConfig(cfgOpts{devices: bothDevices, api: bothDevices})
+	oldFP := harness.enrollDevice(devPhone)
+
+	result := make(chan apiResponse, 1)
+	go func() {
+		result <- harness.renewAs(&renewCall{viewer: devPhone, fp: oldFP, body: csr})
+	}()
+
+	return harness, stub, oldFP, result
+}
+
+func TestRenewalKeepsNewerEnrollment(t *testing.T) {
+	harness, stub, oldFP, result := startPausedRenewal(t, newDeviceCSR(t, devPhone))
+
+	release := sync.OnceFunc(func() { close(stub.release) })
+	defer release()
+
+	select {
+	case <-stub.issued:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal did not reach the issuer")
+	}
+
+	// Model an enrollment issued independently of this hub's lock. A concurrent
+	// admission lookup learns the enrolled leaf before renewal returns.
+	cert, _, err := harness.fake.Issue(t.Context(), devPhone, newDeviceCSR(t, devPhone))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaves, err := pki.ParseCertsPEM(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enrolled := pki.Fingerprint(leaves[0])
+
+	if code := harness.deviceAPIStatus(
+		devPhone,
+		enrolled,
+		"/api/v1/machines",
+	); code != http.StatusOK {
+		t.Fatalf("newly enrolled leaf got %d", code)
+	}
+
+	release()
+
+	if resp := <-result; resp.status != http.StatusConflict {
+		t.Errorf("superseded renewal got %d: %s", resp.status, resp.body)
+	}
+
+	harness.srv.nmu.Lock()
+	defer harness.srv.nmu.Unlock()
+
+	if got := harness.srv.newest[devPhone]; got != enrolled {
+		t.Errorf("newest leaf = %q, want enrollment leaf %q", got, enrolled)
+	}
+
+	if cached := harness.srv.renewalReplies[devPhone]; cached.leaf != nil {
+		t.Errorf("cached rejected renewal of %s", oldFP)
 	}
 }

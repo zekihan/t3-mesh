@@ -622,6 +622,7 @@ key is new; the app generates a new one. The response is `200` with:
 
 Status codes: `400` for an unusable CSR, `403` for a refused caller or a CSR for another
 identity, `405` (`Allow: POST`) for another method, `408` when the body read times out,
+`409` when a newer leaf supersedes the caller during issuance,
 `413` over 16 KiB, `415` for another content type, `429` with `Retry-After` when
 renewals are limited, `502` when issuance fails (without detail), and `503` when the
 newest leaf cannot be checked. Renewals are
@@ -643,7 +644,9 @@ hosts and on `/api/v1`, with the renewal reply exception above. It uses the
 fingerprint header as it does for agent tunnels: it
 asks the issuer when its own record disagrees (it keeps none across restarts), and
 admits, with a warning, a leaf the issuer has no record of at all, as for agents. A
-leaf issued by enrollment or renewal supersedes the previous one at once: the hub closes
+leaf published by enrollment or renewal supersedes the previous one at once. The hub
+serializes enrollment and renewal for each identity and refuses to publish a device
+renewal if a newer leaf has superseded its caller. On publication, the hub closes
 the old leaf's open streams and pushes the new fingerprint to every agent. A device that
 is no longer listed under `devices` is refused and its streams are closed.
 
