@@ -40,3 +40,12 @@ test/cover: tidy
 	./scripts/go_test.sh -v -buildvcs -vet=all -coverprofile=${TMP_DIR}/coverage.out ./...
 	${GO_EXECUTABLE} tool cover -html=${TMP_DIR}/coverage.out
 
+
+## fuzz: fuzz each parser
+FUZZTIME ?= 30s
+.PHONY: fuzz
+fuzz:
+	${GO_EXECUTABLE} test ./internal/hub/proxyproto -run '^$$' -fuzz '^FuzzProxyHeader$$' -fuzztime=${FUZZTIME}
+	${GO_EXECUTABLE} test ./internal/proto -run '^$$' -fuzz '^FuzzReadMessage$$' -fuzztime=${FUZZTIME}
+	${GO_EXECUTABLE} test ./internal/pki -run '^$$' -fuzz '^FuzzValidateCSR$$' -fuzztime=${FUZZTIME}
+	${GO_EXECUTABLE} test ./internal/hub/hubconfig -run '^$$' -fuzz '^FuzzParseConfig$$' -fuzztime=${FUZZTIME}
