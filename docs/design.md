@@ -245,7 +245,8 @@ address, and every attempt is logged.
 Enrollment is also the recovery path for an agent whose certificate expired, for
 example after more than 30 days offline: the hub refuses the expired certificate, so
 the operator issues a new token. It is the recovery path for a device too: one that
-lost a renewal reply holds a superseded leaf and re-enrolls with a new token.
+lost a renewal reply can retry as described under [Device renewal](#device-renewal)
+and re-enrolls if that recovery is unavailable.
 
 #### Device enrollment
 
@@ -595,7 +596,8 @@ above and the hub allows 10 seconds to read an admitted renewal's body. The call
   not disabled, leaf not blocked and not expired, and listed under `api.identities`;
 - listed under `devices`: a KeyChain identity such as `z-phone` is a legitimate API
   caller and gets `403` here, whatever it posts and with any method;
-- holding the newest leaf the hub issued for its identity (`403` otherwise).
+- holding the newest leaf the hub issued for its identity, or the immediately
+  previous leaf when replaying a renewal reply (`403` otherwise).
 
 The CSR follows the rules of [Device enrollment](#device-enrollment) (ECDSA P-256,
 empty subject, exactly one URI SAN, no DNS, IP or email SAN, no other requested
@@ -614,13 +616,20 @@ renewals are limited, `502` when issuance fails (without detail), and `503` when
 newest leaf cannot be checked. Renewals are
 limited to 5 attempts per 10 minutes per identity, counting every attempt that passed
 admission, and to one at a time. A renewal outlives a client that hangs up: the hub
-finishes the issuance and records the new leaf, so a reply the app never read leaves it
-with a superseded leaf, and the recovery is re-enrollment with a new token.
+finishes issuance and keeps the last renewal's leaf and chain in memory for
+10 minutes. If the immediately previous leaf retries with a valid CSR for the
+same public key as the issued leaf, the hub returns that leaf and chain with the
+current trust bundle. It issues nothing new and the replay does not extend the
+window. Both leaf fingerprints must be unblocked and both leaves unexpired,
+and the identity must still be enabled. Re-enrollment or a hub restart clears
+the cached reply. A device that cannot recover the reply re-enrolls with a new
+token.
 
 #### Newest leaf for devices
 
 The hub admits only the newest issued leaf of an enrolled-device identity on the viewer
-hosts and on `/api/v1`, using the fingerprint header, as it does for agent tunnels: it
+hosts and on `/api/v1`, with the renewal reply exception above. It uses the
+fingerprint header as it does for agent tunnels: it
 asks the issuer when its own record disagrees (it keeps none across restarts), and
 admits, with a warning, a leaf the issuer has no record of at all, as for agents. A
 leaf issued by enrollment or renewal supersedes the previous one at once: the hub closes
@@ -1414,7 +1423,7 @@ Traefik middleware lists a kind `agent` identity.
 | Enrollment surface | own ALPN, only while a token is outstanding, size and time limits |
 | Device identities | `device-<name>-mesh`, own namespace, listed under `devices`, `client auth` only, ECDSA P-256, 8760h, second approver-policy for the hub's ServiceAccount |
 | Device enrollment | same ALPN and messages as agents; the reply adds the clients CA bundle and revision; `enroll-token --device` |
-| Device renewal | `POST /api/v1/renew`, devices only, newest leaf only, limited per identity; a lost reply is recovered by re-enrollment |
+| Device renewal | `POST /api/v1/renew`, devices only, limited per identity, with a 10-minute reply replay for the previous leaf and matching key |
 | Device leaves | newest leaf per device on viewer hosts and the API, and pushed to agents; `GET /api/v1/trust` for the clients CA and blocked leaves |
 | Agent renewal | at 90 days left; hub admits only the newest leaf per identity |
 | T3 on machines | loopback-bound, LAN mode off, other non-mTLS proxies removed before the gates |

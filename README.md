@@ -108,8 +108,9 @@ kubectl -n t3-mesh exec deploy/t3-mesh-hub -- t3-mesh-hub enroll-token --device 
 The command refuses agent identities and every name not listed under `devices`, and an
 agent token cannot enroll a device. The app speaks the enrollment protocol and renews
 through `POST /api/v1/renew`; both are specified in
-[docs/design.md](docs/design.md#device-enrollment). A device whose renewal reply was
-lost holds a superseded leaf and re-enrolls with a new token.
+[docs/design.md](docs/design.md#device-enrollment). A device that loses a renewal reply can retry with its previous leaf and a CSR
+for the same new key within 10 minutes. If replay is unavailable, it re-enrolls
+with a new token.
 
 ## Hub image
 

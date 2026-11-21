@@ -157,7 +157,7 @@ func TestRenewDevice(t *testing.T) {
 		t.Errorf("new leaf on a viewer host got %d", code)
 	}
 
-	// The old leaf can no longer renew either: a lost reply is recovered by enrollment.
+	// The old leaf cannot renew with a different key.
 	again := harness.renewAs(
 		&renewCall{viewer: devPhone, fp: oldFP, body: newDeviceCSR(t, devPhone)},
 	)
@@ -171,6 +171,79 @@ func TestRenewDevice(t *testing.T) {
 	)
 	if next.status != http.StatusOK {
 		t.Errorf("renewal with the new leaf got %d: %s", next.status, next.body)
+	}
+}
+
+func recoveryCSR(t *testing.T, key *ecdsa.PrivateKey) []byte {
+	t.Helper()
+
+	csr, err := pki.CreateCSR(key, devPhone)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return csr
+}
+
+func TestRenewalReplyRecovery(t *testing.T) {
+	for _, scenario := range []string{
+		"replay", "different key", "earlier leaf", "expired replay",
+		"blocked previous leaf", "blocked issued leaf", "disabled identity",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			harness, oldFP := renewEnv(t)
+
+			key, err := pki.GenerateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			previous := oldFP
+			if scenario == "earlier leaf" {
+				previous = harness.newDeviceFP(devPhone)
+			}
+
+			original := harness.renewAs(
+				&renewCall{viewer: devPhone, fp: previous, body: recoveryCSR(t, key)},
+			)
+			if original.status != http.StatusOK {
+				t.Fatalf("first renewal: %d %s", original.status, original.body)
+			}
+
+			newest := checkRenewReply(t, harness, original.body)
+
+			cfg := cfgOpts{devices: bothDevices, api: bothDevices}
+			call := renewCall{viewer: devPhone, fp: oldFP, body: recoveryCSR(t, key)}
+			want := http.StatusForbidden
+
+			switch scenario {
+			case "replay":
+				want = http.StatusOK
+			case "different key":
+				call.body = newDeviceCSR(t, devPhone)
+			case "expired replay":
+				harness.offset.Store(int64(renewalReplayWindow))
+			case "blocked previous leaf":
+				cfg.blocked = []string{oldFP}
+			case "blocked issued leaf":
+				cfg.blocked = []string{newest}
+			case "disabled identity":
+				cfg.disabled = []string{devPhone}
+			}
+
+			harness.setConfig(cfg)
+
+			got := harness.renewAs(&call)
+			if got.status != want {
+				t.Fatalf("replay: %d, want %d: %s", got.status, want, got.body)
+			}
+
+			if want == http.StatusOK && got.body != original.body {
+				t.Error("replay did not return the original certificate and chain")
+			}
+
+			noIssuance(t, harness, devPhone, newest)
+		})
 	}
 }
 

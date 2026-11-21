@@ -96,6 +96,10 @@ func (server *Server) deviceCurrent(snap *hubconfig.Snapshot, identity, fp strin
 // every agent is sent the new fingerprint.
 func (server *Server) noteIssued(identity, fp string) {
 	server.setNewest(identity, fp)
+	server.afterIssuance(identity)
+}
+
+func (server *Server) afterIssuance(identity string) {
 	server.pruneAsync(identity)
 
 	if policy.IsDevice(identity) {
