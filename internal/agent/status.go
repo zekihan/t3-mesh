@@ -41,7 +41,7 @@ func (agent *Agent) buildStatus() proto.Status {
 	agent.mu.Lock()
 	st := proto.Status{
 		Version:             agent.version,
-		Warnings:            slices.Clone(agent.warnings),
+		Warnings:            append(slices.Clone(agent.warnings), agent.exposureWarnings...),
 		Services:            slices.Clone(agent.services),
 		ReleaseRevision:     agent.cache.Release.Revision,
 		RulesRevision:       agent.cache.Rules.Revision,

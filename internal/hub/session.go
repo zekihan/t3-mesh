@@ -80,34 +80,35 @@ type sentState struct {
 type session struct {
 	// What the agent last reported about its listener for enrolled devices,
 	// sanitized; nil while it is not bound. Guarded by server.mu.
-	device      *proto.DeviceListener
-	services    []proto.ServiceHealth // last report from this session, guarded by server.mu
-	notAfter    time.Time
-	accepted    time.Time
-	source      netip.Addr
-	closeErr    error
-	ctx         context.Context //nolint:containedctx // the session owns its lifetime context, shared by its goroutines
-	leaf        *x509.Certificate
-	kick        chan struct{}
-	conn        *tls.Conn
-	ymx         *yamux.Session
-	ctrl        *tunnel.Control
-	log         *slog.Logger
-	cancel      context.CancelFunc
-	s           *Server
-	hello       proto.Hello
-	fingerprint string
-	identity    string
-	machine     string
-	sent        sentState
-	streams     atomic.Int64
-	id          uint64
-	linkStream  atomic.Int64
-	rejectOnce  sync.Once
-	closeOnce   sync.Once
-	renewing    atomic.Bool
-	closing     atomic.Bool
-	home        bool
+	device           *proto.DeviceListener
+	services         []proto.ServiceHealth // last report from this session, guarded by server.mu
+	exposureWarnings []string
+	notAfter         time.Time
+	accepted         time.Time
+	source           netip.Addr
+	closeErr         error
+	ctx              context.Context //nolint:containedctx // session lifetime shared by its goroutines
+	leaf             *x509.Certificate
+	kick             chan struct{}
+	conn             *tls.Conn
+	ymx              *yamux.Session
+	ctrl             *tunnel.Control
+	log              *slog.Logger
+	cancel           context.CancelFunc
+	s                *Server
+	hello            proto.Hello
+	fingerprint      string
+	identity         string
+	machine          string
+	sent             sentState
+	streams          atomic.Int64
+	id               uint64
+	linkStream       atomic.Int64
+	rejectOnce       sync.Once
+	closeOnce        sync.Once
+	renewing         atomic.Bool
+	closing          atomic.Bool
+	home             bool
 }
 
 func (sess *session) close(reason error) {
@@ -917,6 +918,13 @@ func (server *Server) recordStatus(sess *session, st *proto.Status) {
 	machine.status = &cp
 	sess.device = sanitizeDeviceListener(st.DeviceListener)
 	sess.services = st.Services
+	sess.exposureWarnings = nil
+
+	for _, warning := range st.Warnings {
+		if isExposureWarning(warning) {
+			sess.exposureWarnings = append(sess.exposureWarnings, warning)
+		}
+	}
 
 	if st.Version != "" {
 		machine.version = truncate(st.Version, maxVersionLen)

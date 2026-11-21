@@ -211,11 +211,16 @@ func (server *Server) machineStatusLocked(
 			Revocations: st.RevocationRevision, TrustBundle: st.TrustBundleRevision,
 			DeviceLeaves: st.DeviceLeavesRevision,
 		}
-		out.AgentWarnings = st.Warnings
+		out.AgentWarnings = slices.DeleteFunc(slices.Clone(st.Warnings), isExposureWarning)
 		out.FailedUpdates = nonNilFU(st.FailedUpdates)
 	}
 
+	if live != nil {
+		out.AgentWarnings = append(out.AgentWarnings, live.exposureWarnings...)
+	}
+
 	out.Alerts = map[string]bool{
+		"exposed":      live != nil && len(live.exposureWarnings) > 0,
 		"disconnected": server.disconnectedLocked(mc, ms, now),
 		"cert-expiry":  certExpiring(ms, now),
 		"update-failed": func() bool {
@@ -226,6 +231,10 @@ func (server *Server) machineStatusLocked(
 	}
 
 	return out
+}
+
+func isExposureWarning(warning string) bool {
+	return strings.HasPrefix(warning, proto.ExposureWarningPrefix)
 }
 
 func nonNil(in []string) []string {
@@ -340,6 +349,13 @@ func (server *Server) serveAlert(w http.ResponseWriter, r *http.Request) {
 				known = true
 				firing = server.disconnectedLocked(mc, ms, now)
 				reason = "agent not connected"
+			case "agent-" + mname + "-exposed":
+				known = true
+
+				if live := ms.newestLive(); live != nil {
+					firing = len(live.exposureWarnings) > 0
+					reason = strings.Join(live.exposureWarnings, ", ")
+				}
 			case "agent-" + mname + "-cert-expiry":
 				known = true
 				firing = certExpiring(ms, now)

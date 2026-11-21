@@ -229,8 +229,9 @@ type DeviceListener struct {
 }
 
 const (
-	ServiceReachable   = "reachable"
-	ServiceUnreachable = "unreachable"
+	ExposureWarningPrefix = "Loopback service exposed: "
+	ServiceReachable      = "reachable"
+	ServiceUnreachable    = "unreachable"
 )
 
 // ServiceHealth records the result of an agent's local service probe.

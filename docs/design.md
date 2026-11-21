@@ -551,7 +551,7 @@ a `state` of `reachable`, `unreachable` or `unknown` and a UTC RFC 3339
 or until the current session reports a result. `online` still reflects the tunnel.
 `alerts` holds the sorted names of the
 `/status` alerts that are currently true (`cert-expiry`, `disconnected`,
-`update-failed`), `[]` when none. `caller.path` is the path of the API request
+`exposed`, `update-failed`), `[]` when none. `caller.path` is the path of the API request
 itself: `LAN` if the `X-Real-IP` header, which Traefik's `traefik-real-ip`
 middleware sets at the entrypoint, is inside `homeCIDRs`, `OCI` if it is outside,
 `null` if the header is missing or not a bare IP address. The TCP peer is a Traefik
@@ -1038,6 +1038,14 @@ TCP connection only. The agent sends an extra `Status` when a probe first
 reports or its state changes. The periodic status report includes the latest
 check times.
 
+At startup, every five minutes and on network changes, the agent checks for
+TCP listeners on the ports of its loopback `serve` targets. It tries the
+machine's non-loopback, non-link-local IPv4 and IPv6 addresses with a one-second
+timeout per connection. A connection adds a warning with the service, port and
+address. The agent sends a report when these warnings change. The hub uses the
+live session's warnings to raise `agent-<machine>-exposed`. A clean report clears
+the warning and alert. The check leaves listeners and traffic alone.
+
 The cluster has no metrics scraper or vmalert, so the hub evaluates its own alert
 conditions and Gatus probes them. Nothing new is added to the cluster for this.
 
@@ -1051,7 +1059,8 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
-  `agent-<machine>-cert-expiry` (under 14 days), `agent-<machine>-update-failed`, and
+  `agent-<machine>-cert-expiry` (under 14 days), `agent-<machine>-exposed`,
+  `agent-<machine>-update-failed`, and
   `stale-config`.
 - The hub logs agent events (connect, disconnect, path change, renewal, issued
   fingerprint, update, rollback, reject, rejected peer) to stdout, so they reach
