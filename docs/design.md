@@ -997,6 +997,9 @@ in the hub's rules is TCP or is unknown.
   writes a new format, it records its manifest's `minStateVersion` in the state
   directory; no release older than that is ever started again, including by a
   hub-allowed rollback.
+  The agent keeps cache format 1. It writes only HTTP grants in `rules.allow`
+  and stores TCP grants and service kinds in optional fields that older agents
+  skip. TCP-capable agents merge these fields when loading the cache.
 - **Failed versions:** a crash, a failed local startup check, a failed manifest
   re-fetch or launcher self-test, or a `Reject` from the hub naming the version is a
   release failure: the agent records the version on disk and never installs it
