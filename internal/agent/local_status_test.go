@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -110,5 +112,59 @@ func checkReadOnlyProtocol(t *testing.T, path string) {
 	err = decoder.Decode(&reply)
 	if err == nil {
 		t.Fatal("received a second reply on one connection")
+	}
+}
+
+func TestLocalStatusStalledClientDoesNotBlock(t *testing.T) {
+	var listen net.ListenConfig
+
+	ln, err := listen.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() { done <- serveLocalStatus(ctx, ln, func() *LocalStatus { return &LocalStatus{} }) }()
+
+	t.Cleanup(func() {
+		cancel()
+
+		serveErr := <-done
+		if serveErr != nil {
+			t.Error(serveErr)
+		}
+	})
+
+	var dialer net.Dialer
+
+	stalled, err := dialer.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stalled.Close()
+
+	client, err := dialer.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	err = client.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = proto.WriteLine(client, localRequest{Op: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reply localReply
+
+	err = json.NewDecoder(client).Decode(&reply)
+	if err != nil || reply.Status == nil {
+		t.Fatalf("status reply: %+v, error: %v", reply, err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	localStatusTimeout = 2 * time.Second
 	socketRetry        = 5 * time.Second
 	maxLocalStatus     = 1 << 20
+	maxStatusClients   = 8
 	statusSocketMode   = 0o660
 )
 
@@ -183,6 +185,11 @@ func serveLocalStatus(ctx context.Context, ln net.Listener, snapshot func() *Loc
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 
+	var workers sync.WaitGroup
+	defer workers.Wait()
+
+	sem := make(chan struct{}, maxStatusClients)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -193,7 +200,16 @@ func serveLocalStatus(ctx context.Context, ln net.Listener, snapshot func() *Loc
 			return fmt.Errorf("accept status socket: %w", err)
 		}
 
-		replyLocalStatus(conn, snapshot)
+		select {
+		case sem <- struct{}{}:
+			workers.Go(func() {
+				defer func() { <-sem }()
+
+				replyLocalStatus(conn, snapshot)
+			})
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
