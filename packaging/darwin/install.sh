@@ -115,10 +115,12 @@ else
   # previous-good equal to known-good makes the fallback a no-op until the first update.
   ln -sfn "versions/$version" "$install_dir/previous-good"
   chown -h "$user:$user" "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
+  chmod -h 0755 "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
 fi
 
 install -d -m 0755 /usr/local/bin
 ln -sfn "$install_dir/current/t3-mesh-agent" /usr/local/bin/t3-mesh-agent
+chmod -h 0755 /usr/local/bin/t3-mesh-agent
 
 for label in "$main_label" "$fallback_label" "$runtime_label"; do
   install -m 0644 -o root -g wheel "$here/$label.plist" "$daemons/$label.plist"

@@ -263,6 +263,11 @@ func (agent *Agent) Run(ctx context.Context) error {
 		agent.log.WarnContext(ctx, "Fix version directory permissions", slog.Any("err", err))
 	}
 
+	err = (launcher.Layout{Dir: agent.cfg.InstallDir}).FixLinkModes()
+	if err != nil {
+		agent.log.WarnContext(ctx, "Fix install link permissions", slog.Any("err", err))
+	}
+
 	err = agent.loadLocal()
 	if err != nil {
 		return err
