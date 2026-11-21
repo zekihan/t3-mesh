@@ -626,8 +626,10 @@ identity, `405` (`Allow: POST`) for another method, `408` when the body read tim
 `413` over 16 KiB, `415` for another content type, `429` with `Retry-After` when
 renewals are limited, `502` when issuance fails (without detail), and `503` when the
 newest leaf cannot be checked. Renewals are
-limited to 5 attempts per 10 minutes per identity, counting every attempt that passed
-admission, and to one at a time. A renewal outlives a client that hangs up: the hub
+limited to 5 attempts per 10 minutes per identity and to one at a time. Attempts
+admitted with the newest leaf count when they fail. A replay counts only after
+its CSR proves possession of the issued leaf's key. The hub logs wrong-key replays.
+A renewal outlives a client that hangs up: the hub
 finishes issuance and keeps the last renewal's leaf and chain in memory for
 10 minutes. If the immediately previous leaf retries with a valid CSR for the
 same public key as the issued leaf, the hub returns that leaf and chain with the

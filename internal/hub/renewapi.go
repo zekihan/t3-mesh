@@ -29,8 +29,8 @@ const (
 	renewBodyTimeout = 10 * time.Second
 
 	// Each identity may attempt renewalMax renewals per renewalWindow. Every
-	// attempt that passes admission counts, whether or not it succeeds, so a
-	// device cannot make the hub create certificate requests in a loop.
+	// attempt by the newest leaf counts, whether or not it succeeds. A replay
+	// candidate has to prove it holds the issued leaf's key before it counts.
 	renewalMax          = 5
 	renewalWindow       = 10 * time.Minute
 	renewalReplayWindow = 10 * time.Minute
@@ -172,17 +172,24 @@ func (server *Server) serveRenew(
 	}
 	defer unlock()
 
-	wait, ok := server.renewals.allow(caller)
-	if !ok {
-		server.rejectRenewalLimit(w, r, caller, wait)
-
+	replayCandidate := server.cachedRenewal(caller, session.Fingerprint).leaf != nil
+	if !replayCandidate && !server.chargeRenewal(w, r, caller) {
 		return
 	}
 
 	body, ok := readRenewBody(w, r)
 	if ok {
-		server.renewDevice(w, r, session, body)
+		server.renewDevice(w, r, session, body, replayCandidate)
 	}
+}
+
+func (server *Server) chargeRenewal(w http.ResponseWriter, r *http.Request, caller string) bool {
+	wait, ok := server.renewals.allow(caller)
+	if !ok {
+		server.rejectRenewalLimit(w, r, caller, wait)
+	}
+
+	return ok
 }
 
 func (server *Server) rejectRenewalLimit(w http.ResponseWriter, r *http.Request,
@@ -232,6 +239,7 @@ func (server *Server) renewDevice(
 	r *http.Request,
 	session *policy.Session,
 	body []byte,
+	replayCandidate bool,
 ) {
 	caller := session.Identity
 
@@ -270,6 +278,10 @@ func (server *Server) renewDevice(
 		return
 	}
 
+	if replayCandidate && !server.chargeRenewal(w, r, caller) {
+		return
+	}
+
 	if cached.leaf != nil {
 		server.log.InfoContext(r.Context(), "Device renewal reply replayed",
 			slog.String("identity", caller),
@@ -302,7 +314,7 @@ func (server *Server) checkRenewal(r *http.Request, snap *hubconfig.Snapshot,
 	}
 
 	if !key.Equal(cached.leaf.PublicKey) {
-		return errDeviceSuperseded
+		return fmt.Errorf("%w: renewal replay key differs", errDeviceSuperseded)
 	}
 
 	err = policy.CheckLeaf(snap.Revocations, policy.Session{

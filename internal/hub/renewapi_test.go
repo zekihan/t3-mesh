@@ -692,6 +692,33 @@ func TestRenewOneAtATime(t *testing.T) {
 	}
 }
 
+func TestWrongKeyReplayPreservesRenewalBudget(t *testing.T) {
+	harness, oldFP := renewEnv(t)
+
+	issued := harness.renewAs(
+		&renewCall{viewer: devPhone, fp: oldFP, body: newDeviceCSR(t, devPhone)},
+	)
+	if issued.status != http.StatusOK {
+		t.Fatalf("first renewal got %d: %s", issued.status, issued.body)
+	}
+
+	newFP := checkRenewReply(t, harness, issued.body)
+	wrong := &renewCall{viewer: devPhone, fp: oldFP, body: newDeviceCSR(t, devPhone)}
+
+	for i := range renewalMax {
+		if resp := harness.renewAs(wrong); resp.status != http.StatusForbidden {
+			t.Errorf("wrong-key replay %d got %d: %s", i, resp.status, resp.body)
+		}
+	}
+
+	next := harness.renewAs(
+		&renewCall{viewer: devPhone, fp: newFP, body: newDeviceCSR(t, devPhone)},
+	)
+	if next.status != http.StatusOK {
+		t.Errorf("renewal from newest leaf got %d: %s", next.status, next.body)
+	}
+}
+
 type pausedRenewalIssuer struct {
 	issuer.Issuer
 
