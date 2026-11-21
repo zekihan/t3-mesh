@@ -56,6 +56,7 @@ type Service struct {
 
 // Machine is one configured machine.
 type Machine struct {
+	Release              *proto.Release
 	Services             map[string]Service
 	Identity             string
 	DisconnectAlertAfter time.Duration
@@ -210,7 +211,13 @@ type rawConfig struct {
 	} `yaml:"policy"`
 }
 
+type rawRelease struct {
+	Version         string `yaml:"version"`
+	RollbackAllowed bool   `yaml:"rollbackAllowed"`
+}
+
 type rawMachine struct {
+	Release  *rawRelease `yaml:"release"`
 	Services map[string]struct {
 		Kind string `yaml:"kind"`
 	} `yaml:"services"`
@@ -370,7 +377,23 @@ func (cfg *config) parseMachines(in map[string]rawMachine) error {
 			alertAfter = duration
 		}
 
+		var release *proto.Release
+
+		if machine.Release != nil {
+			if !versionRe.MatchString(machine.Release.Version) {
+				return invalid(
+					"machine %q release.version %q must look like vX.Y.Z",
+					name,
+					machine.Release.Version,
+				)
+			}
+
+			r := makeRelease(machine.Release.Version, machine.Release.RollbackAllowed)
+			release = &r
+		}
+
 		cfg.machines[name] = Machine{
+			Release:              release,
 			Identity:             machine.Identity,
 			Services:             svcs,
 			DisconnectAlertAfter: alertAfter,
@@ -430,14 +453,7 @@ func (cfg *config) parseGeneral(raw *rawConfig) error {
 		return invalid("release.version %q must look like vX.Y.Z", raw.Release.Version)
 	}
 
-	cfg.release = proto.Release{
-		Version:         raw.Release.Version,
-		RollbackAllowed: raw.Release.RollbackAllowed,
-	}
-	cfg.release.Revision = jsonRevision(struct {
-		Version         string `json:"version"`
-		RollbackAllowed bool   `json:"rollbackAllowed"`
-	}{cfg.release.Version, cfg.release.RollbackAllowed})
+	cfg.release = makeRelease(raw.Release.Version, raw.Release.RollbackAllowed)
 
 	cfg.issuer = Issuer(raw.Issuer)
 	if (cfg.issuer != Issuer{}) && (cfg.issuer.Name == "" || cfg.issuer.Kind == "") {
@@ -445,6 +461,25 @@ func (cfg *config) parseGeneral(raw *rawConfig) error {
 	}
 
 	return nil
+}
+
+func makeRelease(version string, rollback bool) proto.Release {
+	r := proto.Release{Version: version, RollbackAllowed: rollback}
+	r.Revision = jsonRevision(struct {
+		Version         string `json:"version"`
+		RollbackAllowed bool   `json:"rollbackAllowed"`
+	}{version, rollback})
+
+	return r
+}
+
+// ReleaseFor returns the effective release for a machine.
+func (snap *Snapshot) ReleaseFor(name string) proto.Release {
+	if r := snap.Machines[name].Release; r != nil {
+		return *r
+	}
+
+	return snap.Release
 }
 
 // parseAPI validates the hub API host and its caller set. The callers are a
@@ -578,6 +613,21 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 		return proto.TrustBundle{}, nil, nil, invalid("trust bundle revision is empty")
 	}
 
+	pool, err := parseTrust(pemBytes)
+	if err != nil {
+		return proto.TrustBundle{}, nil, nil, err
+	}
+
+	return proto.TrustBundle{
+		Revision: revision,
+		PEM:      string(pemBytes),
+	}, pool, append(
+		pemBytes,
+		rev...,
+	), nil
+}
+
+func parseTrust(pemBytes []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	count := 0
 
@@ -593,7 +643,7 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 
 		cert, perr := x509.ParseCertificate(block.Bytes)
 		if perr != nil {
-			return proto.TrustBundle{}, nil, nil, invalid("trust bundle certificate: %v", perr)
+			return nil, invalid("trust bundle certificate: %v", perr)
 		}
 
 		pool.AddCert(cert)
@@ -602,16 +652,37 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 	}
 
 	if count == 0 {
-		return proto.TrustBundle{}, nil, nil, invalid("trust bundle has no certificates")
+		return nil, invalid("trust bundle has no certificates")
 	}
 
-	return proto.TrustBundle{
-		Revision: revision,
-		PEM:      string(pemBytes),
-	}, pool, append(
-		pemBytes,
-		rev...,
-	), nil
+	return pool, nil
+}
+
+// ValidateFiles validates config and, when supplied, the clients CA bundle.
+func ValidateFiles(configPath, trustPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	_, err = parseConfig(data)
+	if err != nil {
+		return err
+	}
+
+	if trustPath != "" {
+		data, err = os.ReadFile(trustPath)
+		if err != nil {
+			return fmt.Errorf("read trust: %w", err)
+		}
+
+		_, err = parseTrust(data)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func loadCert(dir string) (*tls.Certificate, []byte, error) {

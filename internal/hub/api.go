@@ -50,6 +50,8 @@ type apiTunnel struct {
 type apiFleetMachine struct {
 	apiMachine
 
+	DesiredVersion string `json:"desiredVersion,omitempty"`
+
 	AgentVersion *string   `json:"agentVersion"`
 	CertNotAfter *string   `json:"certNotAfter"`
 	Tunnel       apiTunnel `json:"tunnel"`
@@ -294,10 +296,11 @@ func (server *Server) serveFleet(
 	for _, name := range names {
 		st := server.machineStatusLocked(snap, name, snap.Machines[name], now)
 		entry := apiFleetMachine{
-			apiMachine:   apiMachineOf(snap, name, &st),
-			CertNotAfter: formatTime(st.CertNotAfter),
-			Tunnel:       apiTunnel{ConnectedSince: formatTime(st.ConnectedSince)},
-			Alerts:       firingAlerts(st.Alerts),
+			apiMachine:     apiMachineOf(snap, name, &st),
+			DesiredVersion: st.DesiredVersion,
+			CertNotAfter:   formatTime(st.CertNotAfter),
+			Tunnel:         apiTunnel{ConnectedSince: formatTime(st.ConnectedSince)},
+			Alerts:         firingAlerts(st.Alerts),
 		}
 
 		if st.Version != "" {

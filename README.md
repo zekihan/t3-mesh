@@ -140,3 +140,10 @@ keys. Registry publication uses the repository secrets `DOCKER_USERNAME` and
 `DOCKER_PASSWORD`, also managed by homelab `terraform/git`.
 
 `scripts/sign-manifest.sh` does the same locally with the same environment variables.
+
+To canary an agent release, set `machines.<name>.release.version` in the hub
+config, wait for probation, then update the fleet `release.version` and remove the
+pin. A downgrade requires `rollbackAllowed: true` on that machine’s pin.
+
+Validate a hub configuration offline with `t3-mesh-hub validate --config config.yaml`;
+add `--trust ca.crt` to validate the clients CA bundle too.

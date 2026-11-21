@@ -67,7 +67,7 @@ type Options struct {
 // Server is the hub.
 type Server struct {
 	started      time.Time
-	releaseSince time.Time
+	releaseSince map[string]time.Time
 	issuer       issuer.Issuer
 	now          func() time.Time
 	cfg          *hubconfig.Watcher
@@ -79,7 +79,7 @@ type Server struct {
 	tokens       *enroll.Tokens
 	renewals     *renewLimiter
 	machines     map[string]*machineState
-	wantVersion  string
+	wantVersion  map[string]string
 	wg           sync.WaitGroup
 	sweepInt     time.Duration
 	deviceRetry  time.Duration
@@ -129,8 +129,13 @@ func New(opts Options) (*Server, error) {
 	server.renewals = newRenewLimiter(server.now)
 	server.deviceKnown = map[string]bool{}
 	server.started = server.now()
-	server.releaseSince = server.started
-	server.wantVersion = opts.Config.Current().Release.Version
+	server.releaseSince = map[string]time.Time{}
+
+	server.wantVersion = map[string]string{}
+	for name := range opts.Config.Current().Machines {
+		server.releaseSince[name] = server.started
+		server.wantVersion[name] = opts.Config.Current().ReleaseFor(name).Version
+	}
 
 	server.enrollH = &enroll.Handler{
 		Tokens:  server.tokens,
@@ -246,9 +251,12 @@ func (server *Server) ServeTunnels(ctx context.Context, ln net.Listener) error {
 // and pushes updates to every session. Pass it to Watcher.Run.
 func (server *Server) OnConfigChange(_, next *hubconfig.Snapshot) {
 	server.mu.Lock()
-	if next.Release.Version != server.wantVersion {
-		server.wantVersion = next.Release.Version
-		server.releaseSince = server.now()
+	for name := range next.Machines {
+		version := next.ReleaseFor(name).Version
+		if version != server.wantVersion[name] {
+			server.wantVersion[name] = version
+			server.releaseSince[name] = server.now()
+		}
 	}
 	server.mu.Unlock()
 

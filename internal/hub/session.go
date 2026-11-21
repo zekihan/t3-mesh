@@ -657,7 +657,7 @@ func (sess *session) desiredState() (desired, bool) {
 	want.rules = snap.Rules
 	want.revs = snap.Revocations
 	want.trust = snap.TrustBundle
-	want.release = snap.Release
+	want.release = snap.ReleaseFor(sess.machine)
 	want.viewerDomain = snap.ViewerDomain
 
 	for _, p := range snap.HomePrefixes {
