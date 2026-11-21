@@ -17,13 +17,26 @@ const (
 )
 
 // ProtocolVersion is the protocol version carried in the tunnel ALPN.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // ALPN protocol names.
 const (
-	ALPNEnroll = "t3-mesh-enroll/1"
-	ALPNDirect = "t3-mesh-direct/1"
+	ALPNEnroll    = "t3-mesh-enroll/1"
+	ALPNDirect    = "t3-mesh-direct/1"
+	ALPNDirectTCP = "t3-mesh-direct/2"
+	ALPNTunnelTCP = "t3-mesh/2"
 )
+
+// Service kinds configured by the hub.
+const (
+	KindHTTP = "http"
+	KindTCP  = "tcp"
+)
+
+// ValidServiceKind reports whether this release knows how to carry kind.
+func ValidServiceKind(kind string) bool {
+	return kind == KindHTTP || kind == KindTCP
+}
 
 // Size limits.
 const (
@@ -108,6 +121,9 @@ type PeerTable struct {
 type Rules struct { //nolint:govet // JSON field order is the wire format
 	Revision string              `json:"revision"`
 	Allow    map[string][]string `json:"allow"`
+	// ServiceKinds uses the same target keys as Allow. It includes services
+	// without a rule. Only hubs from before TCP support omit it.
+	ServiceKinds map[string]string `json:"serviceKinds,omitempty"`
 }
 
 // Revocations lists disabled identities and blocked leaf fingerprints
@@ -452,6 +468,17 @@ type StreamHeader struct {
 	Viewer string `json:"viewer,omitempty"`
 	From   string `json:"from,omitempty"`
 	To     string `json:"to,omitempty"`
+	// Kind is set to tcp on raw relay streams. An omitted kind means HTTP.
+	Kind string `json:"kind,omitempty"`
+}
+
+// ServiceKind interprets the HTTP-only header used by older agents and hubs.
+func (hdr *StreamHeader) ServiceKind() string {
+	if hdr.Kind == "" {
+		return KindHTTP
+	}
+
+	return hdr.Kind
 }
 
 // StreamReply is the accept line sent back on agent → hub link streams and on

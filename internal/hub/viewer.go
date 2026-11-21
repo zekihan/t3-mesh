@@ -292,7 +292,7 @@ func (server *Server) dialViewer(pol *policy.Session, onRevoke func()) (net.Conn
 	server.track(entry)
 
 	// Close the window between the check above and tracking.
-	err = server.checkNow(pol)
+	err = server.checkStream(server.cfg.Current(), entry, server.now())
 	if err != nil {
 		_ = conn.Close()
 

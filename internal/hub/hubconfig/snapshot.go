@@ -37,9 +37,6 @@ const (
 	KeyFile    = "tls.key"
 )
 
-// KindHTTP is the only supported service kind.
-const KindHTTP = "http"
-
 // ErrInvalid wraps every validation failure of the configuration.
 var ErrInvalid = errors.New("hubconfig: invalid configuration")
 
@@ -78,6 +75,7 @@ type Issuer struct {
 type Snapshot struct {
 	CertNotAfter   time.Time
 	Rules          proto.Rules
+	LegacyRules    proto.Rules
 	TrustPool      *x509.CertPool
 	byIdentity     map[string]string
 	Machines       map[string]Machine
@@ -146,7 +144,7 @@ func (snap *Snapshot) HostTarget(host string) (string, string, bool) {
 		return "", "", false
 	}
 
-	if _, found := m.Services[svc]; !found {
+	if m.Services[svc].Kind != proto.KindHTTP {
 		return "", "", false
 	}
 
@@ -228,6 +226,7 @@ type rawMachine struct {
 // config is the validated, derived content of config.yaml.
 type config struct {
 	rules        proto.Rules
+	legacyRules  proto.Rules
 	machines     map[string]Machine
 	issuer       Issuer
 	release      proto.Release
@@ -355,7 +354,7 @@ func (cfg *config) parseMachines(in map[string]rawMachine) error {
 				return invalid("machine %q service name %q is not a DNS label", name, svc)
 			}
 
-			if service.Kind != KindHTTP {
+			if !proto.ValidServiceKind(service.Kind) {
 				return invalid("machine %q service %q kind %q unsupported", name, svc, service.Kind)
 			}
 
@@ -517,15 +516,37 @@ func (cfg *config) parseAPI(raw *rawConfig) error {
 	return nil
 }
 
+func httpOnlyRules(rules *proto.Rules) proto.Rules {
+	http := proto.Rules{
+		Revision:     rules.Revision,
+		Allow:        make(map[string][]string),
+		ServiceKinds: make(map[string]string),
+	}
+
+	for target, kind := range rules.ServiceKinds {
+		if kind == proto.KindHTTP {
+			http.ServiceKinds[target] = kind
+			if ids, ok := rules.Allow[target]; ok {
+				http.Allow[target] = ids
+			}
+		}
+	}
+
+	return http
+}
+
 func (cfg *config) parsePolicy(raw *rawConfig) error {
 	// Entry names are "mesh-<svc>-<machine>"; both parts may contain dashes, so
 	// collect all configured pairs that could match each name.
 	known := map[string][]string{}
+	kinds := map[string]string{}
 
 	for machine, m := range cfg.machines {
-		for svc := range m.Services {
+		for svc, service := range m.Services {
 			name := "mesh-" + svc + "-" + machine
-			known[name] = append(known[name], policy.Target(svc, machine))
+			target := policy.Target(svc, machine)
+			known[name] = append(known[name], target)
+			kinds[target] = service.Kind
 		}
 	}
 
@@ -560,7 +581,9 @@ func (cfg *config) parsePolicy(raw *rawConfig) error {
 		allow[targets[0]] = sortedUnique(entry.Identities)
 	}
 
-	cfg.rules = proto.Rules{Allow: allow, Revision: jsonRevision(allow)}
+	cfg.rules = proto.Rules{Allow: allow, ServiceKinds: kinds}
+	cfg.rules.Revision = jsonRevision(cfg.rules)
+	cfg.legacyRules = httpOnlyRules(&cfg.rules)
 
 	disabled := sortedUnique(raw.Policy.DisabledIdentities)
 	if slices.Contains(disabled, "") {
@@ -742,6 +765,7 @@ func Load(paths Paths) (*Snapshot, error) {
 		HomePrefixes:   cfg.home,
 		Issuer:         cfg.issuer,
 		Rules:          cfg.rules,
+		LegacyRules:    cfg.legacyRules,
 		Revocations:    cfg.revs,
 		Release:        cfg.release,
 		TrustBundle:    bundle,

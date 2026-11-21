@@ -109,6 +109,7 @@ type session struct {
 	renewing         atomic.Bool
 	closing          atomic.Bool
 	home             bool
+	tcpLinks         bool
 }
 
 func (sess *session) close(reason error) {
@@ -382,6 +383,7 @@ func (server *Server) serveSession(
 		notAfter: adm.leaf.NotAfter, leaf: adm.leaf, source: source, accepted: server.now(),
 		conn: conn, ymx: ymx, ctrl: ctrl, log: log, ctx: sctx, cancel: cancel,
 		kick: make(chan struct{}, 1), hello: hello, home: snap.IsHome(source),
+		tcpLinks: state.NegotiatedProtocol == proto.ALPNTunnelTCP,
 	}
 
 	server.mu.Lock()
@@ -656,7 +658,12 @@ func (sess *session) desiredState() (desired, bool) {
 	sess.s.mu.Unlock()
 
 	want.home = home
-	want.rules = snap.Rules
+
+	want.rules = snap.LegacyRules
+	if sess.tcpLinks {
+		want.rules = snap.Rules
+	}
+
 	want.revs = snap.Revocations
 	want.trust = snap.TrustBundle
 	want.release = snap.ReleaseFor(sess.machine)
@@ -825,6 +832,10 @@ func (server *Server) peersLocked(snap *hubconfig.Snapshot, sess *session) proto
 		var svcs []string
 
 		for _, svc := range snap.Services(name) {
+			if !sess.tcpLinks && snap.Machines[name].Services[svc].Kind == proto.KindTCP {
+				continue
+			}
+
 			if policy.Allowed(snap.Rules, sess.identity, svc, name) {
 				svcs = append(svcs, svc)
 			}

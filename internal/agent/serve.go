@@ -39,6 +39,12 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream) {
 	setDeadline(st.SetReadDeadline, time.Time{})
 
 	relayed := hdr.From != ""
+	if hdr.ServiceKind() != proto.KindHTTP {
+		agent.replyIf(relayed, st, proto.StreamReply{Error: "service kind unavailable"})
+		_ = st.Close()
+
+		return
+	}
 
 	if !relayed && hdr.Viewer == "" {
 		agent.log.WarnContext(

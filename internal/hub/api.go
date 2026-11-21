@@ -164,8 +164,9 @@ func (server *Server) rejectAPI(r *http.Request, caller, reason string) {
 func visibleMachines(snap *hubconfig.Snapshot, caller string) []string {
 	out := make([]string, 0, len(snap.Machines))
 
-	for name := range snap.Machines {
-		if policy.Allowed(snap.Rules, caller, apiSvc, name) {
+	for name, machine := range snap.Machines {
+		if machine.Services[apiSvc].Kind == proto.KindHTTP &&
+			policy.Allowed(snap.Rules, caller, apiSvc, name) {
 			out = append(out, name)
 		}
 	}
@@ -303,6 +304,12 @@ func (server *Server) serveFleet(
 			Tunnel:         apiTunnel{ConnectedSince: formatTime(st.ConnectedSince)},
 			Alerts:         firingAlerts(st.Alerts),
 			Services:       st.ServiceHealth,
+		}
+
+		for svc, service := range snap.Machines[name].Services {
+			if service.Kind == proto.KindTCP {
+				delete(entry.Services, svc)
+			}
 		}
 
 		if st.Version != "" {
