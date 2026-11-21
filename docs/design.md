@@ -538,7 +538,7 @@ away, or whose listener is closed has none.
 `/status` reports for each, read through the same code:
 
 ```json
-{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"services":{"t3":{"state":"reachable","checkedAt":"2026-11-18T07:59:56Z"}},"alerts":["cert-expiry"]}]}
+{"caller":{"path":"LAN"},"machines":[{"name":"z-arch","online":true,"lastSeen":"2026-11-18T08:00:00Z","viewerUrl":"https://t3.z-arch.mesh.noqer.com","agentIdentity":"agent-z-arch","direct":{"address":"192.168.2.71","port":27443},"agentVersion":"0.1.12","certNotAfter":"2027-02-01T00:00:00Z","tunnel":{"path":"LAN","connectedSince":"2026-11-18T06:00:00Z"},"services":{"t3":{"state":"reachable","since":"2026-11-18T06:00:04Z"}},"alerts":["cert-expiry"]}]}
 ```
 
 Each entry is the `/machines` object (so `agentIdentity` and `direct` too) plus `agentVersion` (as the agent reported it,
@@ -547,8 +547,10 @@ Each entry is the `/machines` object (so `agentIdentity` and `direct` too) plus 
 time, both `null` while not connected), `services` and `alerts`. The service map
 has one entry per service configured for that machine at the hub. Each value has
 a `state` of `reachable`, `unreachable` or `unknown` and a UTC RFC 3339
-`checkedAt` time. The state is `unknown` with `checkedAt: null` while offline
-or until the current session reports a result. `online` still reflects the tunnel.
+`since` time: when the agent first saw that state. The agent probes every 30 s
+but reports only changes, so `since` is not the time of the last probe. The state
+is `unknown` with `since: null` while offline or until the current session reports
+a result. `online` still reflects the tunnel.
 `alerts` holds the sorted names of the
 `/status` alerts that are currently true (`cert-expiry`, `disconnected`,
 `exposed`, `update-failed`), `[]` when none. `caller.path` is the path of the API request

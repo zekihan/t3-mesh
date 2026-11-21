@@ -101,7 +101,7 @@ func printStatus(out io.Writer, status *agent.LocalStatus) {
 	printUpdateStatus(out, status)
 
 	for _, health := range report.Services {
-		fmt.Fprintln(out, "Service", health.Name, health.State, "checked", health.CheckedAt)
+		fmt.Fprintln(out, "Service", health.Name, health.State, "since", health.Since)
 	}
 
 	for _, warning := range report.Warnings {

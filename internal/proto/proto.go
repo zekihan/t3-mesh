@@ -234,11 +234,13 @@ const (
 	ServiceUnreachable    = "unreachable"
 )
 
-// ServiceHealth records the result of an agent's local service probe.
+// ServiceHealth records the result of an agent's local service probe. Since is
+// when the agent first saw the current state; the agent probes every 30 s but
+// reports only changes.
 type ServiceHealth struct {
-	Name      string `json:"name"`
-	State     string `json:"state"`
-	CheckedAt string `json:"checkedAt"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Since string `json:"since"`
 }
 
 // Status is the agent's periodic report.

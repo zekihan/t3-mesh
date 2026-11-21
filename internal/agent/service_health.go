@@ -84,6 +84,7 @@ func (agent *Agent) serviceLoop(ctx context.Context) {
 
 func (agent *Agent) checkServices(ctx context.Context, names []string) {
 	results := make([]proto.ServiceHealth, len(names))
+	now := agent.now().UTC().Format(time.RFC3339)
 
 	var probes sync.WaitGroup
 
@@ -94,18 +95,23 @@ func (agent *Agent) checkServices(ctx context.Context, names []string) {
 				status = proto.ServiceUnreachable
 			}
 
-			results[idx] = proto.ServiceHealth{
-				Name: name, State: status, CheckedAt: agent.now().UTC().Format(time.RFC3339),
-			}
+			results[idx] = proto.ServiceHealth{Name: name, State: status, Since: now}
 		})
 	}
 
 	probes.Wait()
 
 	agent.mu.Lock()
-	changed := !slices.EqualFunc(agent.services, results, func(a, b proto.ServiceHealth) bool {
-		return a.Name == b.Name && a.State == b.State
-	})
+	for idx := range results {
+		prev := slices.IndexFunc(agent.services, func(h proto.ServiceHealth) bool {
+			return h.Name == results[idx].Name
+		})
+		if prev >= 0 && agent.services[prev].State == results[idx].State {
+			results[idx].Since = agent.services[prev].Since
+		}
+	}
+
+	changed := !slices.Equal(agent.services, results)
 	agent.services = results
 	agent.mu.Unlock()
 

@@ -7,8 +7,8 @@ import (
 )
 
 type serviceHealth struct {
-	CheckedAt *string `json:"checkedAt"`
-	State     string  `json:"state"`
+	Since *string `json:"since"`
+	State string  `json:"state"`
 }
 
 func serviceHealthOf(configured []string, live *session) map[string]serviceHealth {
@@ -30,9 +30,9 @@ func serviceHealthOf(configured []string, live *session) map[string]serviceHealt
 			continue
 		}
 
-		checked, err := time.Parse(time.RFC3339, health.CheckedAt)
+		since, err := time.Parse(time.RFC3339, health.Since)
 		if err == nil {
-			out[health.Name] = serviceHealth{State: health.State, CheckedAt: formatTime(&checked)}
+			out[health.Name] = serviceHealth{State: health.State, Since: formatTime(&since)}
 		}
 	}
 

@@ -77,7 +77,8 @@ func TestServiceHealthNudgesOnlyOnStateChange(t *testing.T) {
 		t.Fatal("initial result did not nudge status")
 	}
 
-	now = now.Add(time.Second)
+	first := now
+	now = now.Add(time.Minute)
 
 	agt.checkServices(t.Context(), []string{"t3"})
 
@@ -87,8 +88,8 @@ func TestServiceHealthNudgesOnlyOnStateChange(t *testing.T) {
 	default:
 	}
 
-	if got := agt.services[0].CheckedAt; got != now.UTC().Format(time.RFC3339) {
-		t.Errorf("latest check = %s", got)
+	if got := agt.services[0].Since; got != first.UTC().Format(time.RFC3339) {
+		t.Errorf("unchanged state since = %s, want the first check", got)
 	}
 
 	web.Close()
@@ -98,5 +99,9 @@ func TestServiceHealthNudgesOnlyOnStateChange(t *testing.T) {
 	case <-agt.statusNudge:
 	default:
 		t.Fatal("unreachable service did not nudge status")
+	}
+
+	if got := agt.services[0].Since; got != now.UTC().Format(time.RFC3339) {
+		t.Errorf("changed state since = %s, want the latest check", got)
 	}
 }

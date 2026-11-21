@@ -809,8 +809,8 @@ func TestAPIFleetServiceHealth(t *testing.T) {
 	fake := harness.connect("agent-devbox", "devbox-body")
 
 	const (
-		unknown = `"services":{"t3":{"checkedAt":null,"state":"unknown"}}`
-		known   = `"services":{"t3":{"checkedAt":"2026-11-18T08:00:00Z","state":"unreachable"}}`
+		unknown = `"services":{"t3":{"since":null,"state":"unknown"}}`
+		known   = `"services":{"t3":{"since":"2026-11-18T08:00:00Z","state":"unreachable"}}`
 	)
 
 	body := harness.fleet("z-phone", "").body
@@ -819,8 +819,8 @@ func TestAPIFleetServiceHealth(t *testing.T) {
 	}
 
 	err := fake.ctrl.Send(proto.Status{Services: []proto.ServiceHealth{
-		{Name: "t3", State: proto.ServiceUnreachable, CheckedAt: "2026-11-18T08:00:00Z"},
-		{Name: "unconfigured", State: proto.ServiceReachable, CheckedAt: "2026-11-18T08:00:00Z"},
+		{Name: "t3", State: proto.ServiceUnreachable, Since: "2026-11-18T08:00:00Z"},
+		{Name: "unconfigured", State: proto.ServiceReachable, Since: "2026-11-18T08:00:00Z"},
 	}})
 	if err != nil {
 		t.Fatal(err)
