@@ -41,9 +41,10 @@ var (
 	errUsage = errors.New(
 		"usage: t3-mesh-hub enroll-token [--admin-socket path] (<agent-identity> | --device <device-identity>)",
 	)
-	errStopped    = errors.New("stopped unexpectedly")
-	errSubcommand = errors.New("unknown subcommand")
-	errArguments  = errors.New("unexpected arguments")
+	errValidateUsage = errors.New("usage: t3-mesh-hub validate --config <path> [--trust <path>]")
+	errStopped       = errors.New("stopped unexpectedly")
+	errSubcommand    = errors.New("unknown subcommand")
+	errArguments     = errors.New("unexpected arguments")
 )
 
 func main() {
@@ -62,6 +63,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "validate":
+		return validate(args[1:])
 	case "enroll-token":
 		return enrollToken(args[1:])
 	case "version":
@@ -73,7 +76,11 @@ func run(args []string) error {
 
 		return nil
 	default:
-		return fmt.Errorf("%w %q (want serve, enroll-token or version)", errSubcommand, args[0])
+		return fmt.Errorf(
+			"%w %q (want serve, validate, enroll-token or version)",
+			errSubcommand,
+			args[0],
+		)
 	}
 }
 
@@ -437,4 +444,32 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs.SetOutput(os.Stderr)
 
 	return fs
+}
+
+func validate(args []string) error {
+	fs := newFlagSet("validate")
+	configPath := fs.String("config", "", "path to config.yaml")
+	trustPath := fs.String("trust", "", "path to clients CA bundle")
+
+	err := fs.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+
+	if *configPath == "" || fs.NArg() != 0 {
+		return errValidateUsage
+	}
+
+	err = hubconfig.ValidateFiles(*configPath, *trustPath)
+	if err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+
+	fmt.Fprintln(os.Stdout, "ok")
+
+	return nil
 }

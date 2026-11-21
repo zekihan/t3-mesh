@@ -613,6 +613,21 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 		return proto.TrustBundle{}, nil, nil, invalid("trust bundle revision is empty")
 	}
 
+	pool, err := parseTrust(pemBytes)
+	if err != nil {
+		return proto.TrustBundle{}, nil, nil, err
+	}
+
+	return proto.TrustBundle{
+		Revision: revision,
+		PEM:      string(pemBytes),
+	}, pool, append(
+		pemBytes,
+		rev...,
+	), nil
+}
+
+func parseTrust(pemBytes []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	count := 0
 
@@ -628,7 +643,7 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 
 		cert, perr := x509.ParseCertificate(block.Bytes)
 		if perr != nil {
-			return proto.TrustBundle{}, nil, nil, invalid("trust bundle certificate: %v", perr)
+			return nil, invalid("trust bundle certificate: %v", perr)
 		}
 
 		pool.AddCert(cert)
@@ -637,16 +652,37 @@ func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 	}
 
 	if count == 0 {
-		return proto.TrustBundle{}, nil, nil, invalid("trust bundle has no certificates")
+		return nil, invalid("trust bundle has no certificates")
 	}
 
-	return proto.TrustBundle{
-		Revision: revision,
-		PEM:      string(pemBytes),
-	}, pool, append(
-		pemBytes,
-		rev...,
-	), nil
+	return pool, nil
+}
+
+// ValidateFiles validates config and, when supplied, the clients CA bundle.
+func ValidateFiles(configPath, trustPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	_, err = parseConfig(data)
+	if err != nil {
+		return err
+	}
+
+	if trustPath != "" {
+		data, err = os.ReadFile(trustPath)
+		if err != nil {
+			return fmt.Errorf("read trust: %w", err)
+		}
+
+		_, err = parseTrust(data)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func loadCert(dir string) (*tls.Certificate, []byte, error) {

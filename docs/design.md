@@ -1349,3 +1349,7 @@ Traefik middleware lists a kind `agent` identity.
 
 The hub reports each machine’s effective release as `desiredVersion` in `/status`
 and `/api/v1/fleet`. Release revisions are derived from each effective release.
+
+`t3-mesh-hub validate --config config.yaml` runs the hub configuration parser
+offline. With `--trust ca.crt` it also validates the clients CA bundle; it does
+not read the serving certificate or require network access.
