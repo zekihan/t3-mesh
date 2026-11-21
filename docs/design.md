@@ -436,6 +436,11 @@ only replica from the Service would turn a late reload into an outage. Instead
 the mounted one for more than 10 minutes, or the loaded serving certificate is
 within 14 days of expiry while a newer one is mounted.
 
+`t3-mesh-hub validate --config config.yaml` runs the same parser offline, so CI can
+refuse a bad chart change before it reaches the hub. With `--trust ca.crt` it also
+validates the clients CA bundle. It reads neither the serving certificate nor the
+network.
+
 Traefik middlewares are rendered from the same policy entries with kind `agent`
 filtered out, so an agent certificate is never accepted on a viewer host. Agent
 identities in an entry only grant machine-to-machine access.
@@ -898,6 +903,9 @@ proxies to the machine's T3 (`serve.t3`, `127.0.0.1:3773`).
   `release.version` and remove the pin. A pin below the running version requires
   `rollbackAllowed: true` on the pin. The pin defaults this flag to false. The
   previous-protocol rule in [Tunnel admission](#tunnel-admission) still applies.
+  The hub reports each machine's effective release as `desiredVersion` in `/status`
+  and `/api/v1/fleet`, and derives each machine's release revision from it, so a pin
+  changes only that machine's revision.
 - **Install layout:** `versions/<version>/t3-mesh-agent`, `current` and
   `known-good` symlinks. The service always starts a small launcher mode of the
   `known-good` binary, which runs `current`. A `previous-good` symlink keeps the
@@ -1346,10 +1354,3 @@ Traefik middleware lists a kind `agent` identity.
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
 | Testing | unit tests plus one in-process hub + two agents test |
-
-The hub reports each machine’s effective release as `desiredVersion` in `/status`
-and `/api/v1/fleet`. Release revisions are derived from each effective release.
-
-`t3-mesh-hub validate --config config.yaml` runs the hub configuration parser
-offline. With `--trust ca.crt` it also validates the clients CA bundle; it does
-not read the serving certificate or require network access.
