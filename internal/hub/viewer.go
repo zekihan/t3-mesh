@@ -232,7 +232,7 @@ func (server *Server) writeOffline(w http.ResponseWriter, machine string) {
 	}
 	server.mu.Unlock()
 
-	seen := "not seen since the hub started"
+	seen := "no last-seen time recorded"
 	if !last.IsZero() {
 		seen = "last seen " + last.UTC().Format(time.RFC3339)
 	}
@@ -241,7 +241,8 @@ func (server *Server) writeOffline(w http.ResponseWriter, machine string) {
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = fmt.Fprintf(
 		w,
-		"<!doctype html><html><head><title>%[1]s is offline</title></head>"+
+		"<!doctype html><html><head><title>%[1]s is offline</title>"+
+			"<meta http-equiv=\"refresh\" content=\"15\"></head>"+
 			"<body><h1>%[1]s is offline</h1>"+
 			"<p>The machine is not connected to the mesh (%[2]s).</p></body></html>\n",
 		html.EscapeString(machine),

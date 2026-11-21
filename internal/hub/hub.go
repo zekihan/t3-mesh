@@ -66,29 +66,31 @@ type Options struct {
 
 // Server is the hub.
 type Server struct {
-	started      time.Time
-	releaseSince map[string]time.Time
-	issuer       issuer.Issuer
-	now          func() time.Time
-	cfg          *hubconfig.Watcher
-	tracked      map[*tracked]struct{}
-	enrollH      *enroll.Handler
-	log          *slog.Logger
-	newest       map[string]string
-	deviceKnown  map[string]bool
-	tokens       *enroll.Tokens
-	renewals     *renewLimiter
-	machines     map[string]*machineState
-	wantVersion  map[string]string
-	wg           sync.WaitGroup
-	sweepInt     time.Duration
-	deviceRetry  time.Duration
-	nextID       uint64
-	proxyTO      time.Duration
-	mu           sync.Mutex
-	nmu          sync.Mutex
-	tmu          sync.Mutex
-	ready        atomic.Bool
+	started        time.Time
+	issuer         issuer.Issuer
+	renewals       *renewLimiter
+	deviceKnown    map[string]bool
+	cfg            *hubconfig.Watcher
+	tracked        map[*tracked]struct{}
+	enrollH        *enroll.Handler
+	log            *slog.Logger
+	newest         map[string]string
+	machines       map[string]*machineState
+	wantVersion    map[string]string
+	tokens         *enroll.Tokens
+	now            func() time.Time
+	releaseSince   map[string]time.Time
+	renewalReplies map[string]renewalReplyCache
+	issuance       issuanceLocks
+	wg             sync.WaitGroup
+	sweepInt       time.Duration
+	deviceRetry    time.Duration
+	nextID         uint64
+	proxyTO        time.Duration
+	mu             sync.Mutex
+	nmu            sync.Mutex
+	tmu            sync.Mutex
+	ready          atomic.Bool
 }
 
 // New builds a Server.
@@ -127,6 +129,7 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server.renewals = newRenewLimiter(server.now)
+	server.renewalReplies = map[string]renewalReplyCache{}
 	server.deviceKnown = map[string]bool{}
 	server.started = server.now()
 	server.releaseSince = map[string]time.Time{}
@@ -138,9 +141,10 @@ func New(opts Options) (*Server, error) {
 	}
 
 	server.enrollH = &enroll.Handler{
-		Tokens:  server.tokens,
-		Issuer:  server.issuer,
-		Allowed: server.EnrollAllowed,
+		Tokens:       server.tokens,
+		Issuer:       server.issuer,
+		LockIssuance: server.issuance.wait,
+		Allowed:      server.EnrollAllowed,
 		OnIssued: func(identity, fp string) {
 			server.noteIssued(identity, fp)
 			server.log.Info(
@@ -484,6 +488,9 @@ func (server *Server) checkNewest(
 	}
 
 	server.newest[identity] = got
+	if got != cached {
+		delete(server.renewalReplies, identity)
+	}
 
 	return got == fp, false, nil
 }
@@ -491,6 +498,7 @@ func (server *Server) checkNewest(
 func (server *Server) setNewest(identity, fp string) {
 	server.nmu.Lock()
 	server.newest[identity] = fp
+	delete(server.renewalReplies, identity)
 	server.nmu.Unlock()
 }
 
@@ -503,6 +511,7 @@ func (server *Server) sweepLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			server.expireRenewalReplies()
 			server.enforce()
 		}
 	}

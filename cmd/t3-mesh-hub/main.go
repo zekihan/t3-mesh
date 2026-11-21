@@ -20,6 +20,7 @@ import (
 	"github.com/zekihan/t3-mesh/internal/hub/enroll"
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/hub/issuer"
+	"github.com/zekihan/t3-mesh/internal/hub/kube"
 	"github.com/zekihan/t3-mesh/internal/hub/proxyproto"
 )
 
@@ -39,7 +40,7 @@ const (
 
 var (
 	errUsage = errors.New(
-		"usage: t3-mesh-hub enroll-token [--admin-socket path] (<agent-identity> | --device <device-identity>)",
+		"usage: t3-mesh-hub enroll-token [--admin-socket path] [--qr] (<agent-identity> | --device <device-identity>)",
 	)
 	errValidateUsage = errors.New("usage: t3-mesh-hub validate --config <path> [--trust <path>]")
 	errStopped       = errors.New("stopped unexpectedly")
@@ -67,6 +68,8 @@ func run(args []string) error {
 		return validate(args[1:])
 	case "enroll-token":
 		return enrollToken(args[1:])
+	case "status", "tokens", "disconnect":
+		return runAdmin(args[0], args[1:])
 	case "version":
 		if len(args) > 1 {
 			return fmt.Errorf("version: %w", errArguments)
@@ -77,7 +80,7 @@ func run(args []string) error {
 		return nil
 	default:
 		return fmt.Errorf(
-			"%w %q (want serve, validate, enroll-token or version)",
+			"%w %q (want serve, validate, enroll-token, status, tokens, disconnect or version)",
 			errSubcommand,
 			args[0],
 		)
@@ -85,15 +88,18 @@ func run(args []string) error {
 }
 
 type serveOptions struct {
-	configDir     string
-	trustDir      string
-	certDir       string
-	tunnelAddr    string
-	viewerAddr    string
-	opsAddr       string
-	adminSocket   string
-	proxyProtocol bool
-	logLevel      slog.Level
+	configDir       string
+	configMap       string
+	trustConfigMap  string
+	trustDir        string
+	certDir         string
+	tunnelAddr      string
+	viewerAddr      string
+	opsAddr         string
+	adminSocket     string
+	proxyProtocol   bool
+	persistLastSeen bool
+	logLevel        slog.Level
 }
 
 func parseServe(args []string) (serveOptions, error) {
@@ -135,7 +141,7 @@ func parseServe(args []string) (serveOptions, error) {
 		&opts.adminSocket,
 		"admin-socket",
 		enroll.DefaultAdminSocket,
-		"unix socket for enroll-token",
+		"unix socket for local admin commands",
 	)
 	fs.BoolVar(
 		&opts.proxyProtocol,
@@ -143,6 +149,20 @@ func parseServe(args []string) (serveOptions, error) {
 		true,
 		"expect a PROXY v2 header on the tunnel listener",
 	)
+	fs.StringVar(
+		&opts.configMap,
+		"config-map",
+		"",
+		"watch this hub config ConfigMap in the pod namespace",
+	)
+	fs.StringVar(
+		&opts.trustConfigMap,
+		"trust-config-map",
+		"clients-ca-bundle",
+		"clients CA ConfigMap to watch with --config-map",
+	)
+	fs.BoolVar(&opts.persistLastSeen, "persist-last-seen", false,
+		"persist last-seen times in the t3-mesh-hub-state ConfigMap")
 	level := fs.String("log-level", "info", "log level: debug, info, warn or error")
 
 	err := fs.Parse(args)
@@ -240,10 +260,12 @@ func serve(args []string) error {
 		ReadHeaderTimeout: httpHeaderTimeout,
 	}
 	admin := &enroll.Admin{
-		Path:    opts.adminSocket,
-		Tokens:  tokens,
-		Allowed: srv.EnrollTokenAllowed,
-		Log:     log,
+		Path:       opts.adminSocket,
+		Tokens:     tokens,
+		Allowed:    srv.EnrollTokenAllowed,
+		Status:     srv.AdminStatus,
+		Disconnect: srv.Disconnect,
+		Log:        log,
 	}
 
 	onChange := func(old, next *hubconfig.Snapshot) {
@@ -263,21 +285,88 @@ func serve(args []string) error {
 		slog.String("adminSocket", opts.adminSocket),
 	)
 
-	return runAll(ctx, log,
-		component{name: "config watcher", run: func(ctx context.Context) error {
+	components := []component{
+		{name: "config watcher", run: func(ctx context.Context) error {
 			return watcher.Run(ctx, onChange)
 		}},
-		component{name: "tunnel listener", run: func(ctx context.Context) error {
+		{name: "tunnel listener", run: func(ctx context.Context) error {
 			return srv.ServeTunnels(ctx, tunnelLn)
 		}},
-		component{name: "admin socket", run: admin.Serve},
-		component{name: "viewer http", run: func(ctx context.Context) error {
+		{name: "admin socket", run: admin.Serve},
+		{name: "viewer http", run: func(ctx context.Context) error {
 			return serveHTTP(ctx, log, viewer)
 		}},
-		component{name: "ops http", run: func(ctx context.Context) error {
+		{name: "ops http", run: func(ctx context.Context) error {
 			return serveHTTP(ctx, log, ops)
 		}},
-	)
+	}
+
+	components, state := withKubeFeatures(ctx, &opts, srv, watcher, onChange, log, components)
+
+	err = runAll(ctx, log, components...)
+	if err == nil && state != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+
+		state.Flush(shutdownCtx)
+	}
+
+	return err
+}
+
+func withKubeFeatures(ctx context.Context, opts *serveOptions, srv *hub.Server,
+	watcher *hubconfig.Watcher, onChange func(old, next *hubconfig.Snapshot),
+	log *slog.Logger, components []component,
+) ([]component, *hub.LastSeenStore) {
+	if opts.configMap == "" && !opts.persistLastSeen {
+		return components, nil
+	}
+
+	namespace, client, err := configMapClient()
+	if err != nil {
+		log.WarnContext(ctx, "ConfigMap features unavailable", slog.Any("error", err))
+
+		return components, nil
+	}
+
+	if opts.configMap != "" {
+		components = append(
+			components,
+			component{name: "ConfigMap watches", run: func(ctx context.Context) error {
+				return watcher.WatchConfigMaps(
+					ctx,
+					client,
+					namespace,
+					opts.configMap,
+					opts.trustConfigMap,
+					onChange,
+				)
+			}},
+		)
+	}
+
+	var state *hub.LastSeenStore
+	if opts.persistLastSeen {
+		state = hub.NewLastSeenStore(srv, client, namespace)
+		state.Load(ctx)
+		components = append(components, component{name: "last seen persistence", run: state.Run})
+	}
+
+	return components, state
+}
+
+func configMapClient() (string, *kube.Client, error) {
+	namespace, err := kube.Namespace()
+	if err != nil {
+		return "", nil, fmt.Errorf("initialize ConfigMap access: %w", err)
+	}
+
+	client, err := kube.New("", "", "", nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("initialize ConfigMap access: %w", err)
+	}
+
+	return namespace, client, nil
 }
 
 type component struct {
@@ -369,6 +458,7 @@ type enrollTokenArgs struct {
 	socket   string
 	kind     string
 	identity string
+	qr       bool
 }
 
 func parseEnrollToken(args []string) (enrollTokenArgs, error) {
@@ -389,6 +479,8 @@ func parseEnrollToken(args []string) (enrollTokenArgs, error) {
 		"",
 		"enrolled-device identity to mint a token for (instead of an agent identity argument)",
 	)
+
+	fs.BoolVar(&parsed.qr, "qr", false, "also print the token as a terminal QR code")
 
 	err := fs.Parse(args)
 	if err != nil {
@@ -435,6 +527,10 @@ func enrollToken(args []string) error {
 
 	fmt.Fprintln(os.Stdout, token)
 	fmt.Fprintf(os.Stdout, "expires %s\n", expires.UTC().Format(time.RFC3339))
+
+	if parsed.qr {
+		return printTokenQR(os.Stdout, token)
+	}
 
 	return nil
 }

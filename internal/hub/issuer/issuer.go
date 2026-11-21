@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -15,22 +14,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/zekihan/t3-mesh/internal/hub/kube"
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/policy"
 )
 
 const (
-	defaultTokenPath    = /* #nosec G101 */ "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	defaultCAPath       = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	defaultPollInterval = 2 * time.Second
 	defaultDuration     = 8760 * time.Hour
 
@@ -44,25 +40,19 @@ const (
 	// Longest identity accepted, and longest API error body quoted in errors.
 	maxIdentityLen   = policy.MaxIdentityLen
 	maxErrorBodySize = 512
-
-	tlsHandshakeTimeout = 10 * time.Second
 )
 
 var (
 	errNamespaceRequired = errors.New("issuer: namespace is required")
 	errIssuerRefRequired = errors.New("issuer: issuer name, kind and group are required")
-	errNoAPIServer       = errors.New(
-		"issuer: no APIServer configured and KUBERNETES_SERVICE_HOST/PORT unset",
-	)
-	errNoCACerts        = errors.New("issuer: CA file holds no certificates")
-	errInvalidIdentity  = errors.New("issuer: invalid identity")
-	errEmptyCSR         = errors.New("issuer: empty CSR")
-	errUnknownKind      = errors.New("issuer: identity is neither an agent nor an enrolled device")
-	errCSRIdentity      = errors.New("issuer: CSR identity differs from the requested identity")
-	errNoRequestName    = errors.New("issuer: API server returned a request without a name")
-	errNoCertInPEM      = errors.New("no certificate in PEM")
-	errRequestFailed    = errors.New("certificate request failed")
-	errUnexpectedStatus = errors.New("unexpected status")
+	errInvalidIdentity   = errors.New("issuer: invalid identity")
+	errEmptyCSR          = errors.New("issuer: empty CSR")
+	errUnknownKind       = errors.New("issuer: identity is neither an agent nor an enrolled device")
+	errCSRIdentity       = errors.New("issuer: CSR identity differs from the requested identity")
+	errNoRequestName     = errors.New("issuer: API server returned a request without a name")
+	errNoCertInPEM       = errors.New("no certificate in PEM")
+	errRequestFailed     = errors.New("certificate request failed")
+	errUnexpectedStatus  = errors.New("unexpected status")
 )
 
 const (
@@ -126,9 +116,8 @@ type Issuer interface {
 
 // K8s is the Issuer backed by the Kubernetes API.
 type K8s struct {
-	client *http.Client
+	client *kube.Client
 	log    *slog.Logger
-	base   string
 	cfg    Config
 }
 
@@ -154,67 +143,17 @@ func New(cfg Config) (*K8s, error) {
 		cfg.PollInterval = defaultPollInterval
 	}
 
-	if cfg.TokenPath == "" {
-		cfg.TokenPath = defaultTokenPath
-	}
-
-	if cfg.CAPath == "" {
-		cfg.CAPath = defaultCAPath
-	}
-
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	base, err := apiBase(cfg.APIServer)
+	client, err := kube.New(cfg.APIServer, cfg.CAPath, cfg.TokenPath, cfg.HTTPClient)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("issuer: %w", err)
 	}
 
-	client := cfg.HTTPClient
-	if client == nil {
-		client, err = inClusterClient(cfg.CAPath)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &K8s{cfg: cfg, client: client, base: base, log: log}, nil
-}
-
-// apiBase returns the API server base URL, falling back to the in-cluster
-// service environment when none is configured.
-func apiBase(apiServer string) (string, error) {
-	base := apiServer
-	if base == "" {
-		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
-		if host == "" || port == "" {
-			return "", errNoAPIServer
-		}
-
-		base = "https://" + net.JoinHostPort(host, port)
-	}
-
-	return strings.TrimRight(base, "/"), nil
-}
-
-// inClusterClient builds an HTTP client that trusts the cluster CA at caPath.
-func inClusterClient(caPath string) (*http.Client, error) {
-	ca, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("issuer: read CA: %w", err)
-	}
-
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca) {
-		return nil, errNoCACerts
-	}
-
-	return &http.Client{Transport: &http.Transport{
-		TLSClientConfig:     &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-		TLSHandshakeTimeout: tlsHandshakeTimeout,
-	}}, nil
+	return &K8s{cfg: cfg, client: client, log: log}, nil
 }
 
 type objectMeta struct {
@@ -654,26 +593,9 @@ func (k8s *K8s) do(ctx context.Context, method, rawURL string, body, out any) er
 		rd = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, rd)
+	resp, err := k8s.client.Do(ctx, method, rawURL, rd)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-
-	tok, err := os.ReadFile(k8s.cfg.TokenPath)
-	if err != nil {
-		return fmt.Errorf("read service account token: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
-	req.Header.Set("Accept", "application/json")
-
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := k8s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, req.URL.Path, err)
+		return fmt.Errorf("issuer API request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -690,7 +612,7 @@ func (k8s *K8s) do(ctx context.Context, method, rawURL string, body, out any) er
 
 		return &statusError{
 			err: fmt.Errorf(
-				"%s %s: %w %d: %s", method, req.URL.Path, errUnexpectedStatus, resp.StatusCode, msg,
+				"%s %s: %w %d: %s", method, rawURL, errUnexpectedStatus, resp.StatusCode, msg,
 			),
 			code: resp.StatusCode,
 		}
@@ -707,7 +629,7 @@ func (k8s *K8s) do(ctx context.Context, method, rawURL string, body, out any) er
 }
 
 func (k8s *K8s) collectionURL() string {
-	return k8s.base + "/apis/cert-manager.io/v1/namespaces/" + url.PathEscape(
+	return "/apis/cert-manager.io/v1/namespaces/" + url.PathEscape(
 		k8s.cfg.Namespace,
 	) + "/certificaterequests"
 }

@@ -132,15 +132,16 @@ func TestParseServeDefaults(t *testing.T) {
 	}
 
 	want := serveOptions{
-		configDir:     "/etc/t3-mesh/config",
-		trustDir:      "/etc/t3-mesh/trust",
-		certDir:       "/etc/t3-mesh/tls",
-		tunnelAddr:    ":8443",
-		viewerAddr:    ":8080",
-		opsAddr:       ":9090",
-		adminSocket:   enroll.DefaultAdminSocket,
-		proxyProtocol: true,
-		logLevel:      slog.LevelInfo,
+		configDir:      "/etc/t3-mesh/config",
+		trustConfigMap: "clients-ca-bundle",
+		trustDir:       "/etc/t3-mesh/trust",
+		certDir:        "/etc/t3-mesh/tls",
+		tunnelAddr:     ":8443",
+		viewerAddr:     ":8080",
+		opsAddr:        ":9090",
+		adminSocket:    enroll.DefaultAdminSocket,
+		proxyProtocol:  true,
+		logLevel:       slog.LevelInfo,
 	}
 	if opts != want {
 		t.Fatalf("parseServe(nil) = %+v, want %+v", opts, want)

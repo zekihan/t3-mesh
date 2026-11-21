@@ -143,6 +143,21 @@ func (sess *session) renew(req proto.Renew) (proto.Renewed, error) {
 	ctx, cancel := context.WithTimeout(sess.ctx, renewTimeout)
 	defer cancel()
 
+	unlock, _ := sess.s.issuance.begin(identity)
+	if unlock == nil {
+		return proto.Renewed{}, pubErr("issuance in progress")
+	}
+	defer unlock()
+
+	current, _, err := sess.s.checkNewest(ctx, identity, sess.fingerprint)
+	if err != nil {
+		return proto.Renewed{}, err
+	}
+
+	if !current {
+		return proto.Renewed{}, pubErr("leaf is not the newest issued")
+	}
+
 	certPEM, chainPEM, err := sess.s.issuer.Issue(ctx, identity, []byte(req.CSR))
 	if err != nil {
 		return proto.Renewed{}, fmt.Errorf("issue: %w", err)

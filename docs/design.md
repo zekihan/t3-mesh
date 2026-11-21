@@ -223,7 +223,9 @@ the test missed.
    `--device` takes an identity listed under `devices`; each refuses the other kind and
    every unknown or disabled identity, so a token is never minted for the wrong kind.
    (The admin request carries `kind` as `agent` or `device`; one without it is an
-   agent request, as sent by earlier releases.)
+   agent request, as sent by earlier releases.) Add `--qr` to print a terminal
+   QR code alongside the plain token. The code contains only the token text, so
+   the phone can scan it and paste it into enrollment.
 2. On the machine: `t3-mesh-agent enroll --token <token>`. The agent generates an
    ECDSA P-256 key locally in a `0600` file, connects to
    `mesh.noqer.com` without a client certificate and sends the CSR with the token.
@@ -231,6 +233,12 @@ the test missed.
    the certificate and chain. The agent stores them and reconnects with the new
    identity. Which CAs it trusts for peers comes from the trust bundle below, not
    from this chain.
+
+`t3-mesh-hub tokens` lists outstanding tokens on the same socket, with a public
+ID prefix, identity, kind and expiry. The ID is generated independently of the
+token. `tokens revoke <id-prefix>` removes a matching token and refuses a prefix
+that matches more than one. Listing and revoking tokens never reveals the token
+or its hash.
 
 Enrollment uses its own ALPN, `t3-mesh-enroll/1`, without yamux: one `Enroll`
 message of at most 4 KiB, one reply, then close, all within 30 s. The hub accepts a
@@ -245,7 +253,8 @@ address, and every attempt is logged.
 Enrollment is also the recovery path for an agent whose certificate expired, for
 example after more than 30 days offline: the hub refuses the expired certificate, so
 the operator issues a new token. It is the recovery path for a device too: one that
-lost a renewal reply holds a superseded leaf and re-enrolls with a new token.
+lost a renewal reply can retry as described under [Device renewal](#device-renewal)
+and re-enrolls if that recovery is unavailable.
 
 #### Device enrollment
 
@@ -423,8 +432,20 @@ The list of machines and services is fixed. An agent announces what it serves; t
 hub accepts only listed services and reports any difference in `/status` and as a
 log event. The same list generates DNS records, certificates and Traefik routes.
 
-The hub watches its mounted ConfigMap and applies changes live (rules, revocations,
-desired version). The pod template carries no ConfigMap checksum, so a release bump
+The hub applies rules, revocations and desired versions live. With
+`--config-map t3-mesh-hub-config`, it lists and watches that ConfigMap and
+`clients-ca-bundle` (override with `--trust-config-map`) in its pod namespace,
+using a separate exact `metadata.name` selector for each. API events run through
+the same validation as mounted inputs and usually reach the hub within a second.
+An event larger than 4 MiB closes the watch so it can reconnect with backoff.
+The hub loads the mounts at startup and always reads the serving certificate
+from its mount.
+
+Each connected watch takes precedence over its mount. On disconnect the hub
+warns on API errors, retries with backoff, and retains the last applied API data
+for up to two minutes. After two minutes the mount becomes authoritative, even
+if its projection still lags. If the hub has applied no API data for a
+ConfigMap, it uses the mount immediately. The pod template carries no ConfigMap checksum, so a release bump
 does not restart the hub or drop tunnels.
 
 Kubernetes updates mounted ConfigMaps and Secrets by swapping a `..data` symlink, so
@@ -433,7 +454,8 @@ event, plus every 60 s as a backstop. `/readyz` means only "can serve": listener
 up and configuration loaded once. Staleness never fails readiness, since pulling the
 only replica from the Service would turn a late reload into an outage. Instead
 `/alerts/stale-config` turns red when the loaded policy revision has differed from
-the mounted one for more than 10 minutes, or the loaded serving certificate is
+the API while connected or the mount while disconnected for more than 10 minutes,
+or the loaded serving certificate is
 within 14 days of expiry while a newer one is mounted.
 
 `t3-mesh-hub validate --config config.yaml` runs the same parser offline, so CI can
@@ -476,8 +498,9 @@ it and newer hubs accept reports that omit it.
   before forwarding. The hub maps `Host` to `(machine, svc)`, opens a
   stream on that machine's newest tunnel session, and reverse-proxies the request over it,
   preserving `Host`, `Origin`, headers, paths, methods and WebSocket upgrades. No
-  tunnel means `502` with a short page that names the machine and its last-seen time
-  (since the last hub restart; the hub keeps no persistent state).
+  tunnel means `502` with a short page that names the machine and gives its
+  last-seen time when known. The page refreshes every 15 seconds with an HTML
+  meta refresh, so it opens T3 once the tunnel returns.
 - **Agent-to-agent stream:** the hub checks the rule for the source agent, opens a
   stream on the target's tunnel and splices bytes. The hub does not parse the
   contents.
@@ -515,8 +538,9 @@ machines goes through it, so `/api/v1/fleet` reuses it; `/api/v1/trust` lists no
 ```
 
 `online` means a live tunnel session. `lastSeen` is RFC 3339 UTC, the current time
-while online and the last disconnect otherwise (as in `/status`), or `null` if the hub
-has not seen the machine since it started. `viewerUrl` is
+while online and the last time the hub saw the machine otherwise (as in `/status`).
+With persistence enabled the timestamp can come from a previous hub run. An unknown
+time is `null`. `viewerUrl` is
 `https://t3.<machine>.<viewerDomain>`. `agentIdentity` is the machine's configured agent
 identity, `agent-<machine>`: the one URI an app expects in the certificate of the agent
 it connects to directly.
@@ -584,7 +608,8 @@ above and the hub allows 10 seconds to read an admitted renewal's body. The call
   not disabled, leaf not blocked and not expired, and listed under `api.identities`;
 - listed under `devices`: a KeyChain identity such as `z-phone` is a legitimate API
   caller and gets `403` here, whatever it posts and with any method;
-- holding the newest leaf the hub issued for its identity (`403` otherwise).
+- holding the newest leaf the hub issued for its identity, or the immediately
+  previous leaf when replaying a renewal reply (`403` otherwise).
 
 The CSR follows the rules of [Device enrollment](#device-enrollment) (ECDSA P-256,
 empty subject, exactly one URI SAN, no DNS, IP or email SAN, no other requested
@@ -598,21 +623,33 @@ key is new; the app generates a new one. The response is `200` with:
 
 Status codes: `400` for an unusable CSR, `403` for a refused caller or a CSR for another
 identity, `405` (`Allow: POST`) for another method, `408` when the body read times out,
+`409` when a newer leaf supersedes the caller during issuance,
 `413` over 16 KiB, `415` for another content type, `429` with `Retry-After` when
 renewals are limited, `502` when issuance fails (without detail), and `503` when the
 newest leaf cannot be checked. Renewals are
-limited to 5 attempts per 10 minutes per identity, counting every attempt that passed
-admission, and to one at a time. A renewal outlives a client that hangs up: the hub
-finishes the issuance and records the new leaf, so a reply the app never read leaves it
-with a superseded leaf, and the recovery is re-enrollment with a new token.
+limited to 5 attempts per 10 minutes per identity and to one at a time. Attempts
+admitted with the newest leaf count when they fail. A replay counts only after
+its CSR proves possession of the issued leaf's key. The hub logs wrong-key replays.
+A renewal outlives a client that hangs up: the hub
+finishes issuance and keeps the last renewal's leaf and chain in memory for
+10 minutes. If the immediately previous leaf retries with a valid CSR for the
+same public key as the issued leaf, the hub returns that leaf and chain with the
+current trust bundle. It issues nothing new and the replay does not extend the
+window. Both leaf fingerprints must be unblocked and both leaves unexpired,
+and the identity must still be enabled. Re-enrollment or a hub restart clears
+the cached reply. A device that cannot recover the reply re-enrolls with a new
+token.
 
 #### Newest leaf for devices
 
 The hub admits only the newest issued leaf of an enrolled-device identity on the viewer
-hosts and on `/api/v1`, using the fingerprint header, as it does for agent tunnels: it
+hosts and on `/api/v1`, with the renewal reply exception above. It uses the
+fingerprint header as it does for agent tunnels: it
 asks the issuer when its own record disagrees (it keeps none across restarts), and
 admits, with a warning, a leaf the issuer has no record of at all, as for agents. A
-leaf issued by enrollment or renewal supersedes the previous one at once: the hub closes
+leaf published by enrollment or renewal supersedes the previous one at once. The hub
+serializes enrollment and renewal for each identity and refuses to publish a device
+renewal if a newer leaf has superseded its caller. On publication, the hub closes
 the old leaf's open streams and pushes the new fingerprint to every agent. A device that
 is no longer listed under `devices` is refused and its streams are closed.
 
@@ -650,6 +687,17 @@ The hub is single-replica by design. Running two replicas would need shared sess
 ownership, ordering and distribution of rules and revocations, and is future work
 with its own design.
 
+With `--persist-last-seen`, the hub loads last-seen times from the
+`lastSeen.json` data key of `t3-mesh-hub-state` in its own namespace. The chart
+creates this ConfigMap empty. The JSON value maps machine names to RFC 3339
+timestamps. The hub writes changed state at most once a minute and flushes it
+again on graceful shutdown, after closing tunnels. An update uses the
+ConfigMap's resourceVersion and reads it again on conflict, keeping the later
+timestamp for each machine and preserving other data keys. On load, the hub
+warns once if it skips malformed timestamps or treats an unreadable last-seen
+value as empty. The next flush repairs that value. API failures are logged and
+leave the hub serving with its in-memory state.
+
 ### Kubernetes permissions
 
 - `create`, `get`, `list`, `watch` CertificateRequests in `mtls-pki`, bound to the
@@ -660,7 +708,13 @@ with its own design.
   restrict `delete` by label, so this widens the hub's power to deleting other
   CertificateRequests in `mtls-pki`; cert-manager recreates them for live
   Certificates.
-- Read its own ConfigMaps (configuration and `clients-ca-bundle`). Nothing else.
+- In its own namespace, `get`, `list`, and `watch` core `configmaps`, with
+  `resourceNames` limited to the config map named by `--config-map` (`t3-mesh-hub-config`
+  in the chart) and `clients-ca-bundle`. The name selectors allow the restricted
+  list and watch requests.
+- With last-seen persistence enabled, `get` and `update` core `configmaps` in
+  the hub namespace, with `resourceNames` limited to `t3-mesh-hub-state`.
+  The chart owns creation of the ConfigMap.
 
 ## Agent
 
@@ -1054,10 +1108,15 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
 - **`/status`** (JSON) lists, per agent: connected, path (LAN or OCI), open and
   direct sessions, open device sessions, the device listener the live session
   reports (`deviceListener`: port and bound addresses, absent while not bound), stream
-  counts, version, certificate expiry, last seen, and the last acknowledged
+  counts, version, certificate expiry, last seen (restored across restarts when
+  persistence is enabled), and the last acknowledged
   `Release`, policy, revocation, trust-bundle and device-leaves revisions. Rotation
   steps that wait for "every agent acknowledged" read it. The `serviceHealth`
   map has the same contents as `services` in `/api/v1/fleet`.
+- **`t3-mesh-hub status`** uses the admin socket to show each machine's online
+  state, path, running and desired versions, certificate expiry, service health,
+  active alerts and last-seen time. **`t3-mesh-hub disconnect <machine>`** closes
+  that machine's current tunnel sessions so the agent can reconnect.
 - **`/alerts/<name>`** returns 200 when fine and 503 when firing, one Gatus endpoint
   each: `agent-<machine>-disconnected` (more than 10 minutes, 24 hours for z-mac,
   which is often asleep; counted from hub start after a restart),
@@ -1387,7 +1446,7 @@ Traefik middleware lists a kind `agent` identity.
 | PROXY trust | Traefik `trustedIPs` = pod CIDR, limited to frpc by NetworkPolicy; forged-header and non-frpc-pod tests in M1 |
 | Tunnel admission | certificate URI must be exactly one configured agent identity |
 | Hub namespace network | default-deny baseline plus explicit ingress and egress |
-| Config reload | watch mount directories, periodic re-read, `/alerts/stale-config` on stale state |
+| Config reload | optional ConfigMap API watches with mount fallback, periodic re-read, `/alerts/stale-config` on stale state |
 | Downgrades | hub flag allows any signed release at or above `minStateVersion` (accepted risk); download URL fixed in the binary |
 | M2 cutover gate | real T3 linking, pairing, reconnect, sleep/wake and viewer access |
 | Hub certificate | Let's Encrypt |
@@ -1400,7 +1459,7 @@ Traefik middleware lists a kind `agent` identity.
 | Enrollment surface | own ALPN, only while a token is outstanding, size and time limits |
 | Device identities | `device-<name>-mesh`, own namespace, listed under `devices`, `client auth` only, ECDSA P-256, 8760h, second approver-policy for the hub's ServiceAccount |
 | Device enrollment | same ALPN and messages as agents; the reply adds the clients CA bundle and revision; `enroll-token --device` |
-| Device renewal | `POST /api/v1/renew`, devices only, newest leaf only, limited per identity; a lost reply is recovered by re-enrollment |
+| Device renewal | `POST /api/v1/renew`, devices only, limited per identity, with a 10-minute reply replay for the previous leaf and matching key |
 | Device leaves | newest leaf per device on viewer hosts and the API, and pushed to agents; `GET /api/v1/trust` for the clients CA and blocked leaves |
 | Agent renewal | at 90 days left; hub admits only the newest leaf per identity |
 | T3 on machines | loopback-bound, LAN mode off, other non-mTLS proxies removed before the gates |
@@ -1409,7 +1468,7 @@ Traefik middleware lists a kind `agent` identity.
 | Device listener origin | `Host` must be `t3.<machine>.<viewerDomain>` (domain sent by the hub), else `421`; same rewrite code as the hub's viewer proxy plus dropping every client forwarding header |
 | Device listener probe | `GET /.well-known/t3-mesh/direct`, answered by the agent, `{"machine","identity"}` with `no-store` |
 | Direct route in the machine list | `direct` (address and port) and `agentIdentity`; non-null only while the hub marks the machine home and the agent reports the listener bound; IPv4 inside `homeCIDRs` preferred, then the tunnel's source address |
-| Hub state | none persistent; tokens and last-seen lost on restart |
+| Hub state | optional ConfigMap for last-seen times; tokens stay in memory |
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
 | Testing | unit tests plus one in-process hub + two agents test |

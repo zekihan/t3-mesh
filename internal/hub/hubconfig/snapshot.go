@@ -597,17 +597,7 @@ func readFile(dir, name string) ([]byte, error) {
 	return b, nil
 }
 
-func loadTrust(dir string) (proto.TrustBundle, *x509.CertPool, []byte, error) {
-	pemBytes, err := readFile(dir, TrustFile)
-	if err != nil {
-		return proto.TrustBundle{}, nil, nil, err
-	}
-
-	rev, err := readFile(dir, RevFile)
-	if err != nil {
-		return proto.TrustBundle{}, nil, nil, err
-	}
-
+func parseTrustBundle(pemBytes, rev []byte) (proto.TrustBundle, *x509.CertPool, []byte, error) {
 	revision := strings.TrimSpace(string(rev))
 	if revision == "" {
 		return proto.TrustBundle{}, nil, nil, invalid("trust bundle revision is empty")
@@ -711,24 +701,52 @@ func loadCert(dir string) (*tls.Certificate, []byte, error) {
 	return &pair, append(crt, key...), nil
 }
 
+func readMount(dir string, keys ...string) (map[string]string, error) {
+	data := make(map[string]string, len(keys))
+	for _, key := range keys {
+		raw, err := readFile(dir, key)
+		if err != nil {
+			return nil, err
+		}
+
+		data[key] = string(raw)
+	}
+
+	return data, nil
+}
+
 // Load reads and validates every input and builds a Snapshot.
 func Load(paths Paths) (*Snapshot, error) {
-	cfgBytes, err := readFile(paths.ConfigDir, ConfigFile)
+	cfg, err := readMount(paths.ConfigDir, ConfigFile)
 	if err != nil {
 		return nil, err
 	}
+
+	trust, err := readMount(paths.TrustDir, TrustFile, RevFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return load(cfg, trust, paths.CertDir)
+}
+
+func load(configData, trustData map[string]string, certDir string) (*Snapshot, error) {
+	cfgBytes := []byte(configData[ConfigFile])
 
 	cfg, err := parseConfig(cfgBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	bundle, pool, trustRaw, err := loadTrust(paths.TrustDir)
+	bundle, pool, trustRaw, err := parseTrustBundle(
+		[]byte(trustData[TrustFile]),
+		[]byte(trustData[RevFile]),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	cert, certRaw, err := loadCert(paths.CertDir)
+	cert, certRaw, err := loadCert(certDir)
 	if err != nil {
 		return nil, err
 	}

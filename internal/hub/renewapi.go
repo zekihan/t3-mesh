@@ -3,7 +3,9 @@ package hub
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/pki"
+	"github.com/zekihan/t3-mesh/internal/policy"
 )
 
 const (
@@ -26,10 +29,11 @@ const (
 	renewBodyTimeout = 10 * time.Second
 
 	// Each identity may attempt renewalMax renewals per renewalWindow. Every
-	// attempt that passes admission counts, whether or not it succeeds, so a
-	// device cannot make the hub create certificate requests in a loop.
-	renewalMax    = 5
-	renewalWindow = 10 * time.Minute
+	// attempt by the newest leaf counts, whether or not it succeeds. A replay
+	// candidate has to prove it holds the issued leaf's key before it counts.
+	renewalMax          = 5
+	renewalWindow       = 10 * time.Minute
+	renewalReplayWindow = 10 * time.Minute
 )
 
 var errRenewalBusy = errors.New("hub: a renewal is already in progress or the limit is reached")
@@ -42,23 +46,69 @@ type renewReply struct {
 	CARevision  string `json:"caRevision"`
 }
 
-// renewLimiter allows one renewal at a time per identity and renewalMax
-// attempts per renewalWindow. Identities are enrolled devices only, so the
-// table is as small as the configuration.
+type renewalReplyCache struct {
+	expires     time.Time
+	leaf        *x509.Certificate
+	previous    string
+	certificate string
+	chain       string
+}
+
+func (server *Server) cachedRenewal(identity, previous string) renewalReplyCache {
+	server.nmu.Lock()
+	defer server.nmu.Unlock()
+
+	cached := server.renewalReplies[identity]
+	if cached.previous != previous || !server.now().Before(cached.expires) {
+		return renewalReplyCache{}
+	}
+
+	return cached
+}
+
+func (server *Server) expireRenewalReplies() {
+	now := server.now()
+
+	server.nmu.Lock()
+	defer server.nmu.Unlock()
+
+	for identity, cached := range server.renewalReplies {
+		if !now.Before(cached.expires) {
+			delete(server.renewalReplies, identity)
+		}
+	}
+}
+
+func (server *Server) recordRenewal(identity string, cached *renewalReplyCache) bool {
+	server.nmu.Lock()
+	defer server.nmu.Unlock()
+
+	// A concurrent lookup may have already observed this issuance at the issuer.
+	fp := pki.Fingerprint(cached.leaf)
+	if current := server.newest[identity]; current != "" && current != cached.previous &&
+		current != fp {
+		return false
+	}
+
+	server.renewalReplies[identity] = *cached
+	server.newest[identity] = fp
+
+	return true
+}
+
+// renewLimiter allows renewalMax attempts per renewalWindow per enrolled device.
 type renewLimiter struct {
 	now  func() time.Time
 	hits map[string][]time.Time
-	busy map[string]bool
 	mu   sync.Mutex
 }
 
 func newRenewLimiter(now func() time.Time) *renewLimiter {
-	return &renewLimiter{now: now, hits: map[string][]time.Time{}, busy: map[string]bool{}}
+	return &renewLimiter{now: now, hits: map[string][]time.Time{}}
 }
 
-// begin records an attempt by identity. When it is allowed it returns the
-// function that ends the attempt; otherwise it returns how long to wait.
-func (limiter *renewLimiter) begin(identity string) (func(), time.Duration, bool) {
+// allow records an attempt by identity or returns how long to wait.
+func (limiter *renewLimiter) allow(identity string) (time.Duration, bool) {
 	now := limiter.now()
 	cutoff := now.Add(-renewalWindow)
 
@@ -75,35 +125,27 @@ func (limiter *renewLimiter) begin(identity string) (func(), time.Duration, bool
 
 	limiter.hits[identity] = live
 
-	if limiter.busy[identity] {
-		return nil, time.Second, false
-	}
-
 	if len(live) >= renewalMax {
-		return nil, live[0].Add(renewalWindow).Sub(now), false
+		return live[0].Add(renewalWindow).Sub(now), false
 	}
 
 	limiter.hits[identity] = append(live, now)
-	limiter.busy[identity] = true
 
-	return func() {
-		limiter.mu.Lock()
-		delete(limiter.busy, identity)
-		limiter.mu.Unlock()
-	}, 0, true
+	return 0, true
 }
 
 // serveRenew serves POST /api/v1/renew. By the time it runs, serveAPI has
 // admitted the caller as the viewer admission does, listed under api.identities,
-// and, for an enrolled device, holding its newest leaf. Only an enrolled device
+// and holding its newest leaf or a candidate for renewal replay. Only an enrolled device
 // renews here: a KeyChain identity such as z-phone is a legitimate API caller
 // and is refused.
 func (server *Server) serveRenew(
 	w http.ResponseWriter,
 	r *http.Request,
 	snap *hubconfig.Snapshot,
-	caller string,
+	session *policy.Session,
 ) {
+	caller := session.Identity
 	if !snap.Device(caller) {
 		server.rejectAPI(r, caller, "renewal is for enrolled devices")
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -125,20 +167,40 @@ func (server *Server) serveRenew(
 		return
 	}
 
-	end, wait, ok := server.renewals.begin(caller)
-	if !ok {
-		server.rejectAPI(r, caller, errRenewalBusy.Error())
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-		http.Error(w, "too many renewals", http.StatusTooManyRequests)
+	unlock, _ := server.issuance.begin(caller)
+	if unlock == nil {
+		server.rejectRenewalLimit(w, r, caller, time.Second)
 
 		return
 	}
-	defer end()
+	defer unlock()
+
+	replayCandidate := server.cachedRenewal(caller, session.Fingerprint).leaf != nil
+	if !replayCandidate && !server.chargeRenewal(w, r, caller) {
+		return
+	}
 
 	body, ok := readRenewBody(w, r)
 	if ok {
-		server.renewDevice(w, r, snap, caller, body)
+		server.renewDevice(w, r, session, body, replayCandidate)
 	}
+}
+
+func (server *Server) chargeRenewal(w http.ResponseWriter, r *http.Request, caller string) bool {
+	wait, ok := server.renewals.allow(caller)
+	if !ok {
+		server.rejectRenewalLimit(w, r, caller, wait)
+	}
+
+	return ok
+}
+
+func (server *Server) rejectRenewalLimit(w http.ResponseWriter, r *http.Request,
+	caller string, wait time.Duration,
+) {
+	server.rejectAPI(r, caller, errRenewalBusy.Error())
+	w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+	http.Error(w, "too many renewals", http.StatusTooManyRequests)
 }
 
 func readRenewBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -178,10 +240,12 @@ func readRenewBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 func (server *Server) renewDevice(
 	w http.ResponseWriter,
 	r *http.Request,
-	snap *hubconfig.Snapshot,
-	caller string,
+	session *policy.Session,
 	body []byte,
+	replayCandidate bool,
 ) {
+	caller := session.Identity
+
 	csr, identity, err := pki.ValidateCSR(body)
 	if err != nil {
 		server.rejectAPI(r, caller, "invalid CSR: "+err.Error())
@@ -205,6 +269,73 @@ func (server *Server) renewDevice(
 		return
 	}
 
+	snap := server.cfg.Current()
+
+	cached := server.cachedRenewal(caller, session.Fingerprint)
+
+	err = server.checkRenewal(r, snap, session, &cached, csrKey)
+	if err != nil {
+		server.rejectAPI(r, caller, err.Error())
+		refuse(w, err)
+
+		return
+	}
+
+	if replayCandidate && !server.chargeRenewal(w, r, caller) {
+		return
+	}
+
+	if cached.leaf != nil {
+		server.log.InfoContext(r.Context(), "Device renewal reply replayed",
+			slog.String("identity", caller),
+			slog.String("fingerprint", pki.Fingerprint(cached.leaf)),
+		)
+		server.writeRenewal(w, r, snap, &cached)
+
+		return
+	}
+
+	server.issueRenewal(w, r, snap, session, csrKey, body)
+}
+
+func (server *Server) checkRenewal(r *http.Request, snap *hubconfig.Snapshot,
+	session *policy.Session, cached *renewalReplyCache, key *ecdsa.PublicKey,
+) error {
+	if !snap.APICaller(session.Identity) || !snap.Device(session.Identity) {
+		return errNotAPICaller
+	}
+
+	now := server.now()
+
+	err := policy.CheckLeaf(snap.Revocations, *session, now)
+	if err != nil {
+		return fmt.Errorf("renewal caller: %w", err)
+	}
+
+	if cached.leaf == nil {
+		return server.admitDevice(r.Context(), snap, session.Identity, session.Fingerprint)
+	}
+
+	if !key.Equal(cached.leaf.PublicKey) {
+		return fmt.Errorf("%w: renewal replay key differs", errDeviceSuperseded)
+	}
+
+	err = policy.CheckLeaf(snap.Revocations, policy.Session{
+		Identity:    session.Identity,
+		Fingerprint: pki.Fingerprint(cached.leaf),
+		NotAfter:    cached.leaf.NotAfter,
+	}, now)
+	if err != nil {
+		return fmt.Errorf("cached renewal leaf: %w", err)
+	}
+
+	return nil
+}
+
+func (server *Server) issueRenewal(w http.ResponseWriter, r *http.Request,
+	snap *hubconfig.Snapshot, session *policy.Session, csrKey *ecdsa.PublicKey, body []byte,
+) {
+	caller := session.Identity
 	// The issuance outlives a client that hangs up: a certificate the hub asked
 	// for is recorded as the newest whether or not the reply is read.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), renewTimeout)
@@ -240,8 +371,19 @@ func (server *Server) renewDevice(
 		return
 	}
 
+	cached := renewalReplyCache{
+		expires: server.now().Add(renewalReplayWindow),
+		leaf:    leaf, previous: session.Fingerprint,
+		certificate: string(certPEM), chain: string(chainPEM),
+	}
+	if !server.recordRenewal(caller, &cached) {
+		server.rejectAPI(r, caller, errDeviceSuperseded.Error())
+		http.Error(w, "renewal superseded", http.StatusConflict)
+
+		return
+	}
 	//nolint:contextcheck // pruning runs detached from the request on purpose
-	server.noteIssued(caller, pki.Fingerprint(leaf))
+	server.afterIssuance(caller)
 
 	server.log.InfoContext(
 		r.Context(),
@@ -255,13 +397,19 @@ func (server *Server) renewDevice(
 		r.Context(),
 		"Renewal",
 		slog.Any("newFingerprint", pki.Fingerprint(leaf)),
-		slog.Any("oldFingerprint", r.Header.Get(HeaderFingerprint)),
+		slog.Any("oldFingerprint", session.Fingerprint),
 		slog.Any("identity", caller),
 	)
 
+	server.writeRenewal(w, r, snap, &cached)
+}
+
+func (server *Server) writeRenewal(w http.ResponseWriter, r *http.Request,
+	snap *hubconfig.Snapshot, cached *renewalReplyCache,
+) {
 	server.writeAPI(w, r, renewReply{
-		Certificate: string(certPEM),
-		Chain:       string(chainPEM),
+		Certificate: cached.certificate,
+		Chain:       cached.chain,
 		CABundle:    snap.TrustBundle.PEM,
 		CARevision:  snap.TrustBundle.Revision,
 	})

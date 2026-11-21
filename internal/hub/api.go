@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -16,7 +17,10 @@ import (
 
 // apiSvc is the service whose policy entry decides which machines a caller may
 // see: a machine is listed only when its mesh-t3-<machine> entry lists the caller.
-const apiSvc = "t3"
+const (
+	apiSvc    = "t3"
+	renewPath = "/api/v1/renew"
+)
 
 // apiDirect is where an enrolled device may reach a machine directly on the LAN:
 // the address is an IP literal (IPv6 without brackets or zone) and the port that of
@@ -92,20 +96,9 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 
 	snap := server.cfg.Current()
 
-	err := policy.CheckLeaf(
-		snap.Revocations,
-		policy.Session{Identity: caller, Fingerprint: fp, NotAfter: notAfter},
-		server.now(),
-	)
-	if err == nil && !snap.APICaller(caller) {
-		err = errNotAPICaller
-	}
+	leaf := policy.Session{Identity: caller, Fingerprint: fp, NotAfter: notAfter}
 
-	if err == nil {
-		// An enrolled device is admitted only with its newest leaf.
-		err = server.admitDevice(r.Context(), snap, caller, fp)
-	}
-
+	err := server.admitAPI(r, snap, &leaf)
 	if err != nil {
 		server.rejectAPI(r, caller, err.Error())
 		refuse(w, err)
@@ -114,8 +107,8 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
-	case "/api/v1/renew":
-		server.serveRenew(w, r, snap, caller)
+	case renewPath:
+		server.serveRenew(w, r, snap, &leaf)
 	case "/api/v1/machines":
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -146,6 +139,30 @@ func (server *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (server *Server) admitAPI(
+	r *http.Request,
+	snap *hubconfig.Snapshot,
+	leaf *policy.Session,
+) error {
+	err := policy.CheckLeaf(snap.Revocations, *leaf, server.now())
+	if err != nil {
+		return fmt.Errorf("API caller: %w", err)
+	}
+
+	if !snap.APICaller(leaf.Identity) {
+		return errNotAPICaller
+	}
+
+	if r.URL.Path == renewPath && r.Method == http.MethodPost &&
+		snap.Device(
+			leaf.Identity,
+		) && server.cachedRenewal(leaf.Identity, leaf.Fingerprint).leaf != nil {
+		return nil
+	}
+
+	return server.admitDevice(r.Context(), snap, leaf.Identity, leaf.Fingerprint)
 }
 
 func (server *Server) rejectAPI(r *http.Request, caller, reason string) {

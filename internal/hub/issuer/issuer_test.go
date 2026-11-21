@@ -535,7 +535,7 @@ func TestNewValidation(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "::1")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
 
-	iss, err := New(
+	_, err = New(
 		Config{
 			Namespace:  "n",
 			Issuer:     IssuerRef{"a", "Issuer", "cert-manager.io"},
@@ -544,10 +544,6 @@ func TestNewValidation(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if iss.base != "https://[::1]:443" {
-		t.Errorf("base %q", iss.base)
 	}
 }
 
