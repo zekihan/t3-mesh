@@ -19,6 +19,7 @@ import (
 
 	"github.com/zekihan/t3-mesh/internal/pki"
 	"github.com/zekihan/t3-mesh/internal/policy"
+	"github.com/zekihan/t3-mesh/internal/proto"
 	"github.com/zekihan/t3-mesh/internal/viewerproxy"
 )
 
@@ -390,6 +391,10 @@ func admitDeviceLeaf(leaf *x509.Certificate) (string, error) {
 func (mgr *Manager) allowedDevice(view *View, rule *policy.Session, now time.Time) error {
 	checked := *rule
 	checked.Machine = view.Self
+
+	if view.Rules.ServiceKinds[policy.Target(checked.Svc, checked.Machine)] != proto.KindHTTP {
+		return errServiceKind
+	}
 
 	err := policy.Check(view.Rules, view.Revocations, checked, now)
 	if err != nil {

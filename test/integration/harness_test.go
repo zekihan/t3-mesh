@@ -144,6 +144,8 @@ type hubCfg struct {
 	rulesA      []string
 	rulesB      []string
 	noRelayRule bool
+	tcp         bool
+	noTCPRule   bool
 }
 
 func (hc *hubCfg) yaml() string {
@@ -170,10 +172,19 @@ func (hc *hubCfg) yaml() string {
 
 	bIDs = append(bIDs, hc.rulesB...)
 
+	var tcpService, tcpRule string
+	if hc.tcp {
+		tcpService = ", ssh: {kind: tcp}"
+
+		if !hc.noTCPRule {
+			tcpRule = "\n    mesh-ssh-b: {identities: [agent-a, z-phone]}"
+		}
+	}
+
 	return fmt.Sprintf(`
 machines:
   a: {identity: agent-a, services: {t3: {kind: http}}}
-  b: {identity: agent-b, services: {t3: {kind: http}}}
+  b: {identity: agent-b, services: {t3: {kind: http}%s}}
 homeCIDRs: %s
 viewerDomain: %s
 release: {version: %s}
@@ -182,10 +193,10 @@ devices: %s
 policy:
   entries:
     mesh-t3-a: {identities: %s}
-    mesh-t3-b: {identities: %s}
+    mesh-t3-b: {identities: %s}%s
   disabledIdentities: %s
   blockedFingerprints: %s
-`, list(quoted), viewerDomain, rel, list(hc.api), list(hc.devices), list(aIDs), list(bIDs),
+`, tcpService, list(quoted), viewerDomain, rel, list(hc.api), list(hc.devices), list(aIDs), list(bIDs), tcpRule,
 		list(hc.disabled), list(hc.blocked))
 }
 
@@ -612,6 +623,7 @@ type nodeOpts struct {
 	// t3Addr is the host:port of a real T3 server to serve, in place of the
 	// stand-in the node starts otherwise.
 	t3Addr     string
+	tcpAddr    string
 	links      []string
 	directPort int
 	cacheTTL   time.Duration
@@ -691,6 +703,10 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 		StateDir:   filepath.Join(dir, "state"),
 		InstallDir: filepath.Join(dir, "install"),
 		Hub:        msh.hubAddr,
+	}
+
+	if opts.tcpAddr != "" {
+		nd.cfg.Serve["ssh"] = opts.tcpAddr
 	}
 
 	if opts.hubName != "" {

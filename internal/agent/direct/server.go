@@ -114,7 +114,9 @@ func (mgr *Manager) refuse(tc net.Conn, why string, attrs ...slog.Attr) {
 // handshake completes the TLS handshake with a caller and checks that it is an
 // agent. It refuses the connection and returns ok=false otherwise.
 func (mgr *Manager) handshake(raw net.Conn) (*tls.Conn, string, *x509.Certificate, bool) {
-	tc := tls.Server(raw, mgr.serverTLS(proto.ALPNDirect, mgr.verifyAgent))
+	cfg := mgr.serverTLS(proto.ALPNDirect, mgr.verifyAgent)
+	cfg.NextProtos = append(cfg.NextProtos, proto.ALPNDirectTCP)
+	tc := tls.Server(raw, cfg)
 
 	ctx, cancel := context.WithTimeout(mgr.ctx, serverSetupLimit)
 	defer cancel()
@@ -131,7 +133,8 @@ func (mgr *Manager) handshake(raw net.Conn) (*tls.Conn, string, *x509.Certificat
 	}
 
 	cs := tc.ConnectionState()
-	if cs.NegotiatedProtocol != proto.ALPNDirect || len(cs.PeerCertificates) == 0 {
+	if (cs.NegotiatedProtocol != proto.ALPNDirect && cs.NegotiatedProtocol != proto.ALPNDirectTCP) ||
+		len(cs.PeerCertificates) == 0 {
 		mgr.refuse(tc, "bad alpn or no certificate")
 
 		return nil, "", nil, false
@@ -206,9 +209,15 @@ func (mgr *Manager) serve(raw net.Conn) {
 		return
 	}
 
+	kind := proto.KindHTTP
+	if tc.ConnectionState().NegotiatedProtocol == proto.ALPNDirectTCP {
+		kind = proto.KindTCP
+	}
+
 	sess := &session{
 		m:            mgr,
 		dir:          "in",
+		kind:         kind,
 		conn:         tc,
 		local:        localAddrOf(raw),
 		peerID:       identity,
@@ -241,6 +250,10 @@ func (mgr *Manager) serve(raw net.Conn) {
 		return
 	}
 
+	mgr.splice(sess, raw, tc, backend)
+}
+
+func (mgr *Manager) splice(sess *session, raw net.Conn, tc *tls.Conn, backend net.Conn) {
 	if !mgr.register(sess) {
 		_ = backend.Close()
 		_ = tc.Close()
@@ -248,7 +261,7 @@ func (mgr *Manager) serve(raw net.Conn) {
 		return
 	}
 
-	err = mgr.allowed(sess, mgr.view(), mgr.now())
+	err := mgr.allowed(sess, mgr.view(), mgr.now())
 	if err != nil {
 		_ = backend.Close()
 		_ = sess.close()
@@ -267,11 +280,15 @@ func (mgr *Manager) serve(raw net.Conn) {
 	setDeadline(raw.SetDeadline, time.Time{})
 
 	mgr.log.Info("Direct session open", slog.String("dir", "in"),
-		slog.String("peer", identity),
-		slog.String("svc", hdr.Svc),
+		slog.String("peer", sess.peerID),
+		slog.String("svc", sess.rule.Svc),
 	)
 
-	tunnel.Join(tc, backend)
+	if sess.kind == proto.KindTCP {
+		tunnel.JoinTCP(backend, tc)
+	} else {
+		tunnel.Join(tc, backend)
+	}
 
 	_ = sess.close()
 }

@@ -218,8 +218,8 @@ func (agent *Agent) dialLink(ctx context.Context, machine, svc, kind string) (ne
 		return nil, errLinkKind
 	}
 
-	if kind == proto.KindHTTP && agent.direct != nil {
-		c, err := agent.direct.Dial(ctx, machine, svc)
+	if agent.direct != nil {
+		c, err := agent.direct.Dial(ctx, machine, svc, kind)
 		if err == nil {
 			return c, nil
 		}
