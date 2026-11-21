@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +23,12 @@ func TestConfigMapWatchAndMountFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	start := time.Now()
+
+	var offset atomic.Int64
+
+	watcher.now = func() time.Time { return start.Add(time.Duration(offset.Load())) }
 
 	changed := strings.Replace(goodConfig, "v0.3.0", "v0.9.9", 1)
 	active, drop := make(chan struct{}), make(chan struct{})
@@ -62,8 +70,40 @@ func TestConfigMapWatchAndMountFallback(t *testing.T) {
 	}
 
 	close(drop)
-	// Wait for the watch to hand back to the mount before checking the fence.
-	deadline := time.Now().Add(500 * time.Millisecond)
+	waitForWatchDisconnect(t, watcher)
+
+	// The mount skips the API revision and projects a newer revocation.
+	revoked := strings.Replace(goodConfig, "[z-old]", "[z-old, z-phone]", 1)
+	write(t, fix.p.ConfigDir, ConfigFile, revoked)
+	offset.Store(int64(watchGracePeriod - time.Second))
+	watcher.Reload(nil)
+
+	if got := watcher.Current().Release.Version; got != "v0.9.9" {
+		t.Fatalf("mount won during grace period: %s", got)
+	}
+
+	// The stale alert samples the mount even while the API snapshot is retained.
+	if stale, reason := watcher.Stale(watcher.now().Add(StalePolicyAfter + time.Second)); !stale {
+		t.Errorf("mounted policy difference did not raise stale alert: %s", reason)
+	}
+
+	offset.Store(int64(watchGracePeriod))
+	watcher.Reload(nil)
+
+	if got := watcher.Current(); !slices.Contains(got.Revocations.DisabledIdentities, "z-phone") {
+		t.Errorf("mount did not apply newer revocation at grace expiry: %+v", got.Revocations)
+	}
+
+	if stale, reason := watcher.Stale(watcher.now().Add(StalePolicyAfter + time.Second)); stale {
+		t.Errorf("stale after applying mounted policy: %s", reason)
+	}
+}
+
+func waitForWatchDisconnect(t *testing.T, watcher *Watcher) {
+	t.Helper()
+
+	// Wait for the API watch to record the disconnect.
+	deadline := time.Now().Add(5 * time.Second)
 
 	for {
 		watcher.reloadMu.Lock()
@@ -71,7 +111,7 @@ func TestConfigMapWatchAndMountFallback(t *testing.T) {
 		watcher.reloadMu.Unlock()
 
 		if !live {
-			break
+			return
 		}
 
 		if time.Now().After(deadline) {
@@ -79,21 +119,6 @@ func TestConfigMapWatchAndMountFallback(t *testing.T) {
 		}
 
 		<-time.After(time.Millisecond)
-	}
-
-	watcher.Reload(nil)
-
-	if got := watcher.Current().Release.Version; got != "v0.9.9" {
-		t.Fatalf("lagging mount rolled back API version to %s", got)
-	}
-
-	write(t, fix.p.ConfigDir, ConfigFile, changed)
-	watcher.Reload(nil)
-	write(t, fix.p.ConfigDir, ConfigFile, goodConfig)
-	watcher.Reload(nil)
-
-	if got := watcher.Current().Release.Version; got != "v0.3.0" {
-		t.Errorf("caught-up mount does not apply updates: %s", got)
 	}
 }
 
@@ -109,6 +134,14 @@ func configMapAPI(t *testing.T, changed string, drop <-chan struct{}) *httptest.
 			w.WriteHeader(http.StatusBadRequest)
 
 			return
+		}
+
+		select {
+		case <-drop:
+			w.WriteHeader(http.StatusForbidden)
+
+			return
+		default:
 		}
 
 		item := kube.ConfigMap{

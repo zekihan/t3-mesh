@@ -189,14 +189,20 @@ func (watcher *Watcher) Stale(now time.Time) (bool, string) {
 
 func (watcher *Watcher) reload(onChange func(old, next *Snapshot)) {
 	old := watcher.cur.Load()
-	cfg, cfgErr := watcher.configSource.selectData(readMount(watcher.paths.ConfigDir, ConfigFile))
-	trust, trustErr := watcher.trustSource.selectData(
-		readMount(watcher.paths.TrustDir, TrustFile, RevFile),
-	)
+	now := watcher.now()
+	mountedConfig, cfgErr := readMount(watcher.paths.ConfigDir, ConfigFile)
+	mountedTrust, trustErr := readMount(watcher.paths.TrustDir, TrustFile, RevFile)
+	cfg, cfgErr := watcher.configSource.selectData(now, mountedConfig, cfgErr)
+	trust, trustErr := watcher.trustSource.selectData(now, mountedTrust, trustErr)
+
+	policySource := watcher.configSource.live
+	if policySource == nil {
+		policySource = mountedConfig
+	}
 
 	next, err := loadSelected(cfg, trust, watcher.paths.CertDir, cfgErr, trustErr)
 	if err != nil {
-		watcher.observe(old, err, cfg)
+		watcher.observe(old, err, policySource)
 		watcher.log.Error(
 			"Config reload failed; keeping previous snapshot",
 			slog.Any("err", err),
@@ -213,7 +219,7 @@ func (watcher *Watcher) reload(onChange func(old, next *Snapshot)) {
 		watcher.trustSource.applied = trust
 	}
 
-	watcher.observe(next, nil, cfg)
+	watcher.observe(next, nil, policySource)
 
 	if next.Fingerprint == old.Fingerprint {
 		return

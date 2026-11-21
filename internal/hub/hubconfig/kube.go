@@ -3,21 +3,23 @@ package hubconfig
 import (
 	"context"
 	"log/slog"
-	"maps"
 	"sync"
 	"time"
 
 	"github.com/zekihan/t3-mesh/internal/hub/kube"
 )
 
-// configSource arbitrates between a watch and the mounted projection. A
-// disconnected watch keeps its last applied data until the mount catches up.
+const watchGracePeriod = 2 * time.Minute
+
+// configSource arbitrates between a watch and the mounted projection.
 type configSource struct {
-	live    map[string]string
-	applied map[string]string
+	disconnectedAt time.Time
+	live           map[string]string
+	applied        map[string]string
 }
 
 func (source *configSource) selectData(
+	now time.Time,
 	mounted map[string]string,
 	err error,
 ) (map[string]string, error) {
@@ -25,13 +27,11 @@ func (source *configSource) selectData(
 		return source.live, nil
 	}
 
-	if source.applied != nil {
-		if err != nil || !maps.Equal(source.applied, mounted) {
-			return source.applied, nil //nolint:nilerr // use last applied data if the mount cannot be read
-		}
-
-		source.applied = nil
+	if source.applied != nil && now.Sub(source.disconnectedAt) < watchGracePeriod {
+		return source.applied, nil
 	}
+
+	source.applied = nil
 
 	return mounted, err
 }
@@ -64,11 +64,14 @@ func (watcher *Watcher) watchConfigMap(ctx context.Context, client *kube.Client,
 
 		source.live = data
 		if data != nil {
+			source.disconnectedAt = time.Time{}
 			if source == &watcher.configSource {
 				source.live = map[string]string{ConfigFile: data[ConfigFile]}
 			} else {
 				source.live = map[string]string{TrustFile: data[TrustFile], RevFile: data[RevFile]}
 			}
+		} else if source.disconnectedAt.IsZero() {
+			source.disconnectedAt = watcher.now()
 		}
 
 		watcher.reload(onChange)

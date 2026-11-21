@@ -440,11 +440,11 @@ the same validation as mounted inputs and usually reach the hub within a second.
 The hub loads the mounts at startup and always reads the serving certificate
 from its mount.
 
-Each connected watch takes precedence over its mount. On an API error the hub
-warns once per watch outage and retries with backoff. It falls back to the mount
-once it matches the last applied API data. Until then it retains that data so a
-lagging projection cannot undo a revocation. If the hub has applied no API data
-for a ConfigMap, it uses the mount immediately. The pod template carries no ConfigMap checksum, so a release bump
+Each connected watch takes precedence over its mount. On disconnect the hub
+warns on API errors, retries with backoff, and retains the last applied API data
+for up to two minutes. After two minutes the mount becomes authoritative, even
+if its projection still lags. If the hub has applied no API data for a
+ConfigMap, it uses the mount immediately. The pod template carries no ConfigMap checksum, so a release bump
 does not restart the hub or drop tunnels.
 
 Kubernetes updates mounted ConfigMaps and Secrets by swapping a `..data` symlink, so
@@ -453,7 +453,8 @@ event, plus every 60 s as a backstop. `/readyz` means only "can serve": listener
 up and configuration loaded once. Staleness never fails readiness, since pulling the
 only replica from the Service would turn a late reload into an outage. Instead
 `/alerts/stale-config` turns red when the loaded policy revision has differed from
-the selected source for more than 10 minutes, or the loaded serving certificate is
+the API while connected or the mount while disconnected for more than 10 minutes,
+or the loaded serving certificate is
 within 14 days of expiry while a newer one is mounted.
 
 `t3-mesh-hub validate --config config.yaml` runs the same parser offline, so CI can
