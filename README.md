@@ -59,6 +59,46 @@ inside the hub's `homeCIDRs`, so let the LAN reach TCP 27400 and 27443 on the ho
 firewall (for example an nftables input rule on Linux, and the application firewall on
 macOS). See [Direct device access](docs/design.md#direct-device-access).
 
+## Link to SSH on a peer
+
+Upgrade the hub and both agents before adding a TCP service. To let z-arch
+reach SSH on z-mac, add to the hub config alongside the existing T3 service
+and rules:
+
+```yaml
+machines:
+  z-mac:
+    identity: agent-z-mac
+    services:
+      ssh: {kind: tcp}
+policy:
+  entries:
+    mesh-ssh-z-mac: {identities: [agent-z-arch]}
+```
+
+On z-mac, add the local sshd endpoint to the agent config:
+
+```yaml
+serve:
+  ssh: 127.0.0.1:22
+```
+
+On z-arch, add the loopback link to its agent config:
+
+```yaml
+links:
+  ssh.z-mac: 127.0.0.1:27322
+```
+
+Run `ssh -p 27322 127.0.0.1` on z-arch. The link goes direct on the LAN
+when available and otherwise through the hub. Any local process can open the
+link. sshd still authenticates the SSH user. TCP services have no viewer host.
+
+The homelab chart needs TCP support before it can render this config. It
+currently accepts only HTTP. The deployment change must render TCP service
+config and agent rules while generating viewer resources only for HTTP.
+See [Homelab changes](docs/design.md#homelab-changes).
+
 ## Check an agent locally
 
 Use the binary under `/var/lib/t3-mesh/install/current` on Linux or
