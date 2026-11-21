@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zekihan/t3-mesh/internal/policy"
 	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
@@ -57,7 +58,20 @@ func (agent *Agent) checkExposure(ctx context.Context) {
 		}
 	}
 
-	warnings := exposureWarnings(ctx, agent.cfg.Serve, addrs, owned)
+	var (
+		machine string
+		kinds   map[string]string
+	)
+
+	agent.mu.Lock()
+
+	if agent.cache != nil {
+		machine = agent.cache.Machine
+		kinds = maps.Clone(agent.cache.Rules.ServiceKinds)
+	}
+	agent.mu.Unlock()
+
+	warnings := exposureWarnings(ctx, agent.cfg.Serve, machine, kinds, addrs, owned)
 	if ctx.Err() != nil {
 		return
 	}
@@ -75,12 +89,18 @@ func (agent *Agent) checkExposure(ctx context.Context) {
 func exposureWarnings(
 	ctx context.Context,
 	services map[string]string,
+	machine string,
+	kinds map[string]string,
 	addrs []netip.Addr,
 	owned []netip.AddrPort,
 ) []string {
 	var warnings []string
 
 	for _, name := range slices.Sorted(maps.Keys(services)) {
+		if kinds[policy.Target(name, machine)] == proto.KindTCP {
+			continue
+		}
+
 		host, port, err := net.SplitHostPort(services[name])
 		if err != nil {
 			continue

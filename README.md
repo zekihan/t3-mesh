@@ -236,7 +236,8 @@ The fleet API exposes the same information under `services`. A connected agent
 can report an unreachable service, and service health is unknown while the
 agent is offline or has yet to report.
 
-If a loopback service port accepts TCP connections on a non-loopback interface
+If a loopback HTTP service port accepts TCP connections on a non-loopback interface
 address, the agent reports the service, port and address and the hub raises
 `/alerts/agent-<machine>-exposed`. Check the service's bind address and any other
-listener on that port.
+listener on that port. TCP services are excluded; services with an unknown kind are
+checked until the hub supplies their kind.

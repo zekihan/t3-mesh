@@ -391,6 +391,7 @@ func (agent *Agent) adopt(sess *session) *session {
 	sess.start()
 	agent.reconcileDirect()
 	signal(agent.curChanged)
+	signal(agent.exposureNudge)
 	signal(agent.statusNudge)
 	signal(agent.renewKick)
 
@@ -748,5 +749,10 @@ func (agent *Agent) applyUpdate(sess *session, update proto.Update) {
 	)
 
 	agent.reconcileDirect()
+
+	if update.Rules != nil {
+		signal(agent.exposureNudge)
+	}
+
 	signal(agent.statusNudge)
 }
