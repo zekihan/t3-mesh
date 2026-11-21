@@ -79,8 +79,9 @@ type Options struct {
 	// LookupHost replaces the hub DNS lookup. Production leaves it nil.
 	LookupHost func(ctx context.Context, host string) ([]string, error)
 	// AddrPresent replaces the local-address check. Production leaves it nil.
-	AddrPresent func(netip.Addr) bool
-	Version     string
+	AddrPresent  func(netip.Addr) bool
+	Version      string
+	StatusSocket string
 	// DNSRecheckInterval replaces the 30 s DNS backstop when positive.
 	DNSRecheckInterval time.Duration
 }
@@ -115,6 +116,7 @@ type Agent struct {
 	roots            *x509.CertPool
 	cache            *state.Cache
 	version          string
+	statusSocket     string
 	rootsPEM         string
 	store            pki.Store
 	prefixes         []netip.Prefix
@@ -157,6 +159,7 @@ func New(
 		baseLog:       opts.Log,
 		now:           opts.Now,
 		version:       opts.Version,
+		statusSocket:  opts.StatusSocket,
 		store:         pki.Store{Dir: opts.Config.Identity.Dir},
 		hubTLS:        opts.HubTLS,
 		health:        opts.Health,
@@ -292,6 +295,10 @@ func (agent *Agent) Run(ctx context.Context) error {
 
 	agent.setupUpdater()
 	agent.startupOK()
+
+	if agent.statusSocket != "" {
+		agent.wg.Go(func() { agent.localStatusLoop(ctx, links) })
+	}
 
 	for _, l := range links {
 		agent.wg.Go(l.serve)

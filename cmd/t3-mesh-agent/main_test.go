@@ -32,6 +32,8 @@ func TestRunHelpIsNotAnError(t *testing.T) {
 		{"launcher", "-h"},
 		{"enroll", "-h"},
 		{"fallback", "-h"},
+		{"status", "-h"},
+		{"doctor", "-h"},
 	} {
 		err := run(args)
 		if err != nil {
@@ -71,6 +73,8 @@ func TestRunRejectsUnknownFlags(t *testing.T) {
 		{"launcher", "--bogus"},
 		{"enroll", "--bogus"},
 		{"fallback", "--bogus"},
+		{"status", "--bogus"},
+		{"doctor", "--bogus"},
 	} {
 		err := run(args)
 		if err == nil {

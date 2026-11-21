@@ -1080,6 +1080,37 @@ admitted connection as `Device session open` and every WebSocket upgrade as
   probe cannot speak the tunnel protocol, so rejection of unauthenticated or
   non-agent tunnel connections is covered by the integration test and by M1.
 
+### Local agent diagnostics
+
+Each installed agent serves local status over a Unix socket. Systemd creates
+`/run/t3-mesh` on Linux. On macOS a boot-time LaunchDaemon creates
+`/var/run/t3-mesh` and the agent creates `agent.sock` inside it. The directory
+is mode `0750` and the socket is mode `0660`, owned by the service account
+and group (`t3mesh` or `_t3mesh`). The installers add the invoking
+`SUDO_USER` to that group. The new group takes effect after a new login.
+An existing installation needs the updated packaging to create the runtime
+directory. Failure to open the socket is logged and retried while the agent
+continues serving its regular traffic.
+
+The socket takes one JSON line, `{"op":"status"}`, sends one JSON line with
+`status` or `error`, then closes the connection. The only operation reads the
+running agent's local state. `t3-mesh-agent status` prints the version, tunnel
+state, LAN or WAN path and connection time, the direct gate and its reason,
+gateway MAC verdict, bound link and device ports, cached revisions and the
+remaining direct cache window, identity certificate expiry, update probation
+and failures, local service health and warnings. This works when the hub is
+down. Use `--json` for the snapshot as JSON and `--socket` to select a path.
+
+`t3-mesh-agent doctor` checks that the local config parses, the socket
+answers, the serve targets respond and the configured link, direct and device
+ports are available or reported bound by the agent. Port checks on unbound
+ports attempt a TCP bind and immediately close it without listening. Doctor
+also checks certificate expiry, the installed current and known-good versions
+and hub DNS resolution. It warns under 14 days and fails for an expired
+certificate. If a check needs more privileges it reports `skipped (needs root)`.
+A failed check produces a nonzero exit. `--config` selects a config other
+than the installed one and `--json` prints the check results as JSON.
+
 ## Security
 
 | Threat | Control |

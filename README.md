@@ -8,7 +8,7 @@ The Android app that connects to the mesh with client certificates is planned in
 [zekihan/t3code](https://github.com/zekihan/t3code/blob/main/docs/android-fork.md).
 
 - `cmd/t3-mesh-hub`: the hub, shipped as a distroless container image.
-- `cmd/t3-mesh-agent`: the agent (`launcher`, `run`, `enroll`, `fallback`, `version`),
+- `cmd/t3-mesh-agent`: the agent (`launcher`, `run`, `enroll`, `fallback`, `status`, `doctor`, `version`),
   shipped as static binaries for linux/amd64 and darwin/arm64.
 
 ## Build and test
@@ -58,6 +58,25 @@ With `direct` enabled, the agent also listens for enrolled devices (the Android 
 inside the hub's `homeCIDRs`, so let the LAN reach TCP 27400 and 27443 on the host
 firewall (for example an nftables input rule on Linux, and the application firewall on
 macOS). See [Direct device access](docs/design.md#direct-device-access).
+
+## Check an agent locally
+
+Use the binary under `/var/lib/t3-mesh/install/current` on Linux or
+`/Library/Application Support/t3-mesh/install/current` on macOS.
+
+Run `t3-mesh-agent status` for the live tunnel, direct path, listeners,
+certificate, update state and service checks, even while the hub is unreachable.
+Use `--json` for JSON or `--socket` to select a different socket.
+
+Run `t3-mesh-agent doctor` to check the config, socket, serve targets, ports,
+certificate, installed versions and hub DNS. It exits nonzero if a check fails.
+Use `--json` for JSON or `--config` to check a different config file. Checks
+that require root are skipped when permissions are missing.
+
+The installers grant the login user access through the service group
+(`t3mesh` on Linux, `_t3mesh` on macOS). Log out and back in for the group
+membership to take effect. On an existing install, rerun the updated installer
+to provision the socket directory and grant access.
 
 ## Enroll an agent
 

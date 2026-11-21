@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.noqer.t3-mesh-agent-runtime</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/install</string>
+    <string>-d</string>
+    <string>-m</string>
+    <string>0750</string>
+    <string>-o</string>
+    <string>_t3mesh</string>
+    <string>-g</string>
+    <string>_t3mesh</string>
+    <string>/var/run/t3-mesh</string>
+  </array>
+</dict>
+</plist>

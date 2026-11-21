@@ -39,6 +39,7 @@ daemons=/Library/LaunchDaemons
 user=_t3mesh
 main_label=com.noqer.t3-mesh-agent
 fallback_label=com.noqer.t3-mesh-agent-fallback
+runtime_label=com.noqer.t3-mesh-agent-runtime
 name=${name:-agent-$(hostname -s | tr '[:upper:]' '[:lower:]')}
 
 # Pick the lowest id in the system range (300-399) that is free as both a UID and a GID.
@@ -80,6 +81,14 @@ if ! dscl . -read "/Users/$user" >/dev/null 2>&1; then
   echo "created user $user ($uid)"
 fi
 
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+  if ! dseditgroup -o checkmember -m "$SUDO_USER" "$user" | grep -q '^yes'; then
+    dseditgroup -o edit -a "$SUDO_USER" -t user "$user"
+  fi
+  echo "Log out and back in as $SUDO_USER for $user group access to the agent status socket."
+fi
+
+install -d -m 0750 -o "$user" -g "$user" /var/run/t3-mesh
 install -d -m 0755 -o root -g wheel "$base"
 install -d -m 0700 -o "$user" -g "$user" "$base/identity"
 install -d -m 0750 -o "$user" -g "$user" "$base/state"
@@ -108,10 +117,11 @@ else
   chown -h "$user:$user" "$install_dir/current" "$install_dir/known-good" "$install_dir/previous-good"
 fi
 
-for label in "$main_label" "$fallback_label"; do
+for label in "$main_label" "$fallback_label" "$runtime_label"; do
   install -m 0644 -o root -g wheel "$here/$label.plist" "$daemons/$label.plist"
   launchctl bootout "system/$label" >/dev/null 2>&1 || true
 done
+launchctl bootstrap system "$daemons/$runtime_label.plist"
 launchctl bootstrap system "$daemons/$fallback_label.plist"
 if [[ -n $(ls -A "$base/identity") ]]; then
   launchctl bootstrap system "$daemons/$main_label.plist"

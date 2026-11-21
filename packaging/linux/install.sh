@@ -42,6 +42,10 @@ install -m 0644 "$here/t3-mesh-agent.service" /etc/systemd/system/t3-mesh-agent.
 install -m 0644 "$here/t3-mesh-agent-fallback.service" /etc/systemd/system/t3-mesh-agent-fallback.service
 systemd-sysusers /etc/sysusers.d/t3-mesh.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/t3-mesh.conf
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+  usermod -aG t3mesh -- "$SUDO_USER"
+  echo "Log out and back in as $SUDO_USER for t3mesh group access to the agent status socket."
+fi
 
 if [[ ! -e /etc/t3-mesh/agent.yaml ]]; then
   sed -e "s#@NAME@#$name#" -e "s#@HUB@#$hub#" "$here/agent.yaml.example" >/etc/t3-mesh/agent.yaml

@@ -137,6 +137,16 @@ func (store Store) Load() (tls.Certificate, *x509.Certificate, error) {
 	return store.loadPair(keyFile, certFile)
 }
 
+// ReadLeaf loads the installed certificate without reading keys or recovering a renewal.
+func (store Store) ReadLeaf() (*x509.Certificate, error) {
+	certs, err := store.readCerts(certFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return certs[0], nil
+}
+
 // LoadNext returns the pending identity from next-key.pem and next-cert.pem.
 func (store Store) LoadNext() (tls.Certificate, *x509.Certificate, error) {
 	return store.loadPair(nextKeyFile, nextCertFile)
@@ -220,12 +230,7 @@ func (store Store) loadPair(keyName, certName string) (tls.Certificate, *x509.Ce
 		return tls.Certificate{}, nil, err
 	}
 
-	data, err := os.ReadFile(store.path(certName))
-	if err != nil {
-		return tls.Certificate{}, nil, fmt.Errorf("pki: read %s: %w", certName, err)
-	}
-
-	certs, err := ParseCertsPEM(data)
+	certs, err := store.readCerts(certName)
 	if err != nil {
 		return tls.Certificate{}, nil, err
 	}
@@ -240,6 +245,15 @@ func (store Store) loadPair(keyName, certName string) (tls.Certificate, *x509.Ce
 	}
 
 	return tls.Certificate{Certificate: chain, PrivateKey: key, Leaf: certs[0]}, certs[0], nil
+}
+
+func (store Store) readCerts(name string) ([]*x509.Certificate, error) {
+	data, err := os.ReadFile(store.path(name))
+	if err != nil {
+		return nil, fmt.Errorf("pki: read %s: %w", name, err)
+	}
+
+	return ParseCertsPEM(data)
 }
 
 func (store Store) renameSynced(from, to string) error {
