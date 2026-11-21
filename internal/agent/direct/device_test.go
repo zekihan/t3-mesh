@@ -140,7 +140,10 @@ func newDevEnv(t *testing.T) *devEnv {
 		Self: "z-arch", Identity: identity, Roots: env.pool, HubConnected: true, SelfHome: true,
 		ViewerDomain: devDomain,
 		HomePrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
-		Rules:        proto.Rules{Allow: map[string][]string{"t3.z-arch": {phoneID}}},
+		Rules: proto.Rules{
+			Allow:        map[string][]string{"t3.z-arch": {phoneID}},
+			ServiceKinds: map[string]string{"t3.z-arch": proto.KindHTTP},
+		},
 	}
 
 	env.mgr = New(Options{
@@ -195,7 +198,7 @@ func (env *devEnv) know(identity string, cert *tls.Certificate) {
 
 func (env *devEnv) allow(identities ...string) {
 	env.set(func(v *View) {
-		v.Rules = proto.Rules{Allow: map[string][]string{"t3.z-arch": identities}}
+		v.Rules.Allow = map[string][]string{"t3.z-arch": identities}
 	})
 }
 
@@ -637,6 +640,23 @@ func upgrade(t *testing.T, conn net.Conn, host string) *bufio.Reader {
 	_ = resp.Body.Close()
 
 	return br
+}
+
+func TestDeviceRefusesTCPService(t *testing.T) {
+	t.Parallel()
+
+	env := newDevEnv(t)
+	cert := env.enrolled(phoneID)
+	addr := env.open()
+	env.set(func(v *View) {
+		v.Rules.ServiceKinds = map[string]string{"t3.z-arch": proto.KindTCP}
+	})
+
+	env.refused(addr, env.clientConfig(&cert), "TCP service")
+
+	if env.hits.Load() != 0 {
+		t.Fatal("a device reached the TCP service")
+	}
 }
 
 func TestDeviceRefusals(t *testing.T) {

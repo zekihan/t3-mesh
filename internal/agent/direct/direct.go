@@ -50,6 +50,7 @@ var (
 	errSetupDeadline    = errors.New("setup deadline exceeded")
 	errNoTrustBundle    = errors.New("direct: no trust bundle")
 	errIdentityMismatch = errors.New("direct: server identity mismatch")
+	errServiceKind      = errors.New("direct: service kind changed or unavailable")
 	errBadALPN          = errors.New("direct: bad alpn")
 	errClosed           = errors.New("direct: closed")
 	errNoIdentityCert   = errors.New("direct: no identity certificate")
@@ -426,6 +427,7 @@ type session struct {
 	m            *Manager
 	rule         policy.Session
 	dir          string
+	kind         string
 	peerID       string
 	peerFP       string
 	once         sync.Once
@@ -436,6 +438,11 @@ func (sess *session) close() error {
 		sess.m.mu.Lock()
 		delete(sess.m.sessions, sess)
 		sess.m.mu.Unlock()
+
+		if sess.kind == proto.KindTCP {
+			// Wake the splice reader even if the TLS close alert cannot be sent.
+			setDeadline(sess.conn.SetReadDeadline, time.Now())
+		}
 
 		sess.err = sess.conn.Close()
 	})
@@ -654,6 +661,10 @@ func (mgr *Manager) register(sess *session) bool {
 
 // allowed re-evaluates a session against v.
 func (mgr *Manager) allowed(sess *session, view *View, now time.Time) error {
+	if view.Rules.ServiceKinds[policy.Target(sess.rule.Svc, sess.rule.Machine)] != sess.kind {
+		return errServiceKind
+	}
+
 	err := policy.Revoked(view.Revocations, sess.peerID, sess.peerFP)
 	if err != nil {
 		return fmt.Errorf("peer: %w", err)

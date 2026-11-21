@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,6 +50,14 @@ type Cache struct {
 	Home          bool     `json:"home"`
 }
 
+// cacheFile keeps rules.allow readable as HTTP grants by older agents.
+type cacheFile struct {
+	*Cache
+
+	ServiceKinds map[string]string   `json:"serviceKinds,omitempty"`
+	TCPAllow     map[string][]string `json:"tcpAllow,omitempty"`
+}
+
 // Load reads the cache in dir. A missing file yields an empty cache. A file written
 // by a newer format version is an error, since its contents may be misread.
 func Load(dir string) (*Cache, error) {
@@ -61,30 +70,61 @@ func Load(dir string) (*Cache, error) {
 		return nil, fmt.Errorf("state: read cache: %w", err)
 	}
 
-	var cache Cache
+	file := cacheFile{Cache: &Cache{}}
 
-	err = json.Unmarshal(data, &cache)
+	err = json.Unmarshal(data, &file)
 	if err != nil {
 		return nil, fmt.Errorf("state: decode cache: %w", err)
 	}
 
-	if cache.FormatVersion < 1 || cache.FormatVersion > FormatVersion {
-		return nil, fmt.Errorf("%w %d", errUnsupportedFormat, cache.FormatVersion)
+	if file.FormatVersion < 1 || file.FormatVersion > FormatVersion {
+		return nil, fmt.Errorf("%w %d", errUnsupportedFormat, file.FormatVersion)
 	}
 
-	return &cache, nil
+	if file.ServiceKinds != nil {
+		file.Rules.ServiceKinds = file.ServiceKinds
+	}
+
+	if len(file.TCPAllow) > 0 {
+		if file.Rules.Allow == nil {
+			file.Rules.Allow = make(map[string][]string, len(file.TCPAllow))
+		}
+
+		maps.Copy(file.Rules.Allow, file.TCPAllow)
+	}
+
+	return file.Cache, nil
 }
 
-// Save writes c to dir atomically: a temporary file in dir is fsynced and renamed
+// Save writes cache to dir atomically: a temporary file in dir is fsynced and renamed
 // over cache.json, so readers see either the old or the new file, never a partial one.
-func Save(dir string, c *Cache) error {
+func Save(dir string, cache *Cache) error {
 	err := os.MkdirAll(dir, dirMode)
 	if err != nil {
 		return fmt.Errorf("state: create dir: %w", err)
 	}
 
-	out := *c
+	snapshot := *cache
+	out := cacheFile{Cache: &snapshot, ServiceKinds: cache.Rules.ServiceKinds}
 	out.FormatVersion = FormatVersion
+	out.Rules.ServiceKinds = nil
+
+	if len(out.ServiceKinds) > 0 && cache.Rules.Allow != nil {
+		out.Rules.Allow = make(map[string][]string, len(cache.Rules.Allow))
+
+		for target, ids := range cache.Rules.Allow {
+			switch out.ServiceKinds[target] {
+			case proto.KindHTTP:
+				out.Rules.Allow[target] = ids
+			case proto.KindTCP:
+				if out.TCPAllow == nil {
+					out.TCPAllow = make(map[string][]string)
+				}
+
+				out.TCPAllow[target] = ids
+			}
+		}
+	}
 
 	data, err := json.MarshalIndent(&out, "", "  ")
 	if err != nil {

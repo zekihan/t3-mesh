@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zekihan/t3-mesh/internal/proto"
 )
 
 const goodConfig = `
@@ -247,6 +249,39 @@ func TestHostTarget(t *testing.T) {
 	}
 }
 
+func TestTCPServiceConfig(t *testing.T) {
+	cfg := strings.Replace(goodConfig, "services: {t3: {kind: http}}",
+		"services: {t3: {kind: http}, ssh: {kind: tcp}}", 1)
+	cfg = strings.Replace(
+		cfg,
+		"  entries:",
+		"  entries:\n    mesh-ssh-devbox: {identities: [agent-z-mac, z-phone]}",
+		1,
+	)
+
+	snap, err := loadAPIConfig(t, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if snap.Machines["devbox"].Services["ssh"].Kind != proto.KindTCP ||
+		snap.Rules.ServiceKinds["ssh.devbox"] != proto.KindTCP {
+		t.Fatal("TCP kind missing from the snapshot or the wire rules")
+	}
+
+	if len(snap.Rules.Allow["ssh.devbox"]) != 2 || len(snap.LegacyRules.Allow["ssh.devbox"]) != 0 {
+		t.Fatalf(
+			"TCP rule in current/legacy policy: %v / %v",
+			snap.Rules.Allow,
+			snap.LegacyRules.Allow,
+		)
+	}
+
+	if machine, service, ok := snap.HostTarget("ssh.devbox.mesh.noqer.com"); ok {
+		t.Fatalf("viewer can reach %s.%s", service, machine)
+	}
+}
+
 func loadAPIConfig(t *testing.T, cfg string) (*Snapshot, error) {
 	t.Helper()
 
@@ -436,7 +471,7 @@ func TestValidation(t *testing.T) {
 		"identity mismatch": func(c string) string {
 			return strings.Replace(c, "identity: agent-devbox", "identity: agent-other", 1)
 		},
-		"bad kind":      func(c string) string { return strings.Replace(c, "kind: http", "kind: tcp", 1) },
+		"bad kind":      func(c string) string { return strings.Replace(c, "kind: http", "kind: udp", 1) },
 		"bad cidr":      func(c string) string { return strings.Replace(c, "192.168.0.0/22", "192.168.0.0/99", 1) },
 		"bad version":   func(c string) string { return strings.Replace(c, "v0.3.0", "0.3", 1) },
 		"unknown entry": func(c string) string { return strings.Replace(c, "mesh-t3-z-mac", "mesh-t3-ghost", 1) },

@@ -546,7 +546,7 @@ func (server *Server) enforce() {
 
 	server.tmu.Lock()
 	for t := range server.tracked {
-		err := server.checkSession(snap, &t.pol, now)
+		err := server.checkStream(snap, t, now)
 		if err != nil {
 			doomed = append(doomed, revoked{track: t, err: err})
 		}

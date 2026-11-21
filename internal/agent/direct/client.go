@@ -34,11 +34,11 @@ func (c *sessionConn) CloseWrite() error {
 	return nil
 }
 
-func (mgr *Manager) failed(machine string) bool {
+func (mgr *Manager) failed(key string) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
-	until, ok := mgr.failures[machine]
+	until, ok := mgr.failures[key]
 	if !ok {
 		return false
 	}
@@ -47,21 +47,24 @@ func (mgr *Manager) failed(machine string) bool {
 		return true
 	}
 
-	delete(mgr.failures, machine)
+	delete(mgr.failures, key)
 
 	return false
 }
 
-func (mgr *Manager) remember(machine string) {
+func (mgr *Manager) remember(key string) {
 	mgr.mu.Lock()
-	mgr.failures[machine] = mgr.now().Add(FailureMemory)
+	mgr.failures[key] = mgr.now().Add(FailureMemory)
 	mgr.mu.Unlock()
 }
 
 // Dial returns a ready byte stream to svc on machine over the direct path, or
 // an error meaning the caller should use the tunnel.
-func (mgr *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, error) {
+func (mgr *Manager) Dial(ctx context.Context, machine, svc, kind string) (net.Conn, error) {
 	view := mgr.view()
+	if view.Rules.ServiceKinds[policy.Target(svc, machine)] != kind {
+		return nil, errServiceKind
+	}
 
 	if ok, reason := mgr.active(view, true); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrInactive, reason)
@@ -73,7 +76,8 @@ func (mgr *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, er
 		return nil, fmt.Errorf("%w: %s", ErrNoPeer, machine)
 	}
 
-	if mgr.failed(machine) {
+	failureKey := policy.Target(kind, machine)
+	if mgr.failed(failureKey) {
 		return nil, fmt.Errorf("%w: %s", ErrRecentFail, machine)
 	}
 
@@ -82,10 +86,10 @@ func (mgr *Manager) Dial(ctx context.Context, machine, svc string) (net.Conn, er
 		return nil, err
 	}
 
-	conn, err := mgr.dialAny(ctx, view, peer, svc)
+	conn, err := mgr.dialAny(ctx, view, peer, svc, kind)
 	if err != nil {
 		if ctx.Err() == nil {
-			mgr.remember(machine)
+			mgr.remember(failureKey)
 		}
 
 		return nil, fmt.Errorf("direct dial %s: %w", machine, err)
@@ -109,7 +113,7 @@ func (mgr *Manager) dialAny(
 	ctx context.Context,
 	view *View,
 	peer *proto.Peer,
-	svc string,
+	svc, kind string,
 ) (net.Conn, error) {
 	deadline := time.Now().Add(SetupTimeout)
 
@@ -129,7 +133,7 @@ func (mgr *Manager) dialAny(
 
 		attempt := time.Now().Add(remaining / time.Duration(len(peer.LANAddrs)-i))
 
-		conn, err := mgr.dialOne(ctx, view, peer, addr, svc, attempt)
+		conn, err := mgr.dialOne(ctx, view, peer, addr, svc, kind, attempt)
 		if err == nil {
 			return conn, nil
 		}
@@ -161,13 +165,13 @@ func hostPort(addr string, port int) string {
 	return net.JoinHostPort(addr, strconv.Itoa(port))
 }
 
-func (mgr *Manager) clientTLS(v *View, machine string) *tls.Config {
+func (mgr *Manager) clientTLS(v *View, machine, alpn string) *tls.Config {
 	identity := v.Identity
 	want := policy.AgentIdentity(machine)
 
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
-		NextProtos:         []string{proto.ALPNDirect},
+		NextProtos:         []string{alpn},
 		InsecureSkipVerify: true, //nolint:gosec // verified in VerifyPeerCertificate against the clients CA
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return &identity, nil
@@ -207,7 +211,7 @@ func (mgr *Manager) dialOne(
 	ctx context.Context,
 	view *View,
 	peer *proto.Peer,
-	addr, svc string,
+	addr, svc, kind string,
 	deadline time.Time,
 ) (net.Conn, error) {
 	dctx, cancel := context.WithDeadline(ctx, deadline)
@@ -229,7 +233,12 @@ func (mgr *Manager) dialOne(
 	deadline, _ = dctx.Deadline()
 	setDeadline(raw.SetDeadline, deadline)
 
-	tc := tls.Client(raw, mgr.clientTLS(view, peer.Machine))
+	alpn := proto.ALPNDirect
+	if kind == proto.KindTCP {
+		alpn = proto.ALPNDirectTCP
+	}
+
+	tc := tls.Client(raw, mgr.clientTLS(view, peer.Machine, alpn))
 
 	err = tc.HandshakeContext(dctx)
 	if err != nil {
@@ -237,7 +246,7 @@ func (mgr *Manager) dialOne(
 	}
 
 	cs := tc.ConnectionState()
-	if cs.NegotiatedProtocol != proto.ALPNDirect || len(cs.PeerCertificates) == 0 {
+	if cs.NegotiatedProtocol != alpn || len(cs.PeerCertificates) == 0 {
 		return nil, errBadALPN
 	}
 
@@ -272,6 +281,7 @@ func (mgr *Manager) dialOne(
 	sess := &session{
 		m:            mgr,
 		dir:          "out",
+		kind:         kind,
 		conn:         tc,
 		local:        localAddrOf(raw),
 		peerID:       policy.AgentIdentity(peer.Machine),

@@ -148,7 +148,10 @@ func setup(t *testing.T) *env {
 	testEnv.a = newNode(t, testEnv, "a", "127.0.0.1", nil)
 	testEnv.b = newNode(t, testEnv, "b", "127.0.0.2", map[string]string{"t3": echo})
 
-	rules := proto.Rules{Allow: map[string][]string{"t3.b": {"agent-a"}}}
+	rules := proto.Rules{
+		Allow:        map[string][]string{"t3.b": {"agent-a"}},
+		ServiceKinds: map[string]string{"t3.b": proto.KindHTTP},
+	}
 
 	testEnv.a.set(func(v *View) {
 		v.Rules = rules
@@ -209,7 +212,7 @@ func waitFor(t *testing.T, what string, f func() bool) {
 func TestDirectFlow(t *testing.T) {
 	testEnv := setup(t)
 
-	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +242,7 @@ func TestDirectDialCanceledWhileWaitingForReply(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	conn, err := testEnv.a.mgr.Dial(ctx, "b", "t3")
+	conn, err := testEnv.a.mgr.Dial(ctx, "b", "t3", proto.KindHTTP)
 	if conn != nil {
 		_ = conn.Close()
 
@@ -257,7 +260,7 @@ func TestOneWayRule(t *testing.T) {
 	// lets it reach b.
 	e.b.set(func(v *View) { v.Peers = nil })
 
-	conn, err := e.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err := e.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +274,7 @@ func TestCallerNotAllowed(t *testing.T) {
 	e := setup(t)
 	e.b.set(func(v *View) { v.Rules = proto.Rules{} })
 
-	c, err := e.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := e.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		_ = c.Close()
 
@@ -282,7 +285,7 @@ func TestCallerNotAllowed(t *testing.T) {
 func TestUnservedService(t *testing.T) {
 	e := setup(t)
 
-	c, err := e.a.mgr.Dial(t.Context(), "b", "other")
+	c, err := e.a.mgr.Dial(t.Context(), "b", "other", proto.KindHTTP)
 	if err == nil {
 		_ = c.Close()
 
@@ -294,7 +297,7 @@ func TestRevokedPeerRefused(t *testing.T) {
 	e := setup(t)
 	e.b.set(func(v *View) { v.Revocations.DisabledIdentities = []string{"agent-a"} })
 
-	conn, err := e.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err := e.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		_ = conn.Close()
 
@@ -305,7 +308,7 @@ func TestRevokedPeerRefused(t *testing.T) {
 	e2 := setup(t)
 	e2.a.set(func(v *View) { v.Revocations.DisabledIdentities = []string{"agent-b"} })
 
-	conn, err = e2.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err = e2.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		_ = conn.Close()
 
@@ -316,7 +319,7 @@ func TestRevokedPeerRefused(t *testing.T) {
 func TestRevocationClosesBothDirections(t *testing.T) {
 	testEnv := setup(t)
 
-	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +351,7 @@ func TestRevocationClosesBothDirections(t *testing.T) {
 func TestRevocationServerSideOnly(t *testing.T) {
 	testEnv := setup(t)
 
-	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	conn, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +423,7 @@ func TestStallingPeerFailsFastAndRemembered(t *testing.T) {
 
 	start := time.Now()
 
-	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -430,7 +433,7 @@ func TestStallingPeerFailsFastAndRemembered(t *testing.T) {
 	}
 
 	start = time.Now()
-	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 
 	if !errors.Is(err, ErrRecentFail) || time.Since(start) > 100*time.Millisecond {
 		t.Fatalf("second dial: %v in %v", err, time.Since(start))
@@ -496,7 +499,7 @@ func TestActiveModes(t *testing.T) {
 func TestInactiveRefusesAndClosesSessions(t *testing.T) {
 	testEnv := setup(t)
 
-	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +515,7 @@ func TestInactiveRefusesAndClosesSessions(t *testing.T) {
 		t.Fatal("listener should be closed")
 	}
 
-	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	_, err = testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		t.Fatal("expected failure")
 	}
@@ -525,7 +528,7 @@ func TestListenerClosesWhenAddrDisappears(t *testing.T) {
 		t.Fatalf("listening: %v", testEnv.b.mgr.Listening())
 	}
 
-	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +560,7 @@ func TestWrongServerIdentityRejected(t *testing.T) {
 	cert, _, _ := e.ca.IssueIdentity(t, "agent-c", true, time.Now().Add(time.Hour))
 	e.b.set(func(v *View) { v.Identity = cert })
 
-	c, err := e.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := e.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		_ = c.Close()
 
@@ -572,7 +575,7 @@ func TestForeignCARejected(t *testing.T) {
 
 	e.a.set(func(v *View) { v.Identity = cert })
 
-	c, err := e.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := e.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err == nil {
 		_ = c.Close()
 
@@ -593,7 +596,7 @@ func TestExpiryClosesSession(t *testing.T) {
 		return clock
 	}
 
-	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3")
+	c, err := testEnv.a.mgr.Dial(t.Context(), "b", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}

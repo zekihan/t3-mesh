@@ -24,6 +24,7 @@ type tracked struct {
 	closeFn func()
 	pol     policy.Session
 	kind    string
+	svcKind string
 	once    sync.Once
 }
 
@@ -113,6 +114,21 @@ func (server *Server) checkSession(
 	return server.deviceCurrent(snap, pol.Identity, pol.Fingerprint)
 }
 
+var errServiceKind = errors.New("service kind changed or unavailable")
+
+func (server *Server) checkStream(snap *hubconfig.Snapshot, entry *tracked, now time.Time) error {
+	kind := entry.svcKind
+	if kind == "" {
+		kind = proto.KindHTTP
+	}
+
+	if snap.Machines[entry.pol.Machine].Services[entry.pol.Svc].Kind != kind {
+		return errServiceKind
+	}
+
+	return server.checkSession(snap, &entry.pol, now)
+}
+
 // checkRules is the rules and revocations half of checkNow, for a request that
 // has not yet been through the device check.
 func (server *Server) checkRules(pol *policy.Session) error {
@@ -177,15 +193,11 @@ func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 		return
 	}
 
-	if _, ok := server.cfg.Current().Machines[machine].Services[svc]; !ok {
-		fail("unknown target")
+	kind := hdr.ServiceKind()
 
-		return
-	}
-
-	tgt := server.liveSession(machine)
-	if tgt == nil {
-		fail("target not connected")
+	tgt, refused := server.relayTarget(src, machine, svc, kind)
+	if refused != "" {
+		fail(refused)
 
 		return
 	}
@@ -197,13 +209,13 @@ func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 		return
 	}
 
-	tr := &tracked{kind: "relay", pol: pol, target: tgt, source: src}
+	tr := &tracked{kind: "relay", svcKind: kind, pol: pol, target: tgt, source: src}
 	tr.closeFn = func() { abortConn(st); abortConn(out) }
 
 	server.track(tr)
 	defer server.untrack(tr)
 
-	err = server.checkNow(&pol)
+	err = server.checkStream(server.cfg.Current(), tr, server.now())
 	if err != nil {
 		_ = out.Close()
 
@@ -212,7 +224,7 @@ func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 		return
 	}
 
-	reply, err := openRelay(out, proto.StreamHeader{Svc: svc, From: src.identity})
+	reply, err := openRelay(out, &proto.StreamHeader{Svc: svc, From: src.identity, Kind: hdr.Kind})
 	if err != nil || !reply.OK {
 		msg := "target error"
 		if err == nil {
@@ -250,7 +262,25 @@ func (server *Server) handleAgentStream(src *session, st *yamux.Stream) {
 	tunnel.Join(st, out)
 }
 
-func openRelay(out *yamux.Stream, hdr proto.StreamHeader) (proto.StreamReply, error) {
+func (server *Server) relayTarget(src *session, machine, svc, kind string) (*session, string) {
+	if server.cfg.Current().Machines[machine].Services[svc].Kind != kind ||
+		(kind == proto.KindTCP && !src.tcpLinks) {
+		return nil, "unknown target"
+	}
+
+	tgt := server.liveSession(machine)
+	if tgt == nil {
+		return nil, "target not connected"
+	}
+
+	if kind == proto.KindTCP && !tgt.tcpLinks {
+		return nil, "target does not support TCP links"
+	}
+
+	return tgt, ""
+}
+
+func openRelay(out *yamux.Stream, hdr *proto.StreamHeader) (proto.StreamReply, error) {
 	var reply proto.StreamReply
 
 	//nolint:errcheck // best-effort deadline; a dead connection fails the next read or write

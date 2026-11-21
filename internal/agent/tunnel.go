@@ -37,17 +37,18 @@ func (e *rejectError) Error() string {
 
 // session is one tunnel session to the hub.
 type session struct {
-	peer    netip.Addr
-	local   netip.Addr
-	started time.Time
-	conn    net.Conn
-	a       *Agent
-	ymx     *yamux.Session
-	ctrl    *tunnel.Control
-	done    chan struct{}
-	renewCh chan proto.Message
-	ack     proto.HelloAck
-	once    sync.Once
+	peer     netip.Addr
+	local    netip.Addr
+	started  time.Time
+	conn     net.Conn
+	a        *Agent
+	ymx      *yamux.Session
+	ctrl     *tunnel.Control
+	done     chan struct{}
+	renewCh  chan proto.Message
+	ack      proto.HelloAck
+	tcpLinks bool
+	once     sync.Once
 }
 
 func (sess *session) close() {
@@ -80,7 +81,7 @@ func (agent *Agent) tunnelTLS(ident *tls.Certificate) *tls.Config {
 	}
 
 	cfg.MinVersion = tls.VersionTLS13
-	cfg.NextProtos = []string{proto.TunnelALPN(proto.ProtocolVersion)}
+	cfg.NextProtos = proto.AcceptedTunnelALPNs()
 	cfg.Certificates = []tls.Certificate{*ident}
 
 	if cfg.ServerName == "" {
@@ -203,7 +204,8 @@ func (agent *Agent) connect(ctx context.Context, ident *tls.Certificate) (*sessi
 		a: agent, conn: tc, ymx: ymx, ctrl: ctrl,
 		peer: addrOf(raw.RemoteAddr()), local: addrOf(raw.LocalAddr()),
 		started: agent.now(), done: make(chan struct{}),
-		renewCh: make(chan proto.Message, 1),
+		renewCh:  make(chan proto.Message, 1),
+		tcpLinks: tc.ConnectionState().NegotiatedProtocol == proto.ALPNTunnelTCP,
 	}
 
 	err = ctrl.Send(agent.hello(ident))
@@ -220,9 +222,27 @@ func (agent *Agent) connect(ctx context.Context, ident *tls.Certificate) (*sessi
 		return nil, err
 	}
 
+	if !sess.tcpLinks {
+		ack.Rules = legacyServiceKinds(ack.Rules)
+	}
+
 	sess.ack = ack
 
 	return sess, nil
+}
+
+// A version-1 hub that omits kinds could only configure HTTP. Only rules
+// received over that authenticated tunnel carry this guarantee; an old cache
+// or a missing entry in a hub-provided map does not.
+func legacyServiceKinds(rules proto.Rules) proto.Rules {
+	if rules.ServiceKinds == nil {
+		rules.ServiceKinds = make(map[string]string, len(rules.Allow))
+		for target := range rules.Allow {
+			rules.ServiceKinds[target] = proto.KindHTTP
+		}
+	}
+
+	return rules
 }
 
 func awaitAck(ctx context.Context, ctrl *tunnel.Control) (proto.HelloAck, error) {
@@ -470,7 +490,7 @@ func (sess *session) serveStreams() {
 			return
 		}
 
-		agent.wg.Go(func() { agent.handleHubStream(ctx, st) })
+		agent.wg.Go(func() { agent.handleHubStream(ctx, st, sess.tcpLinks) })
 	}
 }
 
@@ -700,6 +720,11 @@ func (agent *Agent) applyUpdate(sess *session, update proto.Update) {
 		agent.mu.Unlock()
 
 		return
+	}
+
+	if !sess.tcpLinks && update.Rules != nil {
+		rules := legacyServiceKinds(*update.Rules)
+		update.Rules = &rules
 	}
 
 	agent.cache.Apply(update)

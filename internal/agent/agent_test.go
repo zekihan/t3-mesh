@@ -68,7 +68,7 @@ func (conn *hubConn) sendControl(t *testing.T, msg proto.Message) {
 }
 
 // openStream opens a hub -> agent data stream with the given header.
-func (conn *hubConn) openStream(t *testing.T, hdr proto.StreamHeader) net.Conn {
+func (conn *hubConn) openStream(t *testing.T, hdr *proto.StreamHeader) net.Conn {
 	t.Helper()
 
 	st, err := conn.ymx.OpenStream()
@@ -98,17 +98,22 @@ type fakeHub struct {
 	noRenew     bool
 }
 
-func newFakeHub(t *testing.T, ca *pkitest.CA) *fakeHub {
+func newFakeHub(t *testing.T, ca *pkitest.CA, legacy bool) *fakeHub {
 	t.Helper()
 
 	srv := ca.IssueServer(t, "127.0.0.1")
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.Cert)
 
+	alpn := proto.ALPNTunnelTCP
+	if legacy {
+		alpn = proto.TunnelALPN(1)
+	}
+
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{srv},
 		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{proto.TunnelALPN(proto.ProtocolVersion), proto.ALPNEnroll},
+		NextProtos:   []string{alpn, proto.ALPNEnroll},
 		ClientAuth:   tls.RequestClientCert,
 	})
 	if err != nil {
@@ -124,12 +129,20 @@ func newFakeHub(t *testing.T, ca *pkitest.CA) *fakeHub {
 			Rules: proto.Rules{
 				Revision: "rules1",
 				Allow:    map[string][]string{"t3.z-arch": {"agent-devbox"}},
+				ServiceKinds: map[string]string{
+					"t3.z-arch": proto.KindHTTP,
+					"t3.devbox": proto.KindHTTP,
+				},
 			},
 			Peers:       proto.PeerTable{Revision: "peers1"},
 			Revocations: proto.Revocations{Revision: "rev1"},
 			TrustBundle: proto.TrustBundle{Revision: "tb1", PEM: string(ca.CertPEM)},
 			HomeCIDRs:   []string{"192.168.0.0/22"},
 		},
+	}
+
+	if legacy {
+		hubSrv.ack.Rules.ServiceKinds = nil
 	}
 
 	t.Cleanup(hubSrv.close)
@@ -174,7 +187,7 @@ func (hubSrv *fakeHub) handle(tc *tls.Conn) {
 	switch st.NegotiatedProtocol {
 	case proto.ALPNEnroll:
 		hubSrv.enroll(tc)
-	case proto.TunnelALPN(proto.ProtocolVersion):
+	case proto.ALPNTunnelTCP, proto.TunnelALPN(1):
 		hubSrv.tunnel(tc, &st)
 	default:
 		_ = tc.Close()
@@ -496,6 +509,7 @@ type hopts struct {
 	notAfter  time.Duration
 	directPrt int
 	noHub     bool
+	legacyHub bool
 	noIdent   bool
 	noStart   bool
 	direct    bool
@@ -555,7 +569,7 @@ func newHarness(t *testing.T, mod func(*hopts)) *harness {
 	}))
 	t.Cleanup(rig.remote.Close)
 
-	rig.hub = newFakeHub(t, ca)
+	rig.hub = newFakeHub(t, ca, opts.legacyHub)
 	rig.hub.linkTargets["t3.z-arch"] = rig.remote.Listener.Addr().String()
 
 	hubAddr := rig.hub.addr
@@ -634,9 +648,18 @@ links:
 
 	if !opts.noStart {
 		rig.start()
+		rig.waitForTunnel(!opts.noHub)
 	}
 
 	return rig
+}
+
+func (rig *harness) waitForTunnel(connected bool) {
+	rig.t.Helper()
+
+	if connected {
+		waitFor(rig.t, "tunnel adopted", func() bool { return rig.agent.current() != nil })
+	}
 }
 
 func (rig *harness) start() {
@@ -778,7 +801,7 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	hc := h.hub.waitConn(t, 1)
 
 	// Viewer streams carry raw HTTP immediately and get no reply line.
-	st := hc.openStream(t, proto.StreamHeader{Svc: "t3", Viewer: "z-phone"})
+	st := hc.openStream(t, &proto.StreamHeader{Svc: "t3", Viewer: "z-phone"})
 	defer st.Close()
 
 	_, _ = io.WriteString(
@@ -799,7 +822,7 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	}
 
 	// Relayed streams are answered with a StreamReply first.
-	rs := hc.openStream(t, proto.StreamHeader{Svc: "t3", From: "agent-z-arch"})
+	rs := hc.openStream(t, &proto.StreamHeader{Svc: "t3", From: "agent-z-arch"})
 	defer rs.Close()
 
 	var reply proto.StreamReply
@@ -824,7 +847,7 @@ func TestViewerAndRelayStreams(t *testing.T) {
 	}
 
 	// Unknown service: relayed gets OK:false.
-	bad := hc.openStream(t, proto.StreamHeader{Svc: "nope", From: "agent-z-arch"})
+	bad := hc.openStream(t, &proto.StreamHeader{Svc: "nope", From: "agent-z-arch"})
 	defer bad.Close()
 
 	err = proto.ReadLine(bad, &reply)
@@ -856,10 +879,11 @@ func TestHubStreamFinishesOnTunnelDrop(t *testing.T) {
 	}
 	defer sess.close()
 
+	rig.agent.cache = &state.Cache{Rules: sess.ack.Rules}
 	rig.agent.wg.Go(sess.serveStreams)
 
 	hub := rig.hub.waitConn(t, 1)
-	stream := hub.openStream(t, proto.StreamHeader{Svc: "t3", Viewer: "test-viewer"})
+	stream := hub.openStream(t, &proto.StreamHeader{Svc: "t3", Viewer: "test-viewer"})
 	setDeadline(stream.SetDeadline, deadline)
 
 	backend, err := listener.AcceptTCP()
@@ -1164,8 +1188,43 @@ func TestLinkPortWithoutHub(t *testing.T) {
 
 	waitFor(t, "startup ready", func() bool { return h.health.readyCount() > 0 })
 
-	if code, _ := get(t, h.linkURL("/x")); code != http.StatusBadGateway {
-		t.Errorf("code = %d, want 502 with no tunnel", code)
+	dialer := net.Dialer{}
+
+	conn, err := dialer.DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", h.linkPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer conn.Close()
+
+	setDeadline(conn.SetReadDeadline, time.Now().Add(time.Second))
+
+	var data [1]byte
+
+	_, err = conn.Read(data[:])
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("link error = %v, want EOF", err)
+	}
+}
+
+func TestLinkPortWithLegacyHub(t *testing.T) {
+	rig := newHarness(t, func(o *hopts) { o.legacyHub = true })
+
+	if code, body := get(
+		t,
+		rig.linkURL("/legacy"),
+	); code != http.StatusOK ||
+		body != "remote:/legacy" {
+		t.Fatalf("HTTP link against a version-1 hub: %d %q", code, body)
+	}
+
+	conn, err := rig.agent.dialTunnel(t.Context(), "z-arch", "t3", proto.KindTCP)
+	if !errors.Is(err, errLinkKind) {
+		if conn != nil {
+			_ = conn.Close()
+		}
+
+		t.Fatalf("TCP request against a version-1 hub: %v", err)
 	}
 }
 
@@ -1243,7 +1302,7 @@ func TestRetiringSessionCannotOverwriteHubState(t *testing.T) {
 	old := rig.agent.current()
 
 	// Keep the first tunnel draining after the replacement is adopted.
-	stream, err := rig.agent.dialTunnel(t.Context(), "z-arch", "t3")
+	stream, err := rig.agent.dialTunnel(t.Context(), "z-arch", "t3", proto.KindHTTP)
 	if err != nil {
 		t.Fatal(err)
 	}

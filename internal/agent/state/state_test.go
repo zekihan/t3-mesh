@@ -67,6 +67,69 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTCPRulesStayCompatible(t *testing.T) {
+	dir := t.TempDir()
+	cache := sampleCache(t)
+	cache.Rules.Allow["ssh.devbox"] = []string{"agent-z-mac"}
+	cache.Rules.ServiceKinds = map[string]string{
+		"t3.devbox":   proto.KindHTTP,
+		"ssh.devbox":  proto.KindTCP,
+		"ssh.staging": proto.KindTCP,
+	}
+	wantLegacyAllow := map[string][]string{"t3.devbox": {"z-phone", "agent-z-mac"}}
+	wantRules := proto.Rules{
+		Revision: cache.Rules.Revision,
+		Allow: map[string][]string{
+			"t3.devbox":  {"z-phone", "agent-z-mac"},
+			"ssh.devbox": {"agent-z-mac"},
+		},
+		ServiceKinds: cache.Rules.ServiceKinds,
+	}
+
+	err := Save(dir, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce the rules and format version fields decoded by v0.4.0's
+	// state.Load. Its proto.Rules has no ServiceKinds field.
+	var legacy struct {
+		Rules struct {
+			Allow    map[string][]string `json:"allow"`
+			Revision string              `json:"revision"`
+		} `json:"rules"`
+		FormatVersion int `json:"formatVersion"`
+	}
+
+	err = json.Unmarshal(raw, &legacy)
+	if err != nil || legacy.FormatVersion != 1 || legacy.Rules.Revision != wantRules.Revision {
+		t.Fatalf("v0.4.0 cache: %+v, %v", legacy, err)
+	}
+
+	if !reflect.DeepEqual(legacy.Rules.Allow, wantLegacyAllow) {
+		t.Fatalf("v0.4.0 grants = %v, want %v", legacy.Rules.Allow, wantLegacyAllow)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(loaded.Rules, wantRules) || !reflect.DeepEqual(cache.Rules, wantRules) {
+		t.Fatalf(
+			"TCP rules changed: loaded %+v, caller %+v, want %+v",
+			loaded.Rules,
+			cache.Rules,
+			wantRules,
+		)
+	}
+}
+
 func TestSaveSetsFormatVersion(t *testing.T) {
 	dir := t.TempDir()
 

@@ -79,7 +79,9 @@ type Options struct {
 	// LookupHost replaces the hub DNS lookup. Production leaves it nil.
 	LookupHost func(ctx context.Context, host string) ([]string, error)
 	// AddrPresent replaces the local-address check. Production leaves it nil.
-	AddrPresent  func(netip.Addr) bool
+	AddrPresent func(netip.Addr) bool
+	// Dial replaces the TCP dialer for direct links and served streams.
+	Dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	Version      string
 	StatusSocket string
 	// DNSRecheckInterval replaces the 30 s DNS backstop when positive.
@@ -98,6 +100,7 @@ type Agent struct {
 	now              func() time.Time
 	addrPresent      func(netip.Addr) bool
 	gatewayMAC       func() (string, error)
+	dial             func(ctx context.Context, network, address string) (net.Conn, error)
 	cfg              *agentconfig.Config
 	renewKick        chan struct{}
 	statusNudge      chan struct{}
@@ -164,6 +167,7 @@ func New(
 		hubTLS:        opts.HubTLS,
 		health:        opts.Health,
 		gatewayMAC:    defaultGatewayMAC,
+		dial:          opts.Dial,
 		localAddrs:    netwatch.LocalAddrs,
 		addrPresent:   defaultAddrPresent,
 		netEvents:     opts.NetEvents,
@@ -270,6 +274,7 @@ func (agent *Agent) Run(ctx context.Context) error {
 			Now:        agent.now,
 			GatewayMAC: agent.gatewayMAC,
 			LocalAddrs: agent.localAddrs,
+			Dial:       agent.dial,
 
 			DevicePort:     agent.devicePort(),
 			OnDeviceChange: func() { signal(agent.statusNudge) },
