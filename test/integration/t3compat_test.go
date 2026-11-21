@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -353,6 +355,9 @@ func TestT3Compat(t *testing.T) {
 	rig := newDeviceRigOn(t, nil, srv.addr)
 	control := directRoute(srv)
 	routes := []*compatRoute{control, viewerRoute(rig), deviceRoute(rig)}
+
+	rig.msh.newNode("b", &nodeOpts{t3Addr: srv.addr})
+	t.Run("link-assets", func(t *testing.T) { checkLinkAssets(t, control, rig.a, srv) })
 
 	ref := t3Reference(t, control)
 
@@ -823,5 +828,168 @@ func (rt *compatRoute) exerciseSocket(t *testing.T, ws *wsConn) {
 	err = ws.close()
 	if err != nil {
 		t.Fatalf("closing the socket: %v", err)
+	}
+}
+
+// assetRPC returns the value from an Effect RPC exit.
+func assetRPC(t *testing.T, ws *wsConn, id, tag string, payload any) json.RawMessage {
+	t.Helper()
+
+	request, err := json.Marshal(
+		map[string]any{
+			"_tag":    "Request",
+			"id":      id,
+			"tag":     tag,
+			"payload": payload,
+			"headers": []any{},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = ws.send(wsOpText, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for {
+		msg, err := ws.next(rpcWait)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var frame struct {
+			Tag       string `json:"_tag"` //nolint:tagliatelle // Effect wire name
+			RequestID string `json:"requestId"`
+			Exit      struct {
+				Tag   string          `json:"_tag"` //nolint:tagliatelle // Effect wire name
+				Value json.RawMessage `json:"value"`
+			} `json:"exit"`
+		}
+		if msg.op != wsOpText || json.Unmarshal(msg.payload, &frame) != nil ||
+			frame.Tag != "Exit" ||
+			frame.RequestID != id {
+			continue
+		}
+
+		if frame.Exit.Tag != "Success" {
+			t.Fatalf("%s: %s", tag, msg.payload)
+		}
+
+		return frame.Exit.Value
+	}
+}
+
+//nolint:gocyclo // Exercises both upload and signed download flows.
+func checkLinkAssets(t *testing.T, control *compatRoute, source *node, srv *t3Server) {
+	t.Helper()
+	token := control.bearerFor(t, srv)
+
+	ws := control.openRPC(t, token, true)
+	defer func() { _ = ws.conn.Close() }()
+
+	png, err := base64.StdEncoding.DecodeString(
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a0sAAAAASUVORK5CYII=",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i, spec := range []struct{ name, mime, kind, body, mode, dest string }{
+		{"image.png", "image/png", "image", string(png), "no-cors", "image"},
+		{"preview.html", "text/html", "file", "<!doctype html><p>compat preview</p>", "navigate", "iframe"},
+	} {
+		t.Run(spec.dest, func(t *testing.T) {
+			payload := map[string]any{
+				"type":      spec.kind,
+				"name":      spec.name,
+				"mimeType":  spec.mime,
+				"sizeBytes": len(spec.body),
+			}
+
+			var upload struct {
+				AttachmentID string `json:"attachmentId"`
+				RelativeURL  string `json:"relativeUrl"`
+			}
+
+			err = json.Unmarshal(
+				assetRPC(t, ws, strconv.Itoa(i*2+10), "attachments.createUploadUrl", payload),
+				&upload,
+			)
+			if err != nil ||
+				upload.RelativeURL == "" {
+				t.Fatalf("upload URL: %+v %v", upload, err)
+			}
+
+			rep := control.do(
+				t,
+				http.MethodPost,
+				upload.RelativeURL,
+				http.Header{"Content-Type": {spec.mime}},
+				spec.body,
+			)
+			if rep.status < 200 || rep.status >= 300 {
+				t.Fatalf("upload: %d %s", rep.status, rep.body)
+			}
+
+			resource := map[string]any{
+				"_tag":         "attachment",
+				"attachmentId": upload.AttachmentID,
+				"fileName":     spec.name,
+				"mimeType":     spec.mime,
+				"disposition":  "inline",
+			}
+
+			var asset struct {
+				RelativeURL string `json:"relativeUrl"`
+			}
+
+			err = json.Unmarshal(
+				assetRPC(
+					t,
+					ws,
+					strconv.Itoa(i*2+11),
+					"assets.createUrl",
+					map[string]any{"resource": resource},
+				),
+				&asset,
+			)
+			if err != nil ||
+				asset.RelativeURL == "" {
+				t.Fatalf("asset URL: %+v %v", asset, err)
+			}
+
+			hdr := http.Header{
+				"Sec-Fetch-Site": {"cross-site"},
+				"Sec-Fetch-Mode": {spec.mode},
+				"Sec-Fetch-Dest": {spec.dest},
+			}
+			want := control.do(t, http.MethodGet, asset.RelativeURL, nil, "")
+			link := &compatRoute{
+				name:   "link",
+				base:   source.linkURL(""),
+				host:   strings.TrimPrefix(source.linkURL(""), "http://"),
+				client: &http.Client{Timeout: 30 * time.Second},
+			}
+
+			got := link.do(t, http.MethodGet, asset.RelativeURL, hdr, "")
+			if want.status != http.StatusOK || got.status != want.status ||
+				!bytes.Equal(got.body, want.body) {
+				t.Fatalf(
+					"asset direct=%d %q link=%d %q",
+					want.status,
+					clip(want.body),
+					got.status,
+					clip(got.body),
+				)
+			}
+
+			if spec.dest == "iframe" &&
+				(!strings.Contains(got.header.Get("Content-Security-Policy"), "sandbox") ||
+					got.header.Get("X-Content-Type-Options") != "nosniff") {
+				t.Fatalf("missing sandbox headers: %v", got.header)
+			}
+		})
 	}
 }

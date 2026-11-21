@@ -68,7 +68,16 @@ func newDeviceRigOn(t *testing.T, tweak func(*hubCfg), t3Addr string) *deviceRig
 	skipNoDirect(t, msh)
 
 	rig := &deviceRig{msh: msh}
-	rig.a = msh.newNode("a", &nodeOpts{direct: true, devices: true, fakeNet: true, t3Addr: t3Addr})
+	rig.a = msh.newNode(
+		"a",
+		&nodeOpts{
+			direct:  true,
+			devices: true,
+			fakeNet: true,
+			t3Addr:  t3Addr,
+			links:   []string{"t3.b"},
+		},
+	)
 	rig.a.waitDeviceListening()
 
 	rig.phone = msh.enrollDeviceCert(phoneDevice)
