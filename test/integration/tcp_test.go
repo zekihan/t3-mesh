@@ -1,11 +1,13 @@
 package integration
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -43,9 +45,27 @@ func testTCPLink(t *testing.T, direct bool) {
 
 	defer backend.Close()
 
+	local, unread := net.Pipe()
+	defer local.Close()
+	defer unread.Close()
+
+	blocked := &blockedTCPBackend{
+		Conn: local, writing: make(chan struct{}), writeDone: make(chan struct{}),
+	}
+
+	var useBlocked atomic.Bool
+
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == backend.Addr().String() && useBlocked.CompareAndSwap(true, false) {
+			return blocked, nil
+		}
+
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+
 	nodeA, nodeB := msh.twoNodes(
 		&nodeOpts{direct: direct, links: []string{"ssh.b"}},
-		&nodeOpts{direct: direct, tcpAddr: backend.Addr().String()},
+		&nodeOpts{direct: direct, tcpAddr: backend.Addr().String(), dial: dial},
 	)
 	if direct {
 		nodeA.waitDirectListening()
@@ -60,21 +80,21 @@ func testTCPLink(t *testing.T, direct bool) {
 		return st.Machines["a"].Acked.Rules == revision && st.Machines["b"].Acked.Rules == revision
 	})
 
-	client, server := openTCPLink(t, nodeA, backend)
+	open := func() (*net.TCPConn, *net.TCPConn) {
+		eventually(t, 5*time.Second, "previous relay stream closed", func() bool {
+			return msh.status().Machines["a"].LinkStreams == 0
+		})
+		client, server := openTCPLink(t, nodeA, backend)
+		assertTCPLinkPath(t, msh, direct, 1)
 
-	wantStreams := int64(1)
-	if direct {
-		wantStreams = 0
-	}
-
-	if got := msh.status().Machines["a"].LinkStreams; got != wantStreams {
-		t.Fatalf("hub linked streams = %d, want %d", got, wantStreams)
+		return client, server
 	}
 
 	// Test an echo and tail after FIN in both directions, reversing who closes
 	// first on the second connection.
+	client, server := open()
 	testTCPHalfClose(t, client, server)
-	client, server = openTCPLink(t, nodeA, backend)
+	client, server = open()
 	testTCPHalfClose(t, server, client)
 
 	phone := msh.newPhone()
@@ -87,14 +107,64 @@ func testTCPLink(t *testing.T, direct bool) {
 		t.Fatalf("TCP viewer host returned %d, want 404", code)
 	}
 
-	client, server = openTCPLink(t, nodeA, backend)
+	client, server = open()
 	tcpTransfer(t, client, server, "before revocation")
+	useBlocked.Store(true)
+
+	blockedClient := dialTCPLink(t, nodeA)
+
+	_, err = io.WriteString(blockedClient, "the backend never reads this")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitTCPEvent(t, blocked.writing, "backend write to start")
+	assertTCPLinkPath(t, msh, direct, 2)
+
 	msh.update(func(c *hubCfg) { c.noTCPRule = true })
+	waitTCPEvent(t, blocked.writeDone, "revocation to unblock the backend write")
+	tcpEOF(t, blockedClient)
 	tcpEOF(t, client)
 	tcpEOF(t, server)
 }
 
-func openTCPLink(t *testing.T, nodeA *node, ln *net.TCPListener) (*net.TCPConn, *net.TCPConn) {
+type blockedTCPBackend struct {
+	net.Conn
+
+	writing   chan struct{}
+	writeDone chan struct{}
+}
+
+func (c *blockedTCPBackend) Write(p []byte) (int, error) {
+	close(c.writing)
+	defer close(c.writeDone)
+
+	return c.Conn.Write(p) //nolint:wrapcheck // passthrough
+}
+
+func waitTCPEvent(t *testing.T, done <-chan struct{}, event string) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", event)
+	}
+}
+
+func assertTCPLinkPath(t *testing.T, msh *mesh, direct bool, wantRelayed int64) {
+	t.Helper()
+
+	if direct {
+		wantRelayed = 0
+	}
+
+	if got := msh.status().Machines["a"].LinkStreams; got != wantRelayed {
+		t.Fatalf("hub linked streams = %d, want %d", got, wantRelayed)
+	}
+}
+
+func dialTCPLink(t *testing.T, nodeA *node) *net.TCPConn {
 	t.Helper()
 
 	dialer := net.Dialer{Timeout: 5 * time.Second}
@@ -112,14 +182,21 @@ func openTCPLink(t *testing.T, nodeA *node, ln *net.TCPListener) (*net.TCPConn, 
 
 	t.Cleanup(func() { _ = client.Close() })
 
-	deadline := time.Now().Add(5 * time.Second)
-
-	err = ln.SetDeadline(deadline)
+	err = client.SetDeadline(time.Now().Add(5 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = client.SetDeadline(deadline)
+	return client
+}
+
+func openTCPLink(t *testing.T, nodeA *node, ln *net.TCPListener) (*net.TCPConn, *net.TCPConn) {
+	t.Helper()
+
+	client := dialTCPLink(t, nodeA)
+	deadline := time.Now().Add(5 * time.Second)
+
+	err := ln.SetDeadline(deadline)
 	if err != nil {
 		t.Fatal(err)
 	}

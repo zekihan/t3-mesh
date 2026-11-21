@@ -592,6 +592,7 @@ type node struct {
 	cfg    *agentconfig.Config
 	cancel context.CancelFunc
 	done   chan struct{}
+	dial   func(ctx context.Context, network, address string) (net.Conn, error)
 	// netCh feeds the agent's network events when nodeOpts.fakeNet is set. It is
 	// unbuffered: once a second send returns, the first event has been handled.
 	netCh  chan netwatch.Event
@@ -624,6 +625,7 @@ type nodeOpts struct {
 	// stand-in the node starts otherwise.
 	t3Addr     string
 	tcpAddr    string
+	dial       func(ctx context.Context, network, address string) (net.Conn, error)
 	links      []string
 	directPort int
 	cacheTTL   time.Duration
@@ -662,6 +664,7 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 		identity: "agent-" + name,
 		t3stop:   make(chan struct{}),
 		done:     make(chan struct{}),
+		dial:     opts.dial,
 	}
 
 	t3Addr := opts.t3Addr
@@ -864,6 +867,7 @@ func (nd *node) launch() <-chan error {
 	aopts := agent.Options{
 		Config: nd.cfg, Version: "dev", Log: logger(), Now: nd.nowFn,
 		HubTLS: nd.m.hubTLS(), Health: healthStub{},
+		Dial:       nd.dial,
 		LocalAddrs: func() ([]netip.Addr, error) { return []netip.Addr{nd.m.direct}, nil },
 		GatewayMAC: func() (string, error) {
 			mac, _ := nd.gateway.Load().(string)

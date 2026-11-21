@@ -80,9 +80,13 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream, tcpLi
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, localDialTimeout)
-	d := net.Dialer{}
 
-	conn, err := d.DialContext(dialCtx, "tcp", target)
+	dial := agent.dial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+
+	conn, err := dial(dialCtx, "tcp", target)
 
 	cancel()
 
