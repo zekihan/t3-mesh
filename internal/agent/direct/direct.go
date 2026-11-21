@@ -439,6 +439,11 @@ func (sess *session) close() error {
 		delete(sess.m.sessions, sess)
 		sess.m.mu.Unlock()
 
+		if sess.kind == proto.KindTCP {
+			// Wake the splice reader even if the TLS close alert cannot be sent.
+			setDeadline(sess.conn.SetReadDeadline, time.Now())
+		}
+
 		sess.err = sess.conn.Close()
 	})
 

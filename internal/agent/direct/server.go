@@ -285,7 +285,7 @@ func (mgr *Manager) splice(sess *session, raw net.Conn, tc *tls.Conn, backend ne
 	)
 
 	if sess.kind == proto.KindTCP {
-		tunnel.JoinTCP(backend, tc)
+		tunnel.JoinTCP(mgr.ctx, backend, tc)
 	} else {
 		tunnel.Join(tc, backend)
 	}

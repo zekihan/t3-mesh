@@ -112,7 +112,7 @@ func (agent *Agent) handleHubStream(ctx context.Context, st *yamux.Stream, tcpLi
 	}
 
 	if kind == proto.KindTCP {
-		tunnel.JoinTCP(conn, st)
+		tunnel.JoinTCP(ctx, conn, st)
 
 		return
 	}

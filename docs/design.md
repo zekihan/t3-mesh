@@ -1049,9 +1049,8 @@ device fields are optional JSON fields that releases before them ignore.
 
 `HelloAck.rules.serviceKinds` and `Update.rules.serviceKinds` map
 `<svc>.<machine>` to `http` or `tcp`. A change to a kind changes the rules
-revision and replaces the cached map. The field is optional in the on-disk
-cache, which stays at format version 1. HTTP-only version-1 sessions are
-described under [Tunnel admission](#tunnel-admission).
+revision and replaces the cached map. HTTP-only version-1 sessions are described
+under [Tunnel admission](#tunnel-admission).
 
 Data streams start with one header line of JSON. HTTP streams carry the original
 bytes after admission:
@@ -1065,11 +1064,13 @@ A TCP relay starts with `{"to":"ssh.z-mac","kind":"tcp"}` from the source, and
 The direct TCP path sends `{"svc":"ssh"}` on its own ALPN. As with HTTP links,
 the caller waits for the accept line. After it, TCP carries records with a
 two-byte big-endian length followed by up to 16 KiB of bytes. A zero length
-means write-side EOF. Each agent propagates it with `CloseWrite` to its local
-TCP socket and keeps the transport open until the other direction ends.
-Closing the transport early cuts the splice, including on rule revocation.
-The records let a half-closed relay stay open without triggering yamux's
-stream close timeout. The hub copies the records as opaque bytes.
+means write-side EOF. A header of `0xffff` acknowledges one record and has no
+payload. Agents acknowledge data after writing it to the local socket and
+acknowledge EOF after calling `CloseWrite`. Each direction allows up to 64
+unacknowledged records, so the transport reader can still detect closure while
+a local write is blocked. The transport stays open until both EOFs are
+acknowledged. Rule revocation, transport loss or cancellation closes the local
+socket and the stream. The hub copies the records as opaque bytes.
 
 ## Homelab changes
 

@@ -173,10 +173,7 @@ func (srv *linkServer) serveTCP(conn net.Conn) {
 		return
 	}
 
-	stop := context.AfterFunc(srv.a.ctx, func() { _ = conn.Close() })
-	defer stop()
-
-	tunnel.JoinTCP(conn, peer)
+	tunnel.JoinTCP(srv.a.ctx, conn, peer)
 }
 
 // proxy returns the reverse proxy for the link. Keep-alives are off, so every

@@ -1,61 +1,122 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/hashicorp/yamux"
 )
 
 const (
 	tcpRecordHeader = 2
 	tcpRecordData   = 16 << 10
-	tcpEndEvents    = 3
+	tcpRecordAck    = 0xffff
+	tcpRecordWindow = 64
+	tcpDirections   = 2
 )
 
-// JoinTCP carries one TCP connection over a mesh stream. A length-prefixed
-// record with zero length is a write-side EOF. The transport stays open until
-// both sides send EOF so yamux's stream-close timer cannot cut a half-open TCP
-// connection, and a transport close before both EOFs can abort the connection.
-func JoinTCP(local, stream net.Conn) {
-	// The reader reports the peer's EOF, then watches for a transport close
-	// while the local side can still send. Neither worker waits on the other.
-	ends := make(chan bool, tcpEndEvents)
+// JoinTCP carries one TCP connection over a mesh stream. A zero-length record
+// is a write-side EOF, and each data or EOF record consumes a credit until the
+// receiver applies it to its local socket. The window keeps the stream reader
+// independent of a blocked local write so it can always observe a transport
+// close, with bounded memory.
+func JoinTCP(ctx context.Context, local, stream net.Conn) {
+	records := make(chan []byte, tcpRecordWindow)
+	credits := make(chan struct{}, tcpRecordWindow)
+
+	for range tcpRecordWindow {
+		credits <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	writer := &tcpRecordWriter{stream: stream}
+	ends := make(chan bool, tcpDirections+1)
+
+	var closed <-chan struct{}
+	if st, ok := stream.(*yamux.Stream); ok {
+		closed = st.Session().CloseChan()
+	}
 
 	var wg sync.WaitGroup
 
-	wg.Go(func() { ends <- sendTCP(local, stream) })
 	wg.Go(func() {
-		ok := receiveTCP(stream, local)
-		ends <- ok
+		readTCP(stream, records, credits)
 
-		if ok {
-			var extra [1]byte
-
-			//nolint:errcheck // any data or close after EOF ends the stream
-			_, _ = io.ReadFull(stream, extra[:])
-
-			ends <- false
-		}
+		ends <- false
 	})
+	wg.Go(func() { ends <- sendTCP(ctx, local, writer, credits) })
+	wg.Go(func() { ends <- receiveTCP(ctx, records, local, writer) })
 
-	if <-ends {
-		<-ends
-	}
+	waitTCP(ctx, ends, closed)
+	cancel()
 
 	_ = local.Close()
-	_ = stream.SetDeadline(time.Now()) //nolint:errcheck // unblock the yamux reader before Close
+	_ = stream.SetDeadline(time.Now()) //nolint:errcheck // unblock yamux before Close
 	_ = stream.Close()
 
 	wg.Wait()
 }
 
-func sendTCP(local io.Reader, stream io.Writer) bool {
+func waitTCP(ctx context.Context, ends <-chan bool, closed <-chan struct{}) {
+	for range tcpDirections {
+		select {
+		case <-ctx.Done():
+			return
+		case <-closed:
+			return
+		case complete := <-ends:
+			if !complete {
+				return
+			}
+		}
+	}
+}
+
+type tcpRecordWriter struct {
+	stream io.Writer
+	mu     sync.Mutex
+}
+
+func (w *tcpRecordWriter) write(record []byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	_, err := w.stream.Write(record)
+
+	return err == nil
+}
+
+func (w *tcpRecordWriter) ack() bool {
+	var header [tcpRecordHeader]byte
+
+	binary.BigEndian.PutUint16(header[:], tcpRecordAck)
+
+	return w.write(header[:])
+}
+
+func takeCredit(ctx context.Context, credits <-chan struct{}) bool {
+	select {
+	case <-credits:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendTCP(
+	ctx context.Context,
+	local io.Reader,
+	writer *tcpRecordWriter,
+	credits <-chan struct{},
+) bool {
 	var record [tcpRecordHeader + tcpRecordData]byte
 
-	for {
+	for takeCredit(ctx, credits) {
 		size, err := local.Read(record[tcpRecordHeader:])
 		if size > 0 {
 			binary.BigEndian.PutUint16(
@@ -63,53 +124,101 @@ func sendTCP(local io.Reader, stream io.Writer) bool {
 				uint16(size), //nolint:gosec // bounded by tcpRecordData
 			)
 
-			_, writeErr := stream.Write(record[:tcpRecordHeader+size])
-			if writeErr != nil {
+			if !writer.write(record[:tcpRecordHeader+size]) {
 				return false
 			}
 		}
 
+		if err == nil {
+			continue
+		}
+
+		if !errors.Is(err, io.EOF) || (size > 0 && !takeCredit(ctx, credits)) {
+			return false
+		}
+
+		clear(record[:tcpRecordHeader])
+
+		return writer.write(record[:tcpRecordHeader]) && awaitTCPDelivery(ctx, credits)
+	}
+
+	return false
+}
+
+// Wait for all records, including EOF, to reach the peer's local socket before
+// reporting completion. A transport close can then abort all remaining work.
+func awaitTCPDelivery(ctx context.Context, credits <-chan struct{}) bool {
+	for range tcpRecordWindow {
+		if !takeCredit(ctx, credits) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func readTCP(stream io.Reader, records chan<- []byte, credits chan<- struct{}) {
+	var header [tcpRecordHeader]byte
+
+	eof := false
+
+	for {
+		_, err := io.ReadFull(stream, header[:])
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				return false
+			return
+		}
+
+		size := binary.BigEndian.Uint16(header[:])
+		if size == tcpRecordAck {
+			select {
+			case credits <- struct{}{}:
+				continue
+			default:
+				return // unsolicited acknowledgement
 			}
+		}
 
-			clear(record[:tcpRecordHeader])
-			_, err = stream.Write(record[:tcpRecordHeader])
+		if size > tcpRecordData || eof {
+			return
+		}
 
-			return err == nil
+		record := make([]byte, size)
+
+		_, err = io.ReadFull(stream, record)
+		if err != nil {
+			return
+		}
+
+		select {
+		case records <- record:
+			eof = size == 0
+		default:
+			return // peer exceeded the window
 		}
 	}
 }
 
-func receiveTCP(stream io.Reader, local net.Conn) bool {
-	var record [tcpRecordData]byte
-
+func receiveTCP(
+	ctx context.Context,
+	records <-chan []byte,
+	local net.Conn,
+	writer *tcpRecordWriter,
+) bool {
 	for {
-		_, err := io.ReadFull(stream, record[:tcpRecordHeader])
-		if err != nil {
+		select {
+		case <-ctx.Done():
 			return false
-		}
+		case record := <-records:
+			if len(record) == 0 {
+				cw, ok := local.(closeWriter)
 
-		size := int(binary.BigEndian.Uint16(record[:tcpRecordHeader]))
-		if size == 0 {
-			cw, ok := local.(closeWriter)
+				return ok && cw.CloseWrite() == nil && writer.ack()
+			}
 
-			return ok && cw.CloseWrite() == nil
-		}
-
-		if size > len(record) {
-			return false
-		}
-
-		_, err = io.ReadFull(stream, record[:size])
-		if err != nil {
-			return false
-		}
-
-		_, err = local.Write(record[:size])
-		if err != nil {
-			return false
+			_, err := local.Write(record)
+			if err != nil || !writer.ack() {
+				return false
+			}
 		}
 	}
 }
