@@ -893,9 +893,11 @@ proxies to the machine's T3 (`serve.t3`, `127.0.0.1:3773`).
   version, never a URL. The signing key is an environment-scoped secret available
   only to the release environment; a tag ruleset limits who can push release tags,
   and the workflow refuses a tag whose commit is not an ancestor of `main`.
-- **One fleet version:** all agents follow one `release.version`; there is no
-  staged rollout. The previous-protocol rule in [Tunnel admission](#tunnel-admission)
-  and per-machine rollback cover a bad release.
+- **Fleet rollout:** agents follow `release.version` by default. To canary, pin
+  one machine with `machines.<name>.release`, let it pass probation, then move
+  `release.version` and remove the pin. A pin below the running version requires
+  `rollbackAllowed: true` on the pin. The pin defaults this flag to false. The
+  previous-protocol rule in [Tunnel admission](#tunnel-admission) still applies.
 - **Install layout:** `versions/<version>/t3-mesh-agent`, `current` and
   `known-good` symlinks. The service always starts a small launcher mode of the
   `known-good` binary, which runs `current`. A `previous-good` symlink keeps the
@@ -1325,7 +1327,7 @@ Traefik middleware lists a kind `agent` identity.
 | Observability | hub `/status` and `/alerts/*` probed by Gatus; events to VictoriaLogs; no scraper or vmalert added |
 | Readiness | `/readyz` means can serve; staleness is an alert, never unready |
 | Network-change handling | probe before replacing; healthy sessions keep their streams |
-| Fleet rollout | one global version, no staging; hub accepts current and previous protocol |
+| Fleet rollout | fleet version with optional machine pins; hub accepts current and previous protocol |
 | Launcher | vetted by self-test in probation; `previous-good` fallback via systemd `OnFailure` / macOS fallback daemon |
 | Direct listener during outage | also requires the cached home gateway MAC; TLS 1.3 only |
 | Enrollment surface | own ALPN, only while a token is outstanding, size and time limits |
@@ -1344,3 +1346,6 @@ Traefik middleware lists a kind `agent` identity.
 | Milestones | approver-policy first (M0), then M1–M4 |
 | devbox cutover | hard switch |
 | Testing | unit tests plus one in-process hub + two agents test |
+
+The hub reports each machine’s effective release as `desiredVersion` in `/status`
+and `/api/v1/fleet`. Release revisions are derived from each effective release.

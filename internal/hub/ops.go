@@ -61,6 +61,7 @@ type ackedStatus struct {
 }
 
 type machineStatus struct {
+	DesiredVersion string `json:"desiredVersion,omitempty"`
 	// DeviceListener is where the live session's agent says it accepts enrolled
 	// devices; nil while it does not.
 	DeviceListener *proto.DeviceListener `json:"deviceListener,omitempty"`
@@ -163,9 +164,10 @@ func (server *Server) machineStatusLocked(
 	}
 
 	out := machineStatus{
-		Identity:      mc.Identity,
-		Warnings:      slices.Clone(ms.warnings),
-		FailedUpdates: []proto.FailedUpdate{},
+		Identity:       mc.Identity,
+		DesiredVersion: snap.ReleaseFor(name).Version,
+		Warnings:       slices.Clone(ms.warnings),
+		FailedUpdates:  []proto.FailedUpdate{},
 	}
 	if out.Warnings == nil {
 		out.Warnings = []string{}
@@ -277,7 +279,7 @@ func (server *Server) updateFailedLocked(
 	ms *machineState,
 	now time.Time,
 ) (bool, string) {
-	desired := snap.Release.Version
+	desired := snap.ReleaseFor(ms.name).Version
 
 	if st := ms.status; st != nil {
 		for _, fu := range st.FailedUpdates {
@@ -297,8 +299,8 @@ func (server *Server) updateFailedLocked(
 	}
 
 	since := live.accepted
-	if server.releaseSince.After(since) {
-		since = server.releaseSince
+	if server.releaseSince[ms.name].After(since) {
+		since = server.releaseSince[ms.name]
 	}
 
 	if now.Sub(since) > versionLagAfter {

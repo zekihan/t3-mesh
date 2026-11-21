@@ -56,6 +56,7 @@ type Service struct {
 
 // Machine is one configured machine.
 type Machine struct {
+	Release              *proto.Release
 	Services             map[string]Service
 	Identity             string
 	DisconnectAlertAfter time.Duration
@@ -210,7 +211,13 @@ type rawConfig struct {
 	} `yaml:"policy"`
 }
 
+type rawRelease struct {
+	Version         string `yaml:"version"`
+	RollbackAllowed bool   `yaml:"rollbackAllowed"`
+}
+
 type rawMachine struct {
+	Release  *rawRelease `yaml:"release"`
 	Services map[string]struct {
 		Kind string `yaml:"kind"`
 	} `yaml:"services"`
@@ -370,7 +377,23 @@ func (cfg *config) parseMachines(in map[string]rawMachine) error {
 			alertAfter = duration
 		}
 
+		var release *proto.Release
+
+		if machine.Release != nil {
+			if !versionRe.MatchString(machine.Release.Version) {
+				return invalid(
+					"machine %q release.version %q must look like vX.Y.Z",
+					name,
+					machine.Release.Version,
+				)
+			}
+
+			r := makeRelease(machine.Release.Version, machine.Release.RollbackAllowed)
+			release = &r
+		}
+
 		cfg.machines[name] = Machine{
+			Release:              release,
 			Identity:             machine.Identity,
 			Services:             svcs,
 			DisconnectAlertAfter: alertAfter,
@@ -430,14 +453,7 @@ func (cfg *config) parseGeneral(raw *rawConfig) error {
 		return invalid("release.version %q must look like vX.Y.Z", raw.Release.Version)
 	}
 
-	cfg.release = proto.Release{
-		Version:         raw.Release.Version,
-		RollbackAllowed: raw.Release.RollbackAllowed,
-	}
-	cfg.release.Revision = jsonRevision(struct {
-		Version         string `json:"version"`
-		RollbackAllowed bool   `json:"rollbackAllowed"`
-	}{cfg.release.Version, cfg.release.RollbackAllowed})
+	cfg.release = makeRelease(raw.Release.Version, raw.Release.RollbackAllowed)
 
 	cfg.issuer = Issuer(raw.Issuer)
 	if (cfg.issuer != Issuer{}) && (cfg.issuer.Name == "" || cfg.issuer.Kind == "") {
@@ -445,6 +461,25 @@ func (cfg *config) parseGeneral(raw *rawConfig) error {
 	}
 
 	return nil
+}
+
+func makeRelease(version string, rollback bool) proto.Release {
+	r := proto.Release{Version: version, RollbackAllowed: rollback}
+	r.Revision = jsonRevision(struct {
+		Version         string `json:"version"`
+		RollbackAllowed bool   `json:"rollbackAllowed"`
+	}{version, rollback})
+
+	return r
+}
+
+// ReleaseFor returns the effective release for a machine.
+func (snap *Snapshot) ReleaseFor(name string) proto.Release {
+	if r := snap.Machines[name].Release; r != nil {
+		return *r
+	}
+
+	return snap.Release
 }
 
 // parseAPI validates the hub API host and its caller set. The callers are a

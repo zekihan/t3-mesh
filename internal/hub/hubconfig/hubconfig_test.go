@@ -863,3 +863,54 @@ func TestWatcherKubernetesSymlinkSwap(t *testing.T) {
 		t.Errorf("unexpectedly stale: %s", reason)
 	}
 }
+
+func TestMachineReleasePin(t *testing.T) {
+	base := strings.Replace(
+		goodConfig,
+		"release: {version: v0.3.0, rollbackAllowed: false}",
+		"release: {version: v0.3.0, rollbackAllowed: true}",
+		1,
+	)
+	pinned := strings.Replace(
+		base,
+		"identity: agent-devbox, services:",
+		"identity: agent-devbox, release: {version: v0.4.0}, services:",
+		1,
+	)
+
+	original, err := parseConfig([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := parseConfig([]byte(pinned))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sa := &Snapshot{Machines: original.machines, Release: original.release}
+
+	sb := &Snapshot{Machines: changed.machines, Release: changed.release}
+	if sb.ReleaseFor("devbox").Version != "v0.4.0" || sb.ReleaseFor("devbox").RollbackAllowed {
+		t.Fatal("wrong pin or default")
+	}
+
+	if sb.ReleaseFor("devbox").Revision == sa.ReleaseFor("devbox").Revision ||
+		sb.ReleaseFor("z-mac") != sa.ReleaseFor("z-mac") {
+		t.Fatal("release revisions not isolated")
+	}
+
+	for _, value := range []string{"release: {version: bad}", "release: {version: v0.4.0, unknown: true}"} {
+		bad := strings.Replace(
+			base,
+			"identity: agent-devbox, services:",
+			"identity: agent-devbox, "+value+", services:",
+			1,
+		)
+
+		_, err = parseConfig([]byte(bad))
+		if err == nil {
+			t.Fatalf("accepted %s", value)
+		}
+	}
+}
