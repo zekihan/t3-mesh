@@ -352,6 +352,13 @@ func (lay Layout) setLink(name, version string) error {
 		return fmt.Errorf("launcher: create temp link: %w", err)
 	}
 
+	err = setSymlinkMode(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+
+		return fmt.Errorf("launcher: set temp link permissions: %w", err)
+	}
+
 	err = os.Rename(tmp, filepath.Join(lay.Dir, name))
 	if err != nil {
 		_ = os.Remove(tmp)
