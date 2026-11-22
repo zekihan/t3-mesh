@@ -1443,6 +1443,9 @@ Traefik middleware lists a kind `agent` identity.
   its own address, including origin checks, any URLs T3 advertises and WebSocket
   reconnects. If not, the agent rewrites `Host` (and `Origin` if needed) for link
   streams. Must be resolved before the M2 cutover.
+  Resolved at the M2 cutover (see the M2 rollout above): T3 identifies the peer
+  through a link port, and the desktop app's window reaches it once the link
+  guard trusts `t3code://app`.
 - **T3 trust of loopback clients.** After the move every request reaches T3 from
   `127.0.0.1`. Confirm T3 grants loopback clients nothing beyond what pairing grants
   (the `t3 auth`/`t3 pair` control plane is local), and that T3 with LAN mode off
@@ -1467,8 +1470,6 @@ Traefik middleware lists a kind `agent` identity.
 - **Raw TCP services for viewers** (e.g. SSH). Machines can use SSH through agent
   link ports. A viewer-facing TCP entrypoint would need its own authorization path
   because Traefik's HTTP middleware only applies to HTTP. It remains out of scope.
-- **Repository creation.** `zekihan/t3-mesh` does not exist on GitHub yet; it will
-  be public.
 
 ## Decision log
 
