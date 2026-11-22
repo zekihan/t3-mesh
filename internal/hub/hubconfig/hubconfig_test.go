@@ -234,6 +234,7 @@ func TestHostTarget(t *testing.T) {
 		{"t3.devbox.mesh.noqer.com", "devbox", "t3", true},
 		{"T3.Z-Mac.MESH.noqer.com:443", "z-mac", "t3", true},
 		{"t3.devbox.mesh.noqer.com.", "devbox", "t3", true},
+		{"t3.devbox.extra.mesh.noqer.com", "", "", false},
 		{"t3.nope.mesh.noqer.com", "", "", false},
 		{"ssh.devbox.mesh.noqer.com", "", "", false},
 		{"t3.devbox.other.com", "", "", false},
