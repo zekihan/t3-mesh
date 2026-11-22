@@ -75,7 +75,6 @@ func newDeviceRigOn(t *testing.T, tweak func(*hubCfg), t3Addr string) *deviceRig
 			devices: true,
 			fakeNet: true,
 			t3Addr:  t3Addr,
-			links:   []string{"t3.b"},
 		},
 	)
 	rig.a.waitDeviceListening()
@@ -723,6 +722,7 @@ func TestDeviceDirectLeavingHomeDuringAnOutageClosesIt(t *testing.T) {
 	nd.netEvent(netwatch.EventNetwork)
 
 	ws.waitClosed(t, 5*time.Second, "moved to a foreign network")
+	eventually(t, 5*time.Second, "listener closed", func() bool { return !nd.listening() })
 	nd.neverListens(500*time.Millisecond, "moved to a foreign network")
 }
 

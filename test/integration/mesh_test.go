@@ -274,6 +274,13 @@ func TestLinkOverTunnel(t *testing.T) {
 		t.Fatalf("a link t3.b: %d %q", code, body)
 	}
 
+	// Reading the response does not wait for the hub to finish tearing down the relay.
+	eventually(t, 5*time.Second, "first link relay to close", func() bool {
+		st := msh.status()
+
+		return st.Machines["a"].LinkStreams == 0 && st.Machines["b"].OpenStreams == 0
+	})
+
 	h := openHold(t, nodeA.linkURL("/hold"), nil, "")
 	defer h.close()
 

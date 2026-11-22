@@ -541,16 +541,6 @@ func (msh *mesh) opsGet(path string) (int, string) {
 	return resp.StatusCode, strings.TrimSpace(string(b))
 }
 
-func (msh *mesh) waitConnected(machine string) {
-	msh.t.Helper()
-	eventually(
-		msh.t,
-		10*time.Second,
-		machine+" connected to hub",
-		func() bool { return msh.status().Machines[machine].Connected },
-	)
-}
-
 // rawDial opens a TLS connection to the hub without any protocol on top.
 func (msh *mesh) rawDial(cert *tls.Certificate, alpn string) (*tls.Conn, error) {
 	cfg := &tls.Config{
@@ -675,9 +665,12 @@ func (msh *mesh) newNode(name string, opts *nodeOpts) *node {
 	}
 
 	dir := t.TempDir()
-	nd.linkPort = freePort(t, "127.0.0.1")
-
 	links := map[string]string{}
+
+	if len(opts.links) > 0 {
+		nd.linkPort = freePort(t, "127.0.0.1")
+	}
+
 	for _, k := range opts.links {
 		links[k] = fmt.Sprintf("127.0.0.1:%d", nd.linkPort)
 	}
@@ -845,13 +838,15 @@ func (nd *node) start() {
 	before := nd.m.tl.count()
 	errc := nd.launch()
 
-	nd.m.waitConnected(nd.name)
+	eventually(nd.m.t, 10*time.Second, nd.name+" connected to hub", func() bool {
+		select {
+		case err := <-errc:
+			nd.m.t.Fatalf("agent %s exited: %v", nd.name, err)
+		default:
+		}
 
-	select {
-	case err := <-errc:
-		nd.m.t.Fatalf("agent %s exited: %v", nd.name, err)
-	default:
-	}
+		return nd.m.status().Machines[nd.name].Connected
+	})
 
 	nd.hubConns = nd.m.tl.since(before)
 }
