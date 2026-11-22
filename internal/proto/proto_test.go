@@ -20,8 +20,18 @@ func TestMessageRoundTrip(t *testing.T) {
 			Rules:   Rules{Allow: map[string][]string{"t3.devbox": {"z-phone"}}},
 		},
 		Update{Home: &home},
+		Release{Version: "v1.2.3", RollbackAllowed: true, Revision: "release-1"},
 		Ping{Seq: 3, SentUnixNano: 42},
+		Pong{Seq: 3, SentUnixNano: 42},
+		Renew{CSR: "csr"},
+		Renewed{Certificate: "leaf", Chain: "chain"},
 		Reject{Reason: RejectOther},
+		Status{
+			Version:        "v1.2.3",
+			DeviceListener: &DeviceListener{Addrs: []string{"127.0.0.1"}, Port: 8444},
+		},
+		Enroll{Token: "token", CSR: "csr"},
+		Enrolled{Certificate: "leaf", Chain: "chain", CABundle: "bundle", CARevision: "ca-1"},
 	}
 
 	var buf bytes.Buffer
@@ -81,9 +91,150 @@ func TestReadMessageLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	bodyLen := buf.Len() - lengthPrefixSize
+
 	_, err = ReadMessage(&buf, MaxEnrollSize)
-	if !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("err = %v, want ErrTooLarge", err)
+	if !errors.Is(err, ErrTooLarge) || buf.Len() != bodyLen {
+		t.Fatalf(
+			"ReadMessage = %v, left %d bytes; want ErrTooLarge and %d",
+			err,
+			buf.Len(),
+			bodyLen,
+		)
+	}
+}
+
+func TestReadMessageRejectsMalformedFrames(t *testing.T) {
+	tests := []struct {
+		want   error
+		name   string
+		prefix string
+		body   string
+		size   uint32
+	}{
+		{io.ErrUnexpectedEOF, "short length", "read length", "", 0},
+		{io.ErrUnexpectedEOF, "short body", "read body", "{", 2},
+		{nil, "bad envelope", "unmarshal envelope", `{"type":`, 0},
+		{ErrUnknownType, "unknown type", "", `{"type":"FutureMessage","body":{}}`, 0},
+		{nil, "wrong body type", "unmarshal Ping", `{"type":"Ping","body":{"seq":"three"}}`, 0},
+		{nil, "missing body", "unmarshal Ping", `{"type":"Ping"}`, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			size := tc.size
+			if size == 0 {
+				size = uint32(len(tc.body)) //nolint:gosec // small test fixture
+			}
+
+			frame := binary.BigEndian.AppendUint32(nil, size)
+			if tc.body == "" {
+				frame = frame[:2]
+			}
+
+			frame = append(frame, tc.body...)
+
+			got, err := ReadMessage(bytes.NewReader(frame), MaxMessageSize)
+			if got != nil || err == nil || (tc.want != nil && !errors.Is(err, tc.want)) ||
+				!strings.Contains(err.Error(), tc.prefix) {
+				t.Fatalf(
+					"ReadMessage = %v, %v; want no message and %q (%v)",
+					got,
+					err,
+					tc.prefix,
+					tc.want,
+				)
+			}
+		})
+	}
+}
+
+func TestMessageSizeBoundary(t *testing.T) {
+	var empty bytes.Buffer
+
+	err := WriteMessage(&empty, Renew{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csr := strings.Repeat("x", MaxMessageSize-empty.Len()+lengthPrefixSize)
+
+	var frame bytes.Buffer
+
+	err = WriteMessage(&frame, Renew{CSR: csr})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := binary.BigEndian.Uint32(frame.Bytes()); got != MaxMessageSize {
+		t.Fatalf("frame length = %d, want %d", got, MaxMessageSize)
+	}
+
+	got, err := ReadMessage(&frame, MaxMessageSize)
+	if err != nil || got != (Renew{CSR: csr}) {
+		t.Fatalf("ReadMessage at the limit = %T, %v", got, err)
+	}
+
+	err = WriteMessage(&frame, Renew{CSR: csr + "x"})
+	if !errors.Is(err, ErrTooLarge) || frame.Len() != 0 {
+		t.Fatalf("oversize write = %v, wrote %d bytes", err, frame.Len())
+	}
+}
+
+func TestStreamHeaderSizeBoundary(t *testing.T) {
+	const empty = "{\"svc\":\"\"}\n"
+
+	svc := strings.Repeat("x", MaxHeaderLine-len(empty))
+
+	var frame bytes.Buffer
+
+	err := WriteLine(&frame, StreamHeader{Svc: svc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if frame.Len() != MaxHeaderLine {
+		t.Fatalf("line length = %d, want %d", frame.Len(), MaxHeaderLine)
+	}
+
+	var hdr StreamHeader
+
+	err = ReadLine(&frame, &hdr)
+	if err != nil || hdr.Svc != svc {
+		t.Fatalf("ReadLine at the limit = %v, service length %d", err, len(hdr.Svc))
+	}
+
+	err = WriteLine(&frame, StreamHeader{Svc: svc + "x"})
+	if !errors.Is(err, ErrTooLarge) || frame.Len() != 0 {
+		t.Fatalf("oversize write = %v, wrote %d bytes", err, frame.Len())
+	}
+
+	input := strings.NewReader(`{"svc":"` + svc + "x\"}\n")
+
+	err = ReadLine(input, &hdr)
+	if !errors.Is(err, ErrTooLarge) || input.Len() != 1 {
+		t.Fatalf("oversize read = %v, left %d bytes", err, input.Len())
+	}
+}
+
+func TestReadLineRejectsInvalidHeaders(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		{`{"svc":"t3"}`, "read line"},
+		{"{\"svc\":\n", "decode line"},
+		{"{\"svc\":7}\n", "cannot unmarshal number"},
+		{"{\"serv\":\"t3\"}\n", `unknown field "serv"`},
+	}
+
+	for _, tc := range tests {
+		var hdr StreamHeader
+
+		err := ReadLine(strings.NewReader(tc.line), &hdr)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ReadLine(%q) = %v, want %q", tc.line, err, tc.want)
+		}
 	}
 }
 
