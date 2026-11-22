@@ -347,7 +347,10 @@ func (mgr *Manager) DeviceListener() (int, []string) {
 		out[i] = a.String()
 	}
 
-	return mgr.deviceLn.port, out
+	//nolint:errcheck,forcetypeassert // syncListeners binds TCP listeners.
+	addr := mgr.deviceLn.byAddr[addrs[0]].Addr().(*net.TCPAddr)
+
+	return addr.Port, out
 }
 
 // DeviceSessions returns the number of live device connections.

@@ -57,7 +57,6 @@ type devEnv struct {
 	offset  atomic.Int64
 	hits    atomic.Int64
 	changes atomic.Int64
-	port    int
 	mu      sync.Mutex
 }
 
@@ -126,7 +125,7 @@ func (env *devEnv) fakeT3() *httptest.Server {
 func newDevEnv(t *testing.T) *devEnv {
 	t.Helper()
 
-	env := &devEnv{t: t, ca: pkitest.NewCA(t, "clients"), port: freePort(t)}
+	env := &devEnv{t: t, ca: pkitest.NewCA(t, "clients")}
 	env.pool = x509.NewCertPool()
 	env.pool.AddCert(env.ca.Cert)
 	env.backend = env.fakeT3()
@@ -146,9 +145,9 @@ func newDevEnv(t *testing.T) *devEnv {
 		},
 	}
 
-	env.mgr = New(Options{
-		Port:       freePort(t),
-		DevicePort: env.port,
+	env.mgr = newDevManager(&Options{
+		Port:       1,
+		DevicePort: 1,
 		CacheTTL:   time.Hour,
 		Serve:      map[string]string{"t3": env.backend.Listener.Addr().String()},
 		View:       env.get,
@@ -162,9 +161,20 @@ func newDevEnv(t *testing.T) *devEnv {
 		LocalAddrs:     func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil },
 		OnDeviceChange: func() { env.changes.Add(1) },
 	})
+
 	t.Cleanup(func() { _ = env.mgr.Close() })
 
 	return env
+}
+
+func newDevManager(opts *Options) *Manager {
+	mgr := New(*opts)
+
+	// Let the kernel allocate each port when Reconcile binds the listener.
+	mgr.agentLn.port = 0
+	mgr.deviceLn.port = 0
+
+	return mgr
 }
 
 // enrolled issues a device leaf and records it as the newest this agent knows.
@@ -209,7 +219,7 @@ func (env *devEnv) open() string {
 	env.mgr.Reconcile(env.t.Context())
 
 	port, addrs := env.mgr.DeviceListener()
-	if port != env.port || len(addrs) != 1 {
+	if port == 0 || len(addrs) != 1 {
 		env.t.Fatalf("device listener = %d %v", port, addrs)
 	}
 
@@ -1162,7 +1172,7 @@ func TestDeviceOutageKeepsAccessWithinCacheTTL(t *testing.T) {
 	addr := env.open()
 	open := env.openSessions(addr, &cert)
 
-	// Days into the outage, still inside the window.
+	// The outage is still inside the cache window.
 	env.advance(30 * time.Minute)
 	env.mgr.Reconcile(t.Context())
 	open.assertAlive(t)
@@ -1241,7 +1251,7 @@ func TestDeviceHomeGate(t *testing.T) {
 			env := newDevEnv(t)
 			cert := env.enrolled(phoneID)
 
-			env.open()
+			addr := env.open()
 			env.mgr.Reconcile(t.Context())
 
 			tt.setup(env)
@@ -1252,10 +1262,7 @@ func TestDeviceHomeGate(t *testing.T) {
 			}
 
 			// Nothing listens on the device port any more.
-			_, err := env.dial(
-				net.JoinHostPort("127.0.0.1", strconv.Itoa(env.port)),
-				env.clientConfig(&cert),
-			)
+			_, err := env.dial(addr, env.clientConfig(&cert))
 			if err == nil {
 				t.Fatal("the device port still accepts connections")
 			}
@@ -1319,7 +1326,7 @@ func TestDeviceListenerOff(t *testing.T) {
 			opts(&o)
 			o.OnDeviceChange = nil
 
-			mgr := New(o)
+			mgr := newDevManager(&o)
 
 			t.Cleanup(func() { _ = mgr.Close() })
 

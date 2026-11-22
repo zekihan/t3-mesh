@@ -148,8 +148,8 @@ type Manager struct {
 }
 
 // listenSet is the listeners one kind of access is accepted on, by address. Both
-// kinds bind the same addresses, under the same gate, on their own port. A zero
-// port means the kind is off.
+// kinds bind the same addresses, under the same gate, on their own port. A nil
+// serve function leaves the kind off.
 type listenSet struct {
 	byAddr map[netip.Addr]net.Listener
 	serve  func(net.Conn)
@@ -196,9 +196,12 @@ func New(opts Options) *Manager {
 		failures:    make(map[string]time.Time),
 		devSessions: make(map[*deviceSession]struct{}),
 	}
-	mgr.agentLn = listenSet{
-		name: "Direct", port: opts.Port, serve: mgr.serve,
-		byAddr: make(map[netip.Addr]net.Listener),
+
+	if opts.Port != 0 {
+		mgr.agentLn = listenSet{
+			name: "Direct", port: opts.Port, serve: mgr.serve,
+			byAddr: make(map[netip.Addr]net.Listener),
+		}
 	}
 
 	mgr.startDevices()
@@ -563,7 +566,7 @@ func (mgr *Manager) syncListeners(
 	want map[netip.Addr]struct{},
 	self string,
 ) bool {
-	if set.port == 0 {
+	if set.serve == nil {
 		return false
 	}
 
