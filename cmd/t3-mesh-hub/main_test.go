@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -165,5 +167,88 @@ func TestParseServeHelp(t *testing.T) {
 	_, err := parseServe([]string{"-h"})
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("parseServe(-h) = %v, want flag.ErrHelp", err)
+	}
+}
+
+func TestRunAllCleanShutdown(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	block := func(ctx context.Context) error {
+		<-ctx.Done()
+
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := runAll(ctx, log, component{name: "a", run: block}, component{name: "b", run: block})
+	if err != nil {
+		t.Fatalf("runAll = %v, want nil", err)
+	}
+}
+
+func TestRunAllComponentReturnsEarly(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	done := make(chan struct{})
+
+	block := func(ctx context.Context) error {
+		<-ctx.Done()
+		close(done)
+
+		return nil
+	}
+	early := func(context.Context) error { return nil }
+
+	err := runAll(
+		t.Context(), log,
+		component{name: "early", run: early}, component{name: "block", run: block},
+	)
+	if !errors.Is(err, errStopped) {
+		t.Fatalf("runAll = %v, want errStopped", err)
+	}
+
+	<-done
+}
+
+func TestRunAllComponentFailureCancelsOthers(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	want := errArguments
+	done := make(chan struct{})
+
+	block := func(ctx context.Context) error {
+		<-ctx.Done()
+		close(done)
+
+		return nil
+	}
+	fail := func(context.Context) error { return want }
+
+	err := runAll(
+		t.Context(), log,
+		component{name: "fail", run: fail}, component{name: "block", run: block},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("runAll = %v, want %v", err, want)
+	}
+
+	<-done
+}
+
+func TestHTTPResult(t *testing.T) {
+	err := httpResult(":9090", nil)
+	if err != nil {
+		t.Fatalf("httpResult(nil) = %v", err)
+	}
+
+	err = httpResult(":9090", http.ErrServerClosed)
+	if err != nil {
+		t.Fatalf("httpResult(ErrServerClosed) = %v", err)
+	}
+
+	want := errArguments
+
+	err = httpResult(":9090", want)
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), ":9090") {
+		t.Fatalf("httpResult(other) = %v, want wrapped %v", err, want)
 	}
 }

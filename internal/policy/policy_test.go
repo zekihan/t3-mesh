@@ -134,6 +134,47 @@ func TestKindOf(t *testing.T) {
 	}
 }
 
+func TestSplitTarget(t *testing.T) {
+	cases := []struct {
+		target, svc, machine string
+		ok                   bool
+	}{
+		{"t3.devbox", "t3", "devbox", true},
+		{"ssh.z-mac", "ssh", "z-mac", true},
+		{"t3", "", "", false},
+		{"t3.", "", "", false},
+		{".devbox", "", "", false},
+		{".", "", "", false},
+		{"", "", "", false},
+		{"t3.devbox.extra", "", "", false},
+		{"t3..devbox", "", "", false},
+	}
+	for _, tc := range cases {
+		svc, machine, ok := SplitTarget(tc.target)
+		if svc != tc.svc || machine != tc.machine || ok != tc.ok {
+			t.Errorf(
+				"SplitTarget(%q) = %q, %q, %v; want %q, %q, %v",
+				tc.target, svc, machine, ok, tc.svc, tc.machine, tc.ok,
+			)
+		}
+	}
+}
+
+func TestIdentityURI(t *testing.T) {
+	if got := IdentityURI("agent-z-mac"); got != "urn:noqer:mtls:clients:agent-z-mac" {
+		t.Errorf("IdentityURI = %q", got)
+	}
+
+	if got := AgentIdentity("z-mac"); got != "agent-z-mac" {
+		t.Errorf("AgentIdentity = %q", got)
+	}
+
+	name, err := IdentityFromURI(IdentityURI("device-z-phone-mesh"))
+	if err != nil || name != "device-z-phone-mesh" {
+		t.Errorf("round trip = %q, %v", name, err)
+	}
+}
+
 func TestKindsAreDisjoint(t *testing.T) {
 	for _, name := range []string{"agent-device-x-mesh", "device-agent-mesh", "agent-x-mesh"} {
 		if IsAgent(name) && IsDevice(name) {

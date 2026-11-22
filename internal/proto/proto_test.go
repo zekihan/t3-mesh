@@ -44,6 +44,35 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidServiceKind(t *testing.T) {
+	for kind, want := range map[string]bool{
+		KindHTTP: true, KindTCP: true, "": false, "HTTP": false, "udp": false,
+	} {
+		if got := ValidServiceKind(kind); got != want {
+			t.Errorf("ValidServiceKind(%q) = %v, want %v", kind, got, want)
+		}
+	}
+
+	if got := (&StreamHeader{}).ServiceKind(); got != KindHTTP {
+		t.Errorf("empty header kind = %q, want %q", got, KindHTTP)
+	}
+
+	if got := (&StreamHeader{Kind: KindTCP}).ServiceKind(); got != KindTCP {
+		t.Errorf("tcp header kind = %q, want %q", got, KindTCP)
+	}
+}
+
+func TestTunnelALPNs(t *testing.T) {
+	if got := TunnelALPN(ProtocolVersion); got != "t3-mesh/2" {
+		t.Errorf("TunnelALPN = %q", got)
+	}
+
+	got := AcceptedTunnelALPNs()
+	if len(got) != 2 || got[0] != "t3-mesh/2" || got[1] != "t3-mesh/1" {
+		t.Errorf("AcceptedTunnelALPNs = %v", got)
+	}
+}
+
 func TestReadMessageLimit(t *testing.T) {
 	var buf bytes.Buffer
 

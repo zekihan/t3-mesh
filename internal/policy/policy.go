@@ -94,10 +94,12 @@ func Target(svc, machine string) string {
 	return svc + "." + machine
 }
 
-// SplitTarget splits "<svc>.<machine>".
+// SplitTarget splits "<svc>.<machine>". Both parts are single labels, so a
+// target with more than one dot is rejected rather than treated as a machine
+// name containing dots.
 func SplitTarget(target string) (string, string, bool) {
 	svc, machine, ok := strings.Cut(target, ".")
-	if !ok || svc == "" || machine == "" {
+	if !ok || svc == "" || machine == "" || strings.Contains(machine, ".") {
 		return "", "", false
 	}
 

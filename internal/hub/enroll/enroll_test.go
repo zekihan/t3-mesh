@@ -411,6 +411,104 @@ func TestAdminRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdminClientRoundTrip(t *testing.T) {
+	tk := NewTokens(time.Now)
+	path := filepath.Join(t.TempDir(), "admin.sock")
+
+	var disconnected string
+
+	admin := &Admin{
+		Path:   path,
+		Tokens: tk,
+		Allowed: func(_, _ string) error {
+			return nil
+		},
+		Status: func() []MachineStatus {
+			return []MachineStatus{{Name: "devbox", Online: true, Path: "LAN"}}
+		},
+		Disconnect: func(machine string) error {
+			disconnected = machine
+
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	errc := make(chan error, 1)
+
+	go func() { errc <- admin.Serve(ctx) }()
+
+	defer func() {
+		cancel()
+
+		err := <-errc
+		if err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	machines := waitForStatus(ctx, t, path)
+	if len(machines) != 1 || machines[0].Name != "devbox" || !machines[0].Online {
+		t.Fatalf("status = %+v", machines)
+	}
+
+	token, _, err := RequestToken(ctx, path, KindAgent, "agent-devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tokens, err := RequestTokens(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(tokens) != 1 || tokens[0].Identity != "agent-devbox" {
+		t.Fatalf("tokens = %+v", tokens)
+	}
+
+	err = RevokeToken(ctx, path, tokens[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, redeemErr := tk.Redeem(token)
+	if !errors.Is(redeemErr, ErrInvalidToken) {
+		t.Fatalf("redeemed a revoked token: %v", redeemErr)
+	}
+
+	err = Disconnect(ctx, path, "devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if disconnected != "devbox" {
+		t.Fatalf("disconnect machine = %q", disconnected)
+	}
+
+	_, err = RequestStatus(ctx, filepath.Join(t.TempDir(), "missing.sock"))
+	if err == nil {
+		t.Fatal("status through a missing socket succeeded")
+	}
+}
+
+// waitForStatus polls the admin client until the socket answers, as the socket
+// appears asynchronously after Serve starts.
+func waitForStatus(ctx context.Context, t *testing.T, path string) []MachineStatus {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		machines, err := RequestStatus(ctx, path)
+		if err == nil {
+			return machines
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestAdminPreservesNonSocket(t *testing.T) {
 	const content = "config contents\n"
 

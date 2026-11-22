@@ -234,6 +234,7 @@ func TestHostTarget(t *testing.T) {
 		{"t3.devbox.mesh.noqer.com", "devbox", "t3", true},
 		{"T3.Z-Mac.MESH.noqer.com:443", "z-mac", "t3", true},
 		{"t3.devbox.mesh.noqer.com.", "devbox", "t3", true},
+		{"t3.devbox.extra.mesh.noqer.com", "", "", false},
 		{"t3.nope.mesh.noqer.com", "", "", false},
 		{"ssh.devbox.mesh.noqer.com", "", "", false},
 		{"t3.devbox.other.com", "", "", false},
@@ -558,6 +559,53 @@ func TestTrustAndCertErrors(t *testing.T) {
 	_, err = Load(fix.p)
 	if err == nil {
 		t.Error("mismatched key accepted")
+	}
+}
+
+func TestValidateFiles(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	trustPath := filepath.Join(dir, "ca.crt")
+
+	write(t, dir, "config.yaml", goodConfig)
+
+	ca, _ := mkCert(t, true, time.Now().Add(time.Hour))
+	write(t, dir, "ca.crt", string(ca))
+
+	err := ValidateFiles(configPath, "")
+	if err != nil {
+		t.Fatalf("config only: %v", err)
+	}
+
+	err = ValidateFiles(configPath, trustPath)
+	if err != nil {
+		t.Fatalf("config and trust: %v", err)
+	}
+
+	err = ValidateFiles(filepath.Join(dir, "missing.yaml"), "")
+	if err == nil {
+		t.Fatal("missing config accepted")
+	}
+
+	write(t, dir, "config.yaml", "machines: [")
+
+	err = ValidateFiles(configPath, "")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid config: err = %v, want ErrInvalid", err)
+	}
+
+	write(t, dir, "config.yaml", goodConfig)
+
+	err = ValidateFiles(configPath, filepath.Join(dir, "missing.crt"))
+	if err == nil {
+		t.Fatal("missing trust bundle accepted")
+	}
+
+	write(t, dir, "ca.crt", "not pem")
+
+	err = ValidateFiles(configPath, trustPath)
+	if err == nil {
+		t.Fatal("invalid trust bundle accepted")
 	}
 }
 
