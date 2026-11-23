@@ -21,10 +21,11 @@ const (
 	statusTimeFormat = time.RFC3339
 )
 
-// OpsHandler returns the handler for /status, /alerts/<name>, /healthz and
-// /readyz.
+// OpsHandler returns the handler for /status, /alerts/<name>, /healthz,
+// /readyz and /metrics.
 func (server *Server) OpsHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", server.metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		//nolint:errcheck // best-effort response; the client may already be gone
 		_, _ = w.Write([]byte("ok\n"))
@@ -132,11 +133,21 @@ func (server *Server) serveStatus(w http.ResponseWriter, req *http.Request) {
 		doc.ConfigError = err.Error()
 	}
 
+	connected, streams := 0, int64(0)
+
 	server.mu.Lock()
 	for name, mc := range snap.Machines {
-		doc.Machines[name] = server.machineStatusLocked(snap, name, mc, now)
+		status := server.machineStatusLocked(snap, name, mc, now)
+		if status.Connected {
+			connected++
+		}
+
+		streams += status.OpenStreams
+		doc.Machines[name] = status
 	}
 	server.mu.Unlock()
+
+	server.observeMesh(connected, streams)
 
 	w.Header().Set("Content-Type", "application/json")
 
