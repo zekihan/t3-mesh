@@ -71,6 +71,10 @@ func TestOpsMiddlewareCountsByRoute(t *testing.T) {
 			t.Errorf("metrics missing %q:\n%s", want, body)
 		}
 	}
+
+	if strings.Contains(body, `route="unknown"`) {
+		t.Errorf("metrics labels a request unknown:\n%s", body)
+	}
 }
 
 func TestViewerMiddlewareUsesFixedRoute(t *testing.T) {
