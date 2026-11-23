@@ -11,8 +11,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o /rootfs/usr/local/bin/t3-mesh-hub ./cmd/t3-mesh-hub \
     && mkdir -p /rootfs/run/t3-mesh
 
-# The hub listens on 8443 (agents, enrollment), 8080 (viewers) and 9090 (probes
-# and status). /run/t3-mesh holds the admin socket used by `t3-mesh-hub
+# The hub listens on 8443 (agents, enrollment), 8080 (viewers) and 9090 (ops:
+# status, alerts, probes and the internal /metrics endpoint). /run/t3-mesh holds the admin socket used by `t3-mesh-hub
 # enroll-token`; in Kubernetes mount an emptyDir there (with fsGroup 65532 so the
 # nonroot user can write to it). The root filesystem can stay read-only.
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931

@@ -249,14 +249,19 @@ func serve(args []string) error {
 		tunnelLn = proxyproto.Listen(tunnelLn, srv.ProxyHeaderTimeout())
 	}
 
+	// Request counts and durations go to the hub's Prometheus registry by
+	// method, route and status. The viewer proxy serves arbitrary host paths,
+	// so it reports one fixed route instead of raw paths. /metrics itself is
+	// mounted on the ops mux, on the internal-only ops listener.
+	reg := srv.MetricsRegistry()
 	viewer := &http.Server{
 		Addr:              opts.viewerAddr,
-		Handler:           srv.ViewerHandler(),
+		Handler:           reg.MiddlewareWithRoute("viewer", srv.ViewerHandler()),
 		ReadHeaderTimeout: httpHeaderTimeout,
 	}
 	ops := &http.Server{
 		Addr:              opts.opsAddr,
-		Handler:           srv.OpsHandler(),
+		Handler:           reg.Middleware(srv.OpsHandler()),
 		ReadHeaderTimeout: httpHeaderTimeout,
 	}
 	admin := &enroll.Admin{

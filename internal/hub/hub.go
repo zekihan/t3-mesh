@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zekihan/go-commons/metrics"
+
 	"github.com/zekihan/t3-mesh/internal/hub/enroll"
 	"github.com/zekihan/t3-mesh/internal/hub/hubconfig"
 	"github.com/zekihan/t3-mesh/internal/hub/issuer"
@@ -67,6 +69,7 @@ type Options struct {
 // Server is the hub.
 type Server struct {
 	started        time.Time
+	metrics        *metrics.Registry
 	issuer         issuer.Issuer
 	renewals       *renewLimiter
 	deviceKnown    map[string]bool
@@ -105,6 +108,7 @@ func New(opts Options) (*Server, error) {
 
 	server := &Server{
 		cfg:         opts.Config,
+		metrics:     metrics.New(),
 		issuer:      opts.Issuer,
 		tokens:      opts.Tokens,
 		log:         opts.Log,

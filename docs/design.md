@@ -1185,6 +1185,12 @@ conditions and Gatus probes them. Nothing new is added to the cluster for this.
   `agent-<machine>-cert-expiry` (under 14 days), `agent-<machine>-exposed`,
   `agent-<machine>-update-failed`, and
   `stale-config`.
+- **`/metrics`** (Prometheus exposition on the internal-only ops listener,
+  `--ops-addr`, default `:9090`) reports `http_requests_total` and
+  `http_request_duration_seconds` by method, route and status, the aggregate
+  `t3mesh_connected_machines` and `t3mesh_open_streams` gauges, and Go runtime
+  and process metrics. The viewer proxy reports one fixed `viewer` route instead
+  of raw paths, and machine identities never become labels.
 - The hub logs agent events (connect, disconnect, path change, renewal, issued
   fingerprint, update, rollback, reject, rejected peer) to stdout, so they reach
   VictoriaLogs. It logs the same for devices: each token minted with its kind, each

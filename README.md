@@ -159,7 +159,8 @@ with a new token.
 `ghcr.io/zekihan/t3-mesh-hub` (also on Docker Hub): `edge` from `main`, `X.Y.Z` and
 `latest` for releases. The image runs as uid 65532 with a read-only root
 filesystem; mount an `emptyDir` on `/run/t3-mesh` (admin socket) and set
-`fsGroup: 65532`. Ports: 8443 (agents), 8080 (viewers), 9090 (probes). The homelab pins
+`fsGroup: 65532`. Ports: 8443 (agents), 8080 (viewers), 9090 (ops: status,
+alerts, probes and the internal `/metrics` endpoint). The homelab pins
 `edge@sha256:...`.
 
 Run `t3-mesh-hub status`, `tokens`, `tokens revoke <id-prefix>` or
