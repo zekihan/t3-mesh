@@ -352,7 +352,7 @@ func TestT3Compat(t *testing.T) {
 	srv := startT3(t, bin)
 	t.Logf("t3 serve %s on %s", srv.version, srv.addr)
 
-	rig := newDeviceRigOn(t, nil, srv.addr)
+	rig := newDeviceRigOn(t, nil, srv.addr, "t3.b")
 	control := directRoute(srv)
 	routes := []*compatRoute{control, viewerRoute(rig), deviceRoute(rig)}
 
