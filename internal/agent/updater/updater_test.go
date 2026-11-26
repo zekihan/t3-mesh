@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,6 +340,84 @@ func TestProbationManifestFailure(t *testing.T) {
 	}
 }
 
+func TestProbationStalledManifest(t *testing.T) {
+	testEnv := newEnv(t)
+	testEnv.probationLayout(t, "v1.0.0", "v1.1.0")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	opts := testEnv.opts("v1.1.0")
+	opts.Downloader = &release.Downloader{BaseURL: srv.URL, Client: srv.Client()}
+	opts.ProbationTimeout = 2 * time.Second
+
+	updater, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater.HelloAckReceived()
+
+	ctx, cancel := context.WithTimeout(
+		t.Context(),
+		opts.ProbationTimeout+probationManifestTimeout+500*time.Millisecond,
+	)
+	defer cancel()
+
+	err = updater.runProbation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ctx.Err() != nil || updater.OnProbation() || !updater.ReleaseUnconfirmed() ||
+		!testEnv.health.has("fail:release:manifest re-fetch failed") {
+		t.Fatalf("parent error=%v probation=%v unconfirmed=%v msgs=%v",
+			ctx.Err(), updater.OnProbation(), updater.ReleaseUnconfirmed(), testEnv.health.get())
+	}
+}
+
+func TestProbationCountsSlowManifestAttempts(t *testing.T) {
+	testEnv := newEnv(t)
+	testEnv.probationLayout(t, "v1.0.0", "v1.1.0")
+	opts := testEnv.opts("v1.1.0")
+	now := time.Unix(1000, 0)
+	opts.Now = func() time.Time { return now }
+	opts.ProbationTimeout = 8 * time.Second
+	attemptTime := maxTickGap + time.Second
+	opts.Downloader = &release.Downloader{
+		BaseURL: testEnv.srv.URL,
+		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			now = now.Add(attemptTime)
+
+			return nil, context.DeadlineExceeded
+		})},
+	}
+
+	updater, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater.HelloAckReceived()
+
+	start := now
+	prob := &probation{u: updater, last: now}
+
+	now = now.Add(probationTick)
+	if prob.step(t.Context(), now) {
+		t.Fatal("probation concluded before its eligible budget elapsed")
+	}
+
+	now = now.Add(probationTick)
+	if !prob.step(t.Context(), now) || now.Sub(start) > opts.ProbationTimeout+attemptTime ||
+		updater.OnProbation() || !testEnv.health.has("fail:release:manifest re-fetch failed") {
+		t.Fatalf("elapsed=%v eligible=%v probation=%v msgs=%v",
+			now.Sub(start), prob.eligible, updater.OnProbation(), testEnv.health.get())
+	}
+}
+
 func TestProbationSelfTestFailure(t *testing.T) {
 	testEnv := newEnv(t)
 	testEnv.probationLayout(t, "v1.0.0", "v1.1.0")
@@ -391,10 +470,13 @@ func TestProbationEligibleTimeNotCounted(t *testing.T) {
 func TestProbationSleepGapIgnored(t *testing.T) {
 	testEnv := newEnv(t)
 	testEnv.probationLayout(t, "v1.0.0", "v1.1.0")
-	u, _ := New(testEnv.opts("v1.1.0"))
-	prob := &probation{u: u, last: time.Unix(1000, 0)}
 
 	now := time.Unix(1000, 0)
+	opts := testEnv.opts("v1.1.0")
+	opts.Now = func() time.Time { return now }
+	u, _ := New(opts)
+	prob := &probation{u: u, last: now}
+
 	for range 100 {
 		now = now.Add(time.Second)
 		prob.step(t.Context(), now)
@@ -478,6 +560,59 @@ func TestUpdateStagesAndRestarts(t *testing.T) {
 
 	if len(testEnv.health.get()) != 1 {
 		t.Fatal("installed twice")
+	}
+}
+
+func TestUpdateCheckRetriesAfterInstallTimeout(t *testing.T) {
+	testEnv := newEnv(t)
+	newRunning(t, testEnv)
+
+	var stalled atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stalled.CompareAndSwap(false, true) {
+			<-r.Context().Done()
+
+			return
+		}
+
+		testEnv.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	opts := testEnv.opts("v1.0.0")
+	opts.Hooks.LastHelloAck = time.Now
+	opts.InstallTimeout = 250 * time.Millisecond
+	opts.Downloader = &release.Downloader{
+		BaseURL: srv.URL, Client: srv.Client(), Keys: testEnv.dl.Keys,
+	}
+
+	updater, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updater.OnRelease(proto.Release{Version: "v1.2.0", Revision: "r1"})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	updater.check(ctx)
+
+	if !stalled.Load() || ctx.Err() != nil || len(testEnv.health.get()) != 0 {
+		t.Fatalf(
+			"stalled=%v parent error=%v msgs=%v",
+			stalled.Load(),
+			ctx.Err(),
+			testEnv.health.get(),
+		)
+	}
+
+	updater.o.InstallTimeout = defaultInstallTimeout
+	updater.check(t.Context())
+
+	if !testEnv.health.has("restart") {
+		t.Fatalf("retry failed to install: msgs=%v", testEnv.health.get())
 	}
 }
 

@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"aead.dev/minisign"
 )
@@ -18,7 +20,23 @@ import (
 const (
 	binaryMode = 0o755
 	dirMode    = 0o755
+
+	connectTimeout         = 5 * time.Second
+	idleConnTimeout        = 90 * time.Second
+	defaultManifestTimeout = 10 * time.Second
+	defaultBinaryTimeout   = 3 * time.Minute
 )
+
+var defaultDownloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   connectTimeout,
+		ResponseHeaderTimeout: connectTimeout,
+		IdleConnTimeout:       idleConnTimeout,
+	},
+}
 
 var (
 	errManifestVersion = errors.New("manifest is for")
@@ -39,15 +57,23 @@ const (
 )
 
 // Downloader fetches and verifies releases. URLs are built only from BaseURL,
-// a validated version and fixed or signed asset names.
+// a validated version and fixed or signed asset names. With a nil Client,
+// nonpositive timeouts use the built-in defaults.
 type Downloader struct {
-	BaseURL string // default DefaultBaseURL
 	Client  *http.Client
+	BaseURL string               // default DefaultBaseURL
 	Keys    []minisign.PublicKey // default DefaultKeys()
+	// ManifestTimeout bounds the combined manifest and signature requests.
+	ManifestTimeout time.Duration
+	// BinaryTimeout bounds the binary request, including reading its body.
+	BinaryTimeout time.Duration
 }
 
 // Fetch downloads and verifies the manifest of version.
 func (dl *Downloader) Fetch(ctx context.Context, version string) (Manifest, error) {
+	ctx, cancel := dl.withTimeout(ctx, dl.ManifestTimeout, defaultManifestTimeout)
+	defer cancel()
+
 	keys := dl.Keys
 	if keys == nil {
 		var err error
@@ -97,6 +123,9 @@ func (dl *Downloader) Download(
 	if err != nil {
 		return err
 	}
+
+	ctx, cancel := dl.withTimeout(ctx, dl.BinaryTimeout, defaultBinaryTimeout)
+	defer cancel()
 
 	rc, err := dl.open(ctx, man.Version, asset.Name)
 	if err != nil {
@@ -165,7 +194,22 @@ func (dl *Downloader) client() *http.Client {
 		return dl.Client
 	}
 
-	return http.DefaultClient
+	return defaultDownloadClient
+}
+
+func (dl *Downloader) withTimeout(
+	ctx context.Context,
+	timeout, fallback time.Duration,
+) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+
+	if dl.Client == nil {
+		return context.WithTimeout(ctx, fallback)
+	}
+
+	return context.WithCancel(ctx)
 }
 
 func (dl *Downloader) assetURL(version, name string) (string, error) {

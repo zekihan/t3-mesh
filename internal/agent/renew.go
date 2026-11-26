@@ -57,11 +57,11 @@ func (agent *Agent) renewOnce(ctx context.Context) {
 		return
 	}
 
-	if agent.upd != nil && agent.upd.OnProbation() {
+	if agent.upd != nil && agent.upd.ReleaseUnconfirmed() {
 		agent.log.InfoContext(
 			ctx,
 			"Renewal deferred",
-			slog.String("reason", "release on probation"),
+			slog.String("reason", "release awaiting promotion or rollback"),
 		)
 
 		return
