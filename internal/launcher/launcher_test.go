@@ -325,7 +325,14 @@ func TestRollbackScenarios(t *testing.T) {
 		name, behavior, reason, kind string
 		tweak                        func(*Config)
 	}{
-		{"crash", BehaviourCrash, "crash", KindRelease, nil},
+		{
+			"crash",
+			BehaviourCrash,
+			"crash",
+			KindRelease,
+			// Give the child time to start under the race detector on a loaded host.
+			func(c *Config) { c.StartupTimeout = 5 * time.Second },
+		},
 		{
 			"startup",
 			BehaviourSilent,
