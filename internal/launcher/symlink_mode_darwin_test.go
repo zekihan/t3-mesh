@@ -12,29 +12,42 @@ import (
 
 func TestSymlinkMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink("target", path); err != nil {
+
+	err := os.Symlink("target", path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSymlinkMode(path); err != nil {
+
+	err = setSymlinkMode(path)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	checkSymlinkMode(t, path, 0o755)
 }
 
 func TestFixLinkModes(t *testing.T) {
 	lay := Layout{Dir: t.TempDir()}
+
 	for _, name := range []string{linkCurrent, linkKnownGood, linkPreviousGood} {
 		path := filepath.Join(lay.Dir, name)
-		if err := os.Symlink("target", path); err != nil {
+
+		err := os.Symlink("target", path)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := unix.Fchmodat(unix.AT_FDCWD, path, 0o700, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+
+		err = unix.Fchmodat(unix.AT_FDCWD, path, 0o700, unix.AT_SYMLINK_NOFOLLOW)
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := lay.FixLinkModes(); err != nil {
+
+	err := lay.FixLinkModes()
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, name := range []string{linkCurrent, linkKnownGood, linkPreviousGood} {
 		checkSymlinkMode(t, filepath.Join(lay.Dir, name), 0o755)
 	}
@@ -42,10 +55,12 @@ func TestFixLinkModes(t *testing.T) {
 
 func checkSymlinkMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
+
 	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := info.Mode().Perm(); got != want {
 		t.Errorf("%s mode = %o, want %o", path, got, want)
 	}

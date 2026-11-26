@@ -96,35 +96,35 @@ func echoServer(t *testing.T) string {
 }
 
 type env struct {
-	ca   *pkitest.CA
-	a    *node
-	b    *node
-	port int
+	ca *pkitest.CA
+	a  *node
+	b  *node
 }
 
-func newNode(t *testing.T, testEnv *env, name, addr string, serve map[string]string) *node {
+func newNode(t *testing.T, ca *pkitest.CA, name string, port int, serve map[string]string) *node {
 	t.Helper()
 
-	cert, _, _ := testEnv.ca.IssueIdentity(
+	cert, _, _ := ca.IssueIdentity(
 		t,
 		policy.AgentIdentity(name),
 		true,
 		time.Now().Add(time.Hour),
 	)
 	pool := x509.NewCertPool()
-	pool.AddCert(testEnv.ca.Cert)
+	pool.AddCert(ca.Cert)
 
+	loopback := netip.MustParseAddr("127.0.0.1")
 	node := &node{
 		name:  name,
-		addr:  netip.MustParseAddr(addr),
-		addrs: []netip.Addr{netip.MustParseAddr(addr)},
+		addr:  loopback,
+		addrs: []netip.Addr{loopback},
 	}
 	node.view = View{
 		Self: name, Identity: cert, Roots: pool, HubConnected: true, SelfHome: true,
 		HomePrefixes: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 	}
 	node.mgr = New(Options{
-		Port: testEnv.port, CacheTTL: time.Hour, Serve: serve, View: node.get,
+		Port: port, CacheTTL: time.Hour, Serve: serve, View: node.get,
 		Log:        slog.New(slog.DiscardHandler),
 		GatewayMAC: func() (string, error) { return "aa:bb:cc:dd:ee:ff", nil },
 		LocalAddrs: func() ([]netip.Addr, error) {
@@ -143,10 +143,11 @@ func newNode(t *testing.T, testEnv *env, name, addr string, serve map[string]str
 func setup(t *testing.T) *env {
 	t.Helper()
 
-	testEnv := &env{ca: pkitest.NewCA(t, "clients"), port: freePort(t)}
+	testEnv := &env{ca: pkitest.NewCA(t, "clients")}
 	echo := echoServer(t)
-	testEnv.a = newNode(t, testEnv, "a", "127.0.0.1", nil)
-	testEnv.b = newNode(t, testEnv, "b", "127.0.0.2", map[string]string{"t3": echo})
+	port := freePort(t)
+	testEnv.a = newNode(t, testEnv.ca, "a", 0, nil)
+	testEnv.b = newNode(t, testEnv.ca, "b", port, map[string]string{"t3": echo})
 
 	rules := proto.Rules{
 		Allow:        map[string][]string{"t3.b": {"agent-a"}},
@@ -159,8 +160,8 @@ func setup(t *testing.T) *env {
 			{
 				Machine:    "b",
 				Identity:   "agent-b",
-				LANAddrs:   []string{"127.0.0.2"},
-				DirectPort: testEnv.port,
+				LANAddrs:   []string{testEnv.b.addr.String()},
+				DirectPort: port,
 				Home:       true,
 				Services:   []string{"t3"},
 			},
@@ -535,6 +536,8 @@ func TestListenerClosesWhenAddrDisappears(t *testing.T) {
 
 	defer c.Close()
 
+	waitFor(t, "b session registered", func() bool { return testEnv.b.mgr.Sessions() == 1 })
+
 	testEnv.b.setAddrs()
 	testEnv.b.mgr.Reconcile(t.Context())
 
@@ -543,7 +546,7 @@ func TestListenerClosesWhenAddrDisappears(t *testing.T) {
 	}
 
 	// Addresses outside home prefixes are never bound.
-	testEnv.b.setAddrs(netip.MustParseAddr("127.0.0.2"))
+	testEnv.b.setAddrs(testEnv.b.addr)
 	testEnv.b.set(
 		func(v *View) { v.HomePrefixes = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")} },
 	)

@@ -133,7 +133,14 @@ func TestEnrollTokenOverAdminSocket(t *testing.T) {
 	harness := newEnv(t)
 	harness.setConfig(cfgOpts{devices: bothDevices})
 
-	path := filepath.Join(t.TempDir(), "admin.sock")
+	dir, err := os.MkdirTemp("/tmp", "t3mesh-") //nolint:usetesting // short Unix socket path
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	path := filepath.Join(dir, "admin.sock")
 	admin := &enroll.Admin{
 		Path:    path,
 		Tokens:  harness.srv.tokens,
