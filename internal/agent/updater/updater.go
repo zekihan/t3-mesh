@@ -31,6 +31,15 @@ const (
 	probeInterval           = 5 * time.Second
 	probeTimeout            = 3 * time.Second
 	keepVersions            = 1
+
+	probationManifestTimeout = 8 * time.Second
+	defaultInstallTimeout    = 4 * time.Minute
+)
+
+const (
+	probationNone uint32 = iota
+	probationPending
+	probationFailed
 )
 
 // HealthSink is the part of *launcher.Health the updater uses.
@@ -70,6 +79,7 @@ type Options struct {
 	Hooks            Hooks
 	CheckInterval    time.Duration
 	ProbationTimeout time.Duration
+	InstallTimeout   time.Duration
 }
 
 // Updater drives probation and update checks.
@@ -86,7 +96,7 @@ type Updater struct {
 	stopOnce    sync.Once
 	mu          sync.Mutex
 	installMu   sync.Mutex
-	onProbation atomic.Bool
+	probation   atomic.Uint32
 	helloAck    bool
 	outcomeSent bool
 	restarting  bool
@@ -146,21 +156,25 @@ func New(
 	cur, err := opts.Layout.Current()
 	if err == nil {
 		kg, kerr := opts.Layout.KnownGood()
-		if kerr != nil || kg != cur {
-			updater.onProbation.Store(cur == opts.Version)
+		if (kerr != nil || kg != cur) && cur == opts.Version {
+			updater.probation.Store(probationPending)
+			updater.log.Info("Running on probation", slog.String("version", opts.Version))
 		}
-	}
-
-	if updater.onProbation.Load() {
-		updater.log.Info("Running on probation", slog.String("version", opts.Version))
 	}
 
 	return updater, nil
 }
 
-// OnProbation reports whether the running binary is on probation. The agent
-// core must not renew certificates or write new state formats while true.
-func (updater *Updater) OnProbation() bool { return updater.onProbation.Load() }
+// OnProbation reports whether the running release is awaiting a probation outcome.
+func (updater *Updater) OnProbation() bool {
+	return updater.probation.Load() == probationPending
+}
+
+// ReleaseUnconfirmed reports whether the running release is on probation or
+// awaiting rollback. Keep certificate renewal and updates gated until promotion.
+func (updater *Updater) ReleaseUnconfirmed() bool {
+	return updater.probation.Load() != probationNone
+}
 
 // Close stops the liveness goroutine.
 func (updater *Updater) Close() { updater.stopOnce.Do(func() { close(updater.stop) }) }
@@ -219,7 +233,7 @@ func (updater *Updater) OnRelease(rel proto.Release) {
 // OnReject handles a hub Reject. One naming the version on probation is a
 // release failure.
 func (updater *Updater) OnReject(reject proto.Reject) {
-	if reject.Version == "" || reject.Version != updater.o.Version || !updater.onProbation.Load() {
+	if reject.Version == "" || reject.Version != updater.o.Version || !updater.OnProbation() {
 		return
 	}
 
@@ -259,14 +273,14 @@ func (updater *Updater) LastAppliedRelease() string {
 func (updater *Updater) Run(ctx context.Context) error {
 	defer updater.Close()
 
-	if updater.onProbation.Load() {
+	if updater.OnProbation() {
 		err := updater.runProbation(ctx)
 		if err != nil {
 			return err
 		}
 	}
 
-	if !updater.onProbation.Load() {
+	if !updater.ReleaseUnconfirmed() {
 		return updater.runChecks(ctx)
 	}
 
@@ -292,7 +306,11 @@ func (updater *Updater) failProbation(reason, kind string) {
 	err := updater.o.Health.Fail(reason, kind)
 	if err != nil {
 		updater.log.Error("Send fail", slog.Any("err", err))
+
+		return
 	}
+
+	updater.probation.Store(probationFailed)
 }
 
 func (updater *Updater) promote() {
@@ -313,7 +331,7 @@ func (updater *Updater) promote() {
 		return
 	}
 
-	updater.onProbation.Store(false)
+	updater.probation.Store(probationNone)
 	updater.log.Info("Probation passed, promoted", slog.String("version", updater.o.Version))
 
 	err = updater.o.Layout.Prune(keepVersions)
@@ -401,6 +419,8 @@ func (prob *probation) step(ctx context.Context, now time.Time) bool {
 		return false
 	}
 
+	workStarted := updater.o.Now()
+
 	if !prob.haveProbe || now.Sub(prob.lastProbe) >= probeInterval {
 		prob.haveProbe, prob.lastProbe = true, now
 		prob.handshake = false
@@ -417,6 +437,11 @@ func (prob *probation) step(ctx context.Context, now time.Time) bool {
 	if netUp && prob.handshake {
 		prob.eligible += dt
 		prob.work(ctx)
+		// Charge active checks to probation, then measure the next idle gap from
+		// the end of this work. Now includes a monotonic clock in production.
+		elapsed := max(0, updater.o.Now().Sub(workStarted))
+		prob.eligible += elapsed
+		prob.last = prob.last.Add(elapsed)
 
 		if prob.complete() {
 			updater.promote()
@@ -448,7 +473,11 @@ func (prob *probation) work(ctx context.Context) {
 	}
 
 	if !prob.manifestOK {
-		_, err := updater.o.Downloader.Fetch(ctx, updater.o.Version)
+		fctx, cancel := context.WithTimeout(ctx, probationManifestTimeout)
+		_, err := updater.o.Downloader.Fetch(fctx, updater.o.Version)
+
+		cancel()
+
 		prob.manifestEr, prob.manifestOK = err, err == nil
 	}
 
@@ -516,7 +545,7 @@ func (updater *Updater) check(ctx context.Context) {
 	rel, restarting := updater.rel, updater.restarting
 	updater.mu.Unlock()
 
-	if rel == nil || restarting || updater.onProbation.Load() {
+	if rel == nil || restarting || updater.ReleaseUnconfirmed() {
 		return
 	}
 
@@ -566,6 +595,14 @@ func (updater *Updater) check(ctx context.Context) {
 }
 
 func (updater *Updater) install(ctx context.Context, rel proto.Release) error {
+	timeout := updater.o.InstallTimeout
+	if timeout <= 0 {
+		timeout = defaultInstallTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	version := rel.Version
 	updater.log.InfoContext(ctx, "Fetching manifest", slog.String("version", version))
 
@@ -628,6 +665,11 @@ func (updater *Updater) stageUpdate(
 	updater.mu.Lock()
 	defer updater.mu.Unlock()
 
+	err := ctx.Err()
+	if err != nil {
+		return false, fmt.Errorf("stage update: %w", err)
+	}
+
 	version := rel.Version
 	if *updater.rel != rel {
 		updater.log.InfoContext(
@@ -641,7 +683,7 @@ func (updater *Updater) stageUpdate(
 
 	updater.log.InfoContext(ctx, "Staging", slog.String("version", version))
 
-	err := updater.o.Layout.Stage(version, tmp)
+	err = updater.o.Layout.Stage(version, tmp)
 	if err != nil {
 		return false, fmt.Errorf("stage: %w", err)
 	}
