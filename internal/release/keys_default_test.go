@@ -8,7 +8,7 @@ func TestDefaultKeysParse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(keys) != 2 {
-		t.Fatalf("got %d trusted keys, want current and next", len(keys))
+	if len(keys) != 1 {
+		t.Fatalf("got %d trusted keys, want one", len(keys))
 	}
 }

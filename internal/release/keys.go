@@ -11,14 +11,13 @@ import (
 
 var errNoTrustedKeys = errors.New("no trusted keys")
 
-// TrustedKeys are the compiled-in minisign public keys (current and next), as
+// TrustedKeys are the compiled-in minisign public keys, as
 // the base64 line of a minisign .pub file. The secret keys live in the secrets
 // repo; only the current one is published to the release environment. They can
 // be overridden at link time with
 // -ldflags "-X github.com/zekihan/t3-mesh/internal/release.TrustedKeysOverride=KEY1,KEY2".
 var TrustedKeys = []string{
-	"RWSuH7hKFzrHllyAqrcNnHVjW62f78ww0QT41r5DPN9IjYdUGW+qo+/b", // current
-	"RWRi07AlTNy6baC9guJDb7eWVhlxPlp488bq00gSEtXrkabHKL6jZXWx", // next
+	"RWRi07AlTNy6baC9guJDb7eWVhlxPlp488bq00gSEtXrkabHKL6jZXWx", // current
 }
 
 // TrustedKeysOverride, when non-empty, is a comma-separated key list that
