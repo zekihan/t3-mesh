@@ -18,7 +18,7 @@ var errNoTrustedKeys = errors.New("no trusted keys")
 // -ldflags "-X github.com/zekihan/t3-mesh/internal/release.TrustedKeysOverride=KEY1,KEY2".
 var TrustedKeys = []string{
 	"RWSuH7hKFzrHllyAqrcNnHVjW62f78ww0QT41r5DPN9IjYdUGW+qo+/b", // current
-	"RWTb4CtofVDWgPVgNaDdePCWn1YIvM0dm6Hz5X804weWwxo5sWBtUsTl", // next
+	"RWRi07AlTNy6baC9guJDb7eWVhlxPlp488bq00gSEtXrkabHKL6jZXWx", // next
 }
 
 // TrustedKeysOverride, when non-empty, is a comma-separated key list that
