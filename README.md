@@ -208,12 +208,13 @@ Reruns are safe: a published release is left alone if its manifest is identical.
 
 ## Signing key
 
-Agents trust the minisign public keys compiled into
-`internal/release/keys.go` (current and next). Both secret keys are stored in the
-secrets repo; homelab `terraform/git` publishes only the current one to the
-`release` environment as `MINISIGN_SECRET_KEY`. To rotate, publish the next key
-as `MINISIGN_SECRET_KEY_NEXT` so manifests are dual-signed, then follow the
-rotation steps in `docs/design.md`.
+Agents trust the minisign public keys compiled into `internal/release/keys.go`.
+The active signing key is stored in the secrets repo, and homelab
+`terraform/git` publishes it to the `release` environment as `MINISIGN_SECRET_KEY`.
+To rotate, sign a transition release that trusts both keys with the current key.
+After the hub confirms that every deployed agent is running the transition
+release, switch `MINISIGN_SECRET_KEY` to the replacement and publish a release
+that trusts only the replacement key.
 
 The keys are passwordless (the secrets store encrypts them at rest); the
 workflow also accepts `MINISIGN_PASSWORD` / `MINISIGN_PASSWORD_NEXT` for encrypted
